@@ -242,8 +242,14 @@ fn compress[&st, &b, &w](state: &!st [int], block: &b [byte], w: &!w [int]) -> [
     while t < 64 {
         let x = w[t - 15];
         let y = w[t - 2];
-        let s0 = ((x >> 7 | x << 25) ^ (x >> 18 | x << 14) ^ x >> 3) & 0xffffffff;
-        let s1 = ((y >> 17 | y << 15) ^ (y >> 19 | y << 13) ^ y >> 10) & 0xffffffff;
+        // A 32-bit word written twice, `x << 32 | x`, holds every rotation of
+        // itself: the low 32 bits of `dx >> n` are `x` rotated right by `n`.
+        // One shift and a shared mask per rotation instead of two shifts, an
+        // or and a mask -- the language has no 32-bit type to rotate.
+        let dx = x << 32 | x;
+        let dy = y << 32 | y;
+        let s0 = (dx >> 7 ^ dx >> 18) & 0xffffffff ^ x >> 3;
+        let s1 = (dy >> 17 ^ dy >> 19) & 0xffffffff ^ y >> 10;
         w[t] = wrapping_add(wrapping_add(w[t - 16], s0), wrapping_add(w[t - 7], s1)) & 0xffffffff;
         t = t + 1;
     }
@@ -257,25 +263,84 @@ fn compress[&st, &b, &w](state: &!st [int], block: &b [byte], w: &!w [int]) -> [
     var wg = state[6];
     var wh = state[7];
 
+    // Eight rounds per pass, each writing its two results into the variable
+    // that is already where the next round reads it, so the eight-way shuffle
+    // of the working variables (eight moves a round) is a renaming instead.
     t = 0;
     while t < 64 {
-        let s1 = ((we >> 6 | we << 26) ^ (we >> 11 | we << 21) ^ (we >> 25 | we << 7)) & 0xffffffff;
-        let ch = we & wf ^ ~we & wg;
-        let temp1 = wrapping_add(wrapping_add(wrapping_add(wh, s1), wrapping_add(ch, sha256_k[t])), w[t]);
-        let s0 = ((wa >> 2 | wa << 30) ^ (wa >> 13 | wa << 19) ^ (wa >> 22 | wa << 10)) & 0xffffffff;
-        let maj = wa & wb ^ wa & wc ^ wb & wc;
-        let temp2 = wrapping_add(s0, maj);
-
-        wh = wg;
-        wg = wf;
-        wf = we;
-        we = wrapping_add(wd, temp1) & 0xffffffff;
-        wd = wc;
-        wc = wb;
-        wb = wa;
-        wa = wrapping_add(temp1, temp2) & 0xffffffff;
-
-        t = t + 1;
+        let e0 = we << 32 | we;
+        let s1_0 = (e0 >> 6 ^ e0 >> 11 ^ e0 >> 25) & 0xffffffff;
+        let ch0 = we & wf ^ ~we & wg;
+        let t1_0 = wrapping_add(wrapping_add(wrapping_add(wh, s1_0), wrapping_add(ch0, sha256_k[t + 0])), w[t + 0]);
+        let a0 = wa << 32 | wa;
+        let s0_0 = (a0 >> 2 ^ a0 >> 13 ^ a0 >> 22) & 0xffffffff;
+        let maj0 = wa & wb ^ wa & wc ^ wb & wc;
+        wd = wrapping_add(wd, t1_0) & 0xffffffff;
+        wh = wrapping_add(t1_0, wrapping_add(s0_0, maj0)) & 0xffffffff;
+        let e1 = wd << 32 | wd;
+        let s1_1 = (e1 >> 6 ^ e1 >> 11 ^ e1 >> 25) & 0xffffffff;
+        let ch1 = wd & we ^ ~wd & wf;
+        let t1_1 = wrapping_add(wrapping_add(wrapping_add(wg, s1_1), wrapping_add(ch1, sha256_k[t + 1])), w[t + 1]);
+        let a1 = wh << 32 | wh;
+        let s0_1 = (a1 >> 2 ^ a1 >> 13 ^ a1 >> 22) & 0xffffffff;
+        let maj1 = wh & wa ^ wh & wb ^ wa & wb;
+        wc = wrapping_add(wc, t1_1) & 0xffffffff;
+        wg = wrapping_add(t1_1, wrapping_add(s0_1, maj1)) & 0xffffffff;
+        let e2 = wc << 32 | wc;
+        let s1_2 = (e2 >> 6 ^ e2 >> 11 ^ e2 >> 25) & 0xffffffff;
+        let ch2 = wc & wd ^ ~wc & we;
+        let t1_2 = wrapping_add(wrapping_add(wrapping_add(wf, s1_2), wrapping_add(ch2, sha256_k[t + 2])), w[t + 2]);
+        let a2 = wg << 32 | wg;
+        let s0_2 = (a2 >> 2 ^ a2 >> 13 ^ a2 >> 22) & 0xffffffff;
+        let maj2 = wg & wh ^ wg & wa ^ wh & wa;
+        wb = wrapping_add(wb, t1_2) & 0xffffffff;
+        wf = wrapping_add(t1_2, wrapping_add(s0_2, maj2)) & 0xffffffff;
+        let e3 = wb << 32 | wb;
+        let s1_3 = (e3 >> 6 ^ e3 >> 11 ^ e3 >> 25) & 0xffffffff;
+        let ch3 = wb & wc ^ ~wb & wd;
+        let t1_3 = wrapping_add(wrapping_add(wrapping_add(we, s1_3), wrapping_add(ch3, sha256_k[t + 3])), w[t + 3]);
+        let a3 = wf << 32 | wf;
+        let s0_3 = (a3 >> 2 ^ a3 >> 13 ^ a3 >> 22) & 0xffffffff;
+        let maj3 = wf & wg ^ wf & wh ^ wg & wh;
+        wa = wrapping_add(wa, t1_3) & 0xffffffff;
+        we = wrapping_add(t1_3, wrapping_add(s0_3, maj3)) & 0xffffffff;
+        let e4 = wa << 32 | wa;
+        let s1_4 = (e4 >> 6 ^ e4 >> 11 ^ e4 >> 25) & 0xffffffff;
+        let ch4 = wa & wb ^ ~wa & wc;
+        let t1_4 = wrapping_add(wrapping_add(wrapping_add(wd, s1_4), wrapping_add(ch4, sha256_k[t + 4])), w[t + 4]);
+        let a4 = we << 32 | we;
+        let s0_4 = (a4 >> 2 ^ a4 >> 13 ^ a4 >> 22) & 0xffffffff;
+        let maj4 = we & wf ^ we & wg ^ wf & wg;
+        wh = wrapping_add(wh, t1_4) & 0xffffffff;
+        wd = wrapping_add(t1_4, wrapping_add(s0_4, maj4)) & 0xffffffff;
+        let e5 = wh << 32 | wh;
+        let s1_5 = (e5 >> 6 ^ e5 >> 11 ^ e5 >> 25) & 0xffffffff;
+        let ch5 = wh & wa ^ ~wh & wb;
+        let t1_5 = wrapping_add(wrapping_add(wrapping_add(wc, s1_5), wrapping_add(ch5, sha256_k[t + 5])), w[t + 5]);
+        let a5 = wd << 32 | wd;
+        let s0_5 = (a5 >> 2 ^ a5 >> 13 ^ a5 >> 22) & 0xffffffff;
+        let maj5 = wd & we ^ wd & wf ^ we & wf;
+        wg = wrapping_add(wg, t1_5) & 0xffffffff;
+        wc = wrapping_add(t1_5, wrapping_add(s0_5, maj5)) & 0xffffffff;
+        let e6 = wg << 32 | wg;
+        let s1_6 = (e6 >> 6 ^ e6 >> 11 ^ e6 >> 25) & 0xffffffff;
+        let ch6 = wg & wh ^ ~wg & wa;
+        let t1_6 = wrapping_add(wrapping_add(wrapping_add(wb, s1_6), wrapping_add(ch6, sha256_k[t + 6])), w[t + 6]);
+        let a6 = wc << 32 | wc;
+        let s0_6 = (a6 >> 2 ^ a6 >> 13 ^ a6 >> 22) & 0xffffffff;
+        let maj6 = wc & wd ^ wc & we ^ wd & we;
+        wf = wrapping_add(wf, t1_6) & 0xffffffff;
+        wb = wrapping_add(t1_6, wrapping_add(s0_6, maj6)) & 0xffffffff;
+        let e7 = wf << 32 | wf;
+        let s1_7 = (e7 >> 6 ^ e7 >> 11 ^ e7 >> 25) & 0xffffffff;
+        let ch7 = wf & wg ^ ~wf & wh;
+        let t1_7 = wrapping_add(wrapping_add(wrapping_add(wa, s1_7), wrapping_add(ch7, sha256_k[t + 7])), w[t + 7]);
+        let a7 = wb << 32 | wb;
+        let s0_7 = (a7 >> 2 ^ a7 >> 13 ^ a7 >> 22) & 0xffffffff;
+        let maj7 = wb & wc ^ wb & wd ^ wc & wd;
+        we = wrapping_add(we, t1_7) & 0xffffffff;
+        wa = wrapping_add(t1_7, wrapping_add(s0_7, maj7)) & 0xffffffff;
+        t = t + 8;
     }
 
     state[0] = mask32(state[0] + wa);

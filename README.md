@@ -1,15 +1,16 @@
 # lexsys-tools
 
-Seven small command-line tools for AI agents, written in
+Eight small command-line tools for AI agents, written in
 [lex-sys](https://github.com/alpibrusl/lex-sys). They do the everyday work
-of `grep`, `sed -n`, `jq`, `sort | uniq -c`, `sha256sum` and a careful
-`cp`, but every answer is JSON, every error names a rule and often comes
+of `grep`, `ls`/`find`, `sed -n`, `jq`, `sort | uniq -c`, `sha256sum` and a
+careful `cp`, but every answer is JSON, every error names a rule and often comes
 with a command that fixes it, and every binary carries the exact authority
 the compiler proved it needs.
 
 | Tool | Instead of | Does |
 |---|---|---|
 | [`seek`](#seek-search) | `grep -F -n -b` | literal search over files, a stream of matches |
+| [`list`](#list-whats-in-a-directory) | `ls`, `find`, `tree` | the entries beneath a directory, sorted, depth-bounded, links never followed |
 | [`peek`](#peek-read-part-of-a-file) | `sed -n`, `head`, `tail`, `wc -l` | a range of lines or bytes, with numbers and a cursor |
 | [`jsonq`](#jsonq-one-value-from-a-json-document) | `jq -c` | one value from one strict JSON document, by RFC 6901 pointer |
 | [`tally`](#tally-count-distinct-lines-or-fields) | `sort \| uniq -c \| sort -rn` | distinct lines or fields, counted and ranked |
@@ -152,6 +153,35 @@ Other flags:
 * `-i` ignores ASCII case.
 * `--require-match` makes no match an error (exit 8).
 * `--format text` prints `path:line:text` for a person; it is lossy, so do not parse it.
+
+### `list`: what's in a directory
+
+```console
+$ list --root . --depth 2
+{"type":"entry","path":"NOTES.md","kind":"file","depth":1}
+{"type":"entry","path":"access.log","kind":"file","depth":1}
+{"type":"entry","path":"leak.txt","kind":"link","depth":1}
+{"type":"entry","path":"package.json","kind":"file","depth":1}
+{"type":"entry","path":"src","kind":"directory","depth":1}
+{"type":"entry","path":"src/main.rs","kind":"file","depth":2}
+{"type":"end","ok":true,"command":"list","schema":"list.v1","complete":true,"entries":6,"errors":0,"truncated":false,"next":null}
+
+$ list --root . --depth 2 --long --format text
+6	1791143221	NOTES.md
+56	1791143215	access.log
+16	1791143215	leak.txt
+92	1791143215	package.json
+4096	1791143221	src/
+125	1791143221	src/main.rs
+```
+
+* **Order.** Each directory's names come out sorted bytewise, depth first, so two runs print the same bytes.
+* **Links.** A link is listed as `link` and never entered, so nothing outside `--root` shows up.
+* **Bounds.** `--depth` (default 1, at most 64) and `--max-entries` (default 10000) cap the walk, and a capped run
+  answers `next: {"skip": N}` to resume with `--skip N`.
+* **Detail.** `--long` adds each entry's size and modification time, without following links.
+* **Errors.** A directory it cannot read is an error record, and the walk goes on, as `find`'s does.
+* **Authority.** `list` holds no `file_read` at all: it never opens a file.
 
 ### `peek`: read part of a file
 
@@ -310,7 +340,7 @@ Each binary embeds the effects the compiler derived from its source;
 `introspect` prints them under `authority`. No tool can use the network, a
 clock, foreign code or the environment.
 
-* The five readers hold only read labels.
+* The six readers hold only read labels, and `list` not even `file_read`.
 * `write` and `replace` can write only beneath a directory they opened
   (`dir_write`), never to an arbitrary path: no tool holds `fs_write`.
 * The ceilings are reviewed in [`tools.toml`](tools.toml), and CI fails if
@@ -318,7 +348,8 @@ clock, foreign code or the environment.
 
 | Tool | Authority |
 |---|---|
-| `seek`, `peek`, `hash` | `args, dir_read, err_write, file_read, fs_read(""), heap, io_write` |
+| `list` | `args, dir_read, err_write, fs_read(""), heap, io_write` |
+| `seek`, `peek`, `hash` | the same, plus `file_read` |
 | `jsonq`, `tally` | the same, plus `io_read` (they also read standard input) |
 | `replace` | `args, dir_read, dir_write, err_write, file_read, file_write, fs_read(""), heap, io_write` |
 | `write` | the same as `replace`, plus `io_read` |
@@ -352,6 +383,7 @@ A 64 MiB text file, through a pipe, minimum of 7 interleaved rounds
 | `peek --count-lines --lines 1:100` | **0.08 s** | `sed -n 1,100p; wc -l` 0.13 s |
 | `tally --field 1` | **0.16 s** | `cut \| sort \| uniq -c \| sort \| head` 0.68 s |
 | `jsonq -p /0`, 16 MiB array | **0.14 s** | `jq -c .[0]` 0.73 s |
+| `list`, one directory of 100,000 files | **0.144 s** | `find -printf` 0.146 s, `ls -1` 0.154 s |
 
 * `sha256sum`'s lead is OpenSSL's hand-written vector assembly, which
   lex-sys has no way to express.
@@ -400,7 +432,7 @@ The conformance gates check:
 * byte-for-byte determinism;
 * that every rule is reached and every `retry` repair works;
 * fault injection with zero crashes;
-* differential agreement with `grep`, `sed`, `jq`, `sha256sum`, `sort | uniq -c` and `cp`;
+* differential agreement with `grep`, `find`, `sed`, `jq`, `sha256sum`, `sort | uniq -c` and `cp`;
 * authority;
 * dry-run and race behaviour under `strace`;
 * confinement, including symlinks;
@@ -410,13 +442,14 @@ Results are in [`docs/history.md`](docs/history.md).
 
 ## Status and limits
 
-* **Done:** all seven tools, the contract, the authority gate, the
-  benchmark harness, symlink-safe `--root`.
-* **Not yet:** a `list` tool. It needs directory listing in lex-sys
-  ([lex-sys#222](https://github.com/alpibrusl/lex-sys/issues/222)), and so
-  does recursive `seek`. Moving SHA-256 into the lex-sys standard library
+* **Done:** all eight tools, the contract, the authority gate, the
+  benchmark harness, symlink-safe `--root`, and `list` on lex-sys's directory
+  listing ([lex-sys#222](https://github.com/alpibrusl/lex-sys/issues/222)).
+* **Not yet:** `seek` over a directory (it takes named files; `list` then
+  `seek` is the pattern for now). Moving SHA-256 into the lex-sys standard library
   ([#219](https://github.com/alpibrusl/lex-sys/issues/219)) and the lex-os
   bridge that would enforce these authorities at run time are also not done.
+  Open work is tracked in [issues](https://github.com/alpibrusl/lexsys-tools/issues).
 * **Not claimed:** that agents do better with these tools than with the
   incumbents. That needs an agent-in-the-loop evaluation
   ([lex-sys#228](https://github.com/alpibrusl/lex-sys/issues/228)) that has

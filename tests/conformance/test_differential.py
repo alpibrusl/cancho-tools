@@ -189,6 +189,51 @@ class Differential(unittest.TestCase):
             w = subprocess.run([binary("write"), "--create", "--stdin", str(via_stdin)], input=data, capture_output=True)
             self.assertEqual(via_stdin.read_bytes(), data, name)
 
+    def test_list_agrees_with_find(self):
+        """`list --long` over a random tree equals `find -printf` at every
+        depth: the same paths, kinds, sizes and whole-second times. `list`'s
+        order is each directory sorted bytewise, depth first, which is checked
+        directly; `find`'s order is the kernel's, so it is compared as a set."""
+        r = rng(7)
+        root = self.fx.dir / "tree"
+        root.mkdir()
+        dirs = [root]
+        for i in range(400):
+            parent = r.choice(dirs)
+            name = r.choice(["a", "b", "B", "-x", "x y", "z.txt", "0", "\u00e9t\u00e9", "dir"]) + str(i % 37)
+            path = parent / name
+            if path.exists():
+                continue
+            pick = r.random()
+            if pick < 0.25 and len(path.relative_to(root).parts) < 5:
+                path.mkdir()
+                dirs.append(path)
+            elif pick < 0.3:
+                os.symlink(r.choice(["nowhere", "..", "a1"]), path)
+            else:
+                path.write_bytes(os.urandom(r.randrange(0, 3000)))
+        kinds = {"f": "file", "d": "directory", "l": "link"}
+        for depth in (1, 2, 3, 64):
+            out = subprocess.run([binary("list"), "--root", str(root), "--depth", str(depth), "--long", "--max-entries", "1000000"],
+                                 capture_output=True)
+            self.assertEqual(out.returncode, 0, out.stdout[-300:])
+            records = [json.loads(l) for l in out.stdout.splitlines()]
+            entries = [x for x in records if x["type"] == "entry"]
+            ours = sorted((e["path"], e["kind"], e["size"], e["mtime"]) for e in entries)
+            found = subprocess.run(["find", str(root), "-mindepth", "1", "-maxdepth", str(depth), "-printf", "%P\t%y\t%s\t%T@\n"],
+                                   capture_output=True, text=True).stdout
+            theirs = sorted((p, kinds.get(y, "other"), int(size), int(float(t)))
+                            for p, y, size, t in (line.split("\t") for line in found.splitlines()))
+            self.assertEqual(ours, theirs, "--depth %d" % depth)
+            # The order: within each directory, names ascend bytewise.
+            seen = {}
+            for e in entries:
+                parent, _, name = e["path"].rpartition("/")
+                last = seen.get(parent)
+                if last is not None:
+                    self.assertLess(last.encode(), name.encode(), e["path"])
+                seen[parent] = name
+
     def test_tally_agrees_with_sort_uniq(self):
         r = rng(self.seed + 5)
         keys = [b"a", b"b", b"ab", b"B", b"\xff", b"\xc3\xa9", b"a b", b"zz", b"a\x01"]

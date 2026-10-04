@@ -59,6 +59,7 @@ NEAR = {
     "jsonq": (["--keyz", "doc.json"], "--keys"),
     "tally": (["--tops", "2", "words.txt"], "--top"),
     "hash": (["--alg", "sha512", "plain.txt"], "--algo"),
+    "list": (["--dept", "2", "sub"], "--depth"),
 }
 
 # A valid invocation per tool whose PATH operand (or one of them) is `X`,
@@ -71,10 +72,11 @@ WITH_PATH = {
     "jsonq": ["X"],
     "tally": ["X"],
     "hash": ["X"],
+    "list": ["X"],
 }
 
 # A boolean flag per tool, for args.unexpected-value.
-BOOL = {"seek": "--require-match", "write": "--dry-run", "replace": "--dry-run", "peek": "--count-lines", "jsonq": "--keys"}
+BOOL = {"seek": "--require-match", "write": "--dry-run", "replace": "--dry-run", "peek": "--count-lines", "jsonq": "--keys", "list": "--long"}
 
 
 def fixtures(fx):
@@ -94,8 +96,8 @@ def fixtures(fx):
         base = WITH_PATH[tool]
         # The file a valid call of this tool names: one that exists and suits
         # it, or for `write` one that does not exist yet.
-        good = {"jsonq": "doc.json", "write": "fresh.txt"}.get(tool, "plain.txt")
-        form = "ndjson" if tool in ("seek", "hash") else "json"
+        good = {"jsonq": "doc.json", "write": "fresh.txt", "list": "sub"}.get(tool, "plain.txt")
+        form = "ndjson" if tool in ("seek", "hash", "list") else "json"
 
         def at(name):
             return [a.replace("X", name) for a in base]
@@ -115,6 +117,12 @@ def fixtures(fx):
         if tool != "write":
             add(tool, "io.not-found", at("missing.txt"))
         add(tool, "io.not-a-directory", at("plain.txt/x"))
+        if tool == "list":
+            # A lister reads directories: a file is not one, and an unreadable
+            # directory is the refusal; nothing it opens is read as a file.
+            add(tool, "io.permission-denied", at("sub"), preexec=as_nobody,
+                setup=lambda: os.chmod(fx.root / "sub", 0))
+            continue
         add(tool, "io.is-a-directory", at("sub"))
         add(tool, "io.permission-denied", at("plain.txt"), preexec=as_nobody,
             setup=lambda: os.chmod(fx.root / "plain.txt", 0))

@@ -1,6 +1,6 @@
 [package]
 name = "lexsys-tools"
-lex-sys = "066a810f226e8a1c0e4db0f5b5de83e4ddcec803"   # the compiler these sources were written for
+lex-sys = "5f98b9700e5b80740790e8031a9b25f8527e2e6c"   # the compiler these sources were written for
 
 # One program per tool (D17): a program's authority is the union of what its
 # main reaches, so a multi-call binary would report every tool's row for every
@@ -48,6 +48,12 @@ name = "hash"
 sources = ["contract", "tools/hash", "generated/hash"]
 std = true
 out = "build/hash"
+
+[[bin]]
+name = "list"
+sources = ["contract", "tools/list", "generated/list"]
+std = true
+out = "build/list"
 
 [[test]]
 name = "sha"

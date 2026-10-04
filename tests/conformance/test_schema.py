@@ -36,6 +36,9 @@ def corpus(fx):
     for args in [["--root", r, "plain.txt", "nul.bin", "empty.txt"], ["--root", r, "--algo", "sha512", "plain.txt"], ["--root", r, "--verify", "0" * 64, "plain.txt"],
                  ["--root", r, "--verify", "x", "plain.txt"], ["--root", r, "sub", "missing"], []]:
         out.append(("hash", args, b""))
+    for args in [["--root", r], ["--root", r, "--depth", "3", "--long"], ["--root", r, "--max-entries", "2"], ["--root", r, "--max-entries", "2", "--skip", "2"],
+                 ["--root", r, "sub", "plain.txt", "missing"], ["--root", r, "link.txt"], ["--root", r, "--depth", "0"]]:
+        out.append(("list", args, b""))
     for args in [["--root", r, "--dry-run", "--create", "--stdin", "new.txt"], ["--root", r, "--stdin", "plain.txt"], ["--root", r, "--create", "--stdin", "plain.txt"],
                  ["--root", r, "--if-sha256", "0" * 64, "--stdin", "plain.txt"], ["--root", r, "--create", "--if-sha256", "0" * 64, "--stdin", "x"]]:
         out.append(("write", args, b"new content\n"))

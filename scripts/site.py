@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash"]
+TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list"]
 REPO = "https://github.com/alpibrusl/lexsys-tools"
 
 CSS = """

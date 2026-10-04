@@ -144,6 +144,16 @@ SCHEMAS = {
                      "hex": {"type": "string", "pattern": "^([0-9a-f]{64}|[0-9a-f]{128})$"},
                      "bytes": NAT}),
     }, {"files": NAT, "errors": NAT}),
+    "list": stream("list", {
+        "entry": obj({"type": {"const": "entry"}, "path": TB,
+                      "kind": {"enum": ["file", "directory", "link", "other", "unknown"]},
+                      "depth": {"type": "integer", "minimum": 1},
+                      "size": NAT, "mtime": {"type": "integer"}},
+                     required=["type", "path", "kind", "depth"]),
+    }, {
+        "entries": NAT, "errors": NAT, "truncated": {"type": "boolean"},
+        "next": {"oneOf": [{"type": "null"}, obj({"skip": NAT})]},
+    }),
     "write": document("write", obj({
         "path": TB, "changed": {"type": "boolean"}, "created": {"type": "boolean"}, "bytes": NAT,
         "before_sha256": {"oneOf": [{"type": "null"}, HEX64]}, "after_sha256": HEX64,

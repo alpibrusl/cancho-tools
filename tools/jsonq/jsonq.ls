@@ -33,11 +33,11 @@ import toolbox.path;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve FILE relative to this directory and refuse paths outside it;pointer|p|any|none||the JSON Pointer (RFC 6901) to look up; empty is the whole document;keys||bool|none||answer the keys of the object at the pointer, in document order;length||bool|none||answer the number of elements, pairs, or bytes of a string at the pointer;type||bool|none||answer only the kind of the value at the pointer;exists||bool|none||answer whether the pointer names anything, true or false, never an error;max-bytes||nat|none|4194304|the largest document accepted (ceiling 33554432); memory is about 25 times this;format||choice:json/text|none|json|json for a program, text for a person";
+    return "root||path|root||resolve FILE relative to this directory and refuse paths outside it;pointer|p|any|none||the JSON Pointer (RFC 6901) to look up, empty is the whole document;keys||bool|none||answer the keys of the object at the pointer, in document order;length||bool|none||answer the number of elements, pairs, or bytes of a string at the pointer;type||bool|none||answer only the kind of the value at the pointer;exists||bool|none||answer whether the pointer names anything, true or false, never an error;max-bytes||nat|none|4194304|the largest document accepted (ceiling 33554432), memory is about 25 times this;format||choice:json/text|none|json|json for a program, text for a person";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "jsonq", version: "0.1.0", summary: "Look up one JSON Pointer (RFC 6901) in one strictly parsed JSON document; the value byte for byte, its kind, keys or length, and a parse error's position as data.", usage: "jsonq [--root DIR] [--pointer /a/0/b] [--keys | --length | --type | --exists] [--max-bytes N] [--format json|text] [FILE | -]", output: "document", schema: "jsonq.v1", flags: flag_table(), operands: "FILE|path-read|the document; - or nothing reads standard input", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.input-too-large;parse.json;query.bad-pointer;query.no-such-path;query.wrong-kind", limits: "max-bytes|4194304|33554432", reversibility: "reversible-cheap", stdin: "when FILE is - or absent" };
+    return describe.Tool { name: "jsonq", version: "0.1.0", summary: "Look up one JSON Pointer (RFC 6901) in one strictly parsed JSON document; the value byte for byte, its kind, keys or length, and a parse error's position as data.", usage: "jsonq [--root DIR] [--pointer /a/0/b] [--keys | --length | --type | --exists] [--max-bytes N] [--format json|text] [FILE | -]", output: "document", schema: "jsonq.v1", flags: flag_table(), operands: "FILE|path-read|the document, - or nothing reads standard input", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.input-too-large;parse.json;query.bad-pointer;query.no-such-path;query.wrong-kind;query.unsupported-syntax", limits: "max-bytes|4194304|33554432", reversibility: "reversible-cheap", stdin: "when FILE is - or absent" };
 }
 
 fn built() -> [] describe.Built {
@@ -420,7 +420,18 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     if modes > 1 {
         e = flag_problem(heap, e, "args.conflict", "--keys, --length, --type and --exists exclude each other", "ask one question per call", "--keys --length --type --exists");
     }
-    if !pointer_ok(cli.text(args, parsed, table, "pointer")) {
+    let given = cli.text(args, parsed, table, "pointer");
+    if len(given) > 0 && (int_of(given[0]) == '.' || bytes.find(given, "|") >= 0) {
+        // A jq filter, not a pointer: refused with a tag rather than guessed
+        // at, and the repair names the tool that answers it (D15: jsonq
+        // refuses to grow into jq).
+        var w = fail.open(heap, "query.unsupported-syntax", "this looks like a jq filter; jsonq takes one JSON Pointer and nothing more", "write .a[0].b as the pointer /a/0/b, or use jq for filters");
+        w = fail.repair_none(heap, w, "a filter is jq's job; jsonq will not grow to answer it");
+        w = fail.detail_open(heap, w);
+        w = json.put_key(heap, w, "pointer");
+        w = text.put(heap, w, given);
+        e = fail.add(heap, e, w);
+    } else if !pointer_ok(given) {
         var w = fail.open(heap, "query.bad-pointer", "the pointer is not RFC 6901 syntax: empty, or starting with / and with every ~ followed by 0 or 1", "write /a/0/b; ~1 is a / inside a key and ~0 is a ~");
         w = fail.no_repair(heap, w);
         w = fail.detail_open(heap, w);

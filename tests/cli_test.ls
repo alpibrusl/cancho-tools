@@ -1,5 +1,6 @@
 edition 5;
 
+import std.bytes;
 import std.test;
 import toolbox.cli;
 import toolbox.rules;
@@ -58,5 +59,17 @@ pub fn test_every_rule_has_an_exit_code_in_the_d4_table() -> [] int {
     test.assert_eq(rules.exit_of("args.unknown-flag"), 2);
     test.assert_eq(rules.exit_of("io.not-found"), 3);
     test.assert_eq(rules.exit_of("no.such-rule"), 1);
+    return 0;
+}
+
+// A `;` or `|` inside a help text would split the table: every entry has
+// exactly six fields. The tools' own tables are checked the same way by
+// `tests/conformance/test_schema.py` through `introspect`.
+pub fn test_a_table_entry_has_six_fields() -> [] int {
+    var i = 0;
+    while i < cli.entries(table()) {
+        test.assert_eq(bytes.count_byte(cli.entry(table(), i), '|'), 5);
+        i = i + 1;
+    }
     return 0;
 }

@@ -36,7 +36,7 @@ import toolbox.path;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;old||text|none||the exact bytes to find (not a pattern);new||any|none||the bytes to put in their place (may be empty);expect||nat|none|1|how many times --old must occur; any other count writes nothing;if-sha256||hex64|guard||the file's current content must also hash to this SHA-256;dry-run||bool|guard||check everything and report planned_actions, exit 9, write nothing;max-bytes||nat|none|67108864|the largest file this will hold (ceiling 1073741824);format||choice:json/text|none|json|json for a program, text for a person";
+    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;old||text|none||the exact bytes to find (not a pattern);new||any|none||the bytes to put in their place (may be empty);expect||nat|none|1|how many times --old must occur, any other count writes nothing;if-sha256||hex64|guard||the file's current content must also hash to this SHA-256;dry-run||bool|guard||check everything and report planned_actions, exit 9, write nothing;max-bytes||nat|none|67108864|the largest file this will hold (ceiling 1073741824);format||choice:json/text|none|json|json for a program, text for a person";
 }
 
 fn tool() -> [] describe.Tool {

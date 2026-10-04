@@ -37,7 +37,7 @@ import toolbox.path;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;lines|n|text|none|1:100|the lines A:B to return, 1-based and inclusive; A: runs to the end of the file or the budget;bytes|c|text|none||the bytes A:B to return, 0-based and end-exclusive;max-bytes||nat|none|65536|the most text returned; past it the answer is truncated with a next cursor (ceiling 16777216);max-line-bytes||nat|none|1048576|the longest line returned whole; a longer one is limit.line-too-long (ceiling 16777216);count-lines||bool|none||read to the end and report total_lines;format||choice:json/text|none|json|json for a program, text (cat -n) for a person";
+    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;lines|n|text|none|1:100|the lines A:B to return, 1-based and inclusive, A: runs to the end of the file or the budget;bytes|c|text|none||the bytes A:B to return, 0-based and end-exclusive;max-bytes||nat|none|65536|the most text returned, past it the answer is truncated with a next cursor (ceiling 16777216);max-line-bytes||nat|none|1048576|the longest line returned whole, a longer one is limit.line-too-long (ceiling 16777216);count-lines||bool|none||read to the end and report total_lines;format||choice:json/text|none|json|json for a program, text (cat -n) for a person";
 }
 
 fn tool() -> [] describe.Tool {

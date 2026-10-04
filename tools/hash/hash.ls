@@ -28,11 +28,11 @@ import toolbox.sha;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve every PATH relative to this directory and refuse paths outside it;algo|a|choice:sha256/sha512|none|sha256|the digest;verify||text|none||the expected digest in lowercase hex; takes one PATH, and a difference is precondition.hash-failed;format||choice:ndjson/text|none|ndjson|ndjson for a program, text (sha256sum's layout) for a person";
+    return "root||path|root||resolve every PATH relative to this directory and refuse paths outside it;algo|a|choice:sha256/sha512|none|sha256|the digest;verify||text|none||the expected digest in lowercase hex, takes one PATH, and a difference is precondition.hash-failed;format||choice:ndjson/text|none|ndjson|ndjson for a program, text (sha256sum's layout) for a person";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "hash", version: "0.1.0", summary: "SHA-256 or SHA-512 of files of any size, as NDJSON records, with --verify; the hash write --if-sha256 wants, from a tool that cannot write.", usage: "hash [--root DIR] [--algo sha256|sha512] [--verify HEX] [--format ndjson|text] PATH...", output: "stream", schema: "hash.v1", flags: flag_table(), operands: "PATH...|path-read|the files to hash, in order", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;precondition.hash-failed", limits: "", reversibility: "reversible-cheap", stdin: "no" };
+    return describe.Tool { name: "hash", version: "0.1.0", summary: "SHA-256 or SHA-512 of files of any size, as NDJSON records, with --verify; the hash write --if-sha256 wants, from a tool that cannot write.", usage: "hash [--root DIR] [--algo sha256|sha512] [--verify HEX] [--format ndjson|text] PATH...", output: "stream", schema: "hash.v1", flags: flag_table(), operands: "PATH...|path-read|the files to hash, in order", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.duplicate-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;precondition.hash-failed", limits: "", reversibility: "reversible-cheap", stdin: "no" };
 }
 
 fn built() -> [] describe.Built {

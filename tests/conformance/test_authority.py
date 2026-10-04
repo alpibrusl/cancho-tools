@@ -42,7 +42,7 @@ REFUSED = {"ffi", "net_in"}
 
 # What each tool must provably not do: the property the epic sells
 # (a read-only tool cannot write).
-READ_ONLY = {"seek", "peek", "jsonq", "tally", "hash"}
+READ_ONLY = {"seek", "peek", "jsonq", "tally", "hash", "list"}
 
 
 class Authority(unittest.TestCase):

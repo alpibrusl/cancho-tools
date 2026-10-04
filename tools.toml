@@ -34,3 +34,6 @@ allow = ["args", "dir_read", "err_write", "file_read", "fs_read(\"\")", "heap", 
 
 [hash]
 allow = ["args", "dir_read", "err_write", "file_read", "fs_read(\"\")", "heap", "io_write"]
+
+[list]
+allow = ["args", "dir_read", "err_write", "fs_read(\"\")", "heap", "io_write"]

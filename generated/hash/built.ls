@@ -15,5 +15,5 @@ pub fn schema() -> [] &static [byte] {
 }
 
 pub fn compiler() -> [] &static [byte] {
-    return "066a810f226e8a1c0e4db0f5b5de83e4ddcec803";
+    return "8d2458b45e93c9a66617b416bd97e2045cf3097e";
 }

@@ -82,6 +82,7 @@ class Confinement(unittest.TestCase):
                     ("seek", ["outside", op]),
                     ("peek", [op]),
                     ("hash", [op]),
+                    ("list", [op]),
                     ("tally", [op]),
                     ("jsonq", [op]),
                     ("write", ["--if-sha256", "0" * 64, "--stdin", op]),
@@ -100,6 +101,21 @@ class Confinement(unittest.TestCase):
             for tool in TOOLS:
                 self.assertEqual(introspect(tool)["confinement"], "beneath")
                 self.assertIn("following no symbolic link", introspect(tool)["confinement_note"])
+        finally:
+            fx.cleanup()
+
+    def test_a_listing_never_enters_a_link(self):
+        """`list` walks the whole root, deep, and names the links as links: no
+        entry beneath them is listed, so nothing outside is ever shown."""
+        fx = Fixture()
+        try:
+            r = run("list", "--root", str(fx.root), "--depth", "64", cwd=fx.dir)
+            self.assertEqual(r.status, 0, r.stdout[:300])
+            entries = {json.loads(l)["path"]: json.loads(l)["kind"] for l in r.stdout.splitlines() if json.loads(l)["type"] == "entry"}
+            self.assertEqual(entries["link.txt"], "link")
+            self.assertEqual(entries["dirlink"], "link")
+            self.assertFalse([p for p in entries if p.startswith("dirlink/")])
+            self.assertNotIn(b"secret", r.stdout)
         finally:
             fx.cleanup()
 

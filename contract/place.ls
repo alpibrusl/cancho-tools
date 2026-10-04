@@ -219,3 +219,36 @@ pub fn parent[&f, &r, &p, &q](fs: &f Fs(""), root: &r [byte], rel: &p [byte], fu
         }
     }
 }
+
+// Open an operand as a directory, for a lister. With a root, `rel` is
+// entered beneath it following no link, and `.` is the root itself; without
+// one, `full` is opened by name, links and all, as a reader's file is.
+pub fn open_directory[&f, &r, &p, &q](fs: &f Fs(""), root: &r [byte], rel: &p [byte], full: &q [byte]) -> [fs_read(""), dir_read] DirOpened {
+    if len(root) == 0 {
+        return open_dir(fs, full);
+    }
+    if bytes.equal(rel, ".") {
+        return open_dir(fs, root);
+    }
+    match open_dir(fs, root) {
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            var out = DirOpened::Failed(5);
+            borrow dir as &d in {
+                match out {
+                    DirOpened::Ok(unused) => {
+                        dir_close(unused);
+                    }
+                    DirOpened::Failed(unused) => {
+                    }
+                }
+                out = enter(d, rel);
+            }
+            dir_close(dir);
+            return out;
+        }
+        DirOpened::Failed(reason) => {
+            return DirOpened::Failed(reason);
+        }
+    }
+}

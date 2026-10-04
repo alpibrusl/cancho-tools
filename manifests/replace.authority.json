@@ -63,6 +63,7 @@
   "pure": [
     "alphabet",
     "authority",
+    "budget",
     "built",
     "bytes",
     "catalogue",
@@ -76,6 +77,7 @@
     "count_byte",
     "decode",
     "default_of",
+    "diff_ceiling",
     "digit_of",
     "discard",
     "distance",
@@ -136,6 +138,7 @@
     "kind_of",
     "lead_bits",
     "leaf",
+    "line_count",
     "listed",
     "longest",
     "low_mask64",
@@ -151,6 +154,7 @@
     "operand_index",
     "parent_of",
     "parse_nat",
+    "prefix",
     "repairable_of",
     "role_of",
     "rotr64",
@@ -164,7 +168,9 @@
     "size$int",
     "slash",
     "start",
+    "starts_line",
     "starts_with",
+    "suffix",
     "summary_of",
     "tag_of",
     "takes_value",
@@ -179,5 +185,5 @@
   ],
   "folded_operators": 25,
   "folded_calls": 0,
-  "functions": 230
+  "functions": 238
 }

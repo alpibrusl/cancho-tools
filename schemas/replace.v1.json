@@ -46,6 +46,55 @@
           "bytes": {
             "type": "integer",
             "minimum": 0
+          },
+          "diff": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "old_start": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "new_start": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "removed_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "added_count": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "removed": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/text_or_bytes"
+                  }
+                },
+                "added": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/text_or_bytes"
+                  }
+                }
+              },
+              "required": [
+                "old_start",
+                "new_start",
+                "removed_count",
+                "added_count",
+                "removed",
+                "added"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 1
+          },
+          "diff_truncated": {
+            "type": "boolean"
           }
         },
         "required": [
@@ -54,7 +103,9 @@
           "replacements",
           "before_sha256",
           "after_sha256",
-          "bytes"
+          "bytes",
+          "diff",
+          "diff_truncated"
         ],
         "additionalProperties": false
       }
@@ -288,6 +339,55 @@
         "after_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "diff": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "old_start": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "new_start": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "removed_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "added_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "removed": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/text_or_bytes"
+                }
+              },
+              "added": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/text_or_bytes"
+                }
+              }
+            },
+            "required": [
+              "old_start",
+              "new_start",
+              "removed_count",
+              "added_count",
+              "removed",
+              "added"
+            ],
+            "additionalProperties": false
+          },
+          "maxItems": 1
+        },
+        "diff_truncated": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -296,7 +396,9 @@
         "replacements",
         "bytes",
         "before_sha256",
-        "after_sha256"
+        "after_sha256",
+        "diff",
+        "diff_truncated"
       ],
       "additionalProperties": false
     }

@@ -35,7 +35,7 @@ what came back. Each difference below is about that gap:
 | **cannot tell a short answer from a cut one.** Output that stopped because of a pipe, a timeout or a kill looks like output that ended. | **knows when it has everything.** A stream ends with an `end` record, so a stream without one was cut short. A capped answer says `truncated: true` and gives the `next` cursor (`--skip`, `next.line`) to continue exactly where it stopped. |
 | **guesses from exit codes and English.** `grep` exits 2 when one of three files is missing even though it printed matches; `jq` answers `Cannot index number with number`, exit 5. | **branches on a rule.** Each error is `{code, rule, message, hint, repair, detail}`, with 37 stable rule tags (`io.not-found`, `path.dotdot`, `precondition.hash-mismatch` …) and exit codes with one meaning each. One bad file is an error record in the stream, and the other files are still searched. |
 | **has to work out the fix.** | **is often handed the fix.** When the correction is mechanical, `repair` is an argv to run as it stands, and a repair never widens what the tool may touch. |
-| **overwrites blindly.** `sed -i`, `>` and `cp` replace whatever is there, even if the file changed since the agent read it, or another agent is writing it. | **states what it expects.** `write` needs `--create` or `--if-sha256` of the content it read. `replace` needs the text to occur exactly `--expect` times. A stale view is `precondition.hash-mismatch`, not a lost edit. Writes are atomic and locked (of two racing writers exactly one wins), idempotent (a retried write that already landed answers `changed: false`), and `--dry-run` previews the change without making it. |
+| **overwrites blindly.** `sed -i`, `>` and `cp` replace whatever is there, even if the file changed since the agent read it, or another agent is writing it. | **states what it expects.** `write` needs `--create` or `--if-sha256` of the content it read. `replace` needs the text to occur exactly `--expect` times. A stale view is `precondition.hash-mismatch`, not a lost edit. Writes are atomic and locked (of two racing writers exactly one wins), idempotent (a retried write that already landed answers `changed: false`), and `--dry-run` shows the lines it would change (a bounded diff) without changing them. |
 | **can be led out of its workspace.** A path with `..`, an absolute path or a symbolic link reaches anything the process can. | **stays under `--root`.** `..`, absolute and outside paths are refused before anything is opened, and no link below the root is followed (`path.symlink`). |
 | **gets different answers in different places.** `sort` follows the locale; output can change with `LANG`, the terminal or the clock. | **gets the same bytes every time.** No locale, no clock, no environment: the same input is byte-identical through a pipe, a file or a terminal. |
 | **can blow its memory or its context.** A huge line or file goes straight through. | **has caps and is told about them.** Memory is bounded (about 1.7 MB at 256 MiB of input), and every cap is a flag with a ceiling and its own rule, such as `limit.line-too-long`, whose repair raises the cap. |
@@ -65,14 +65,14 @@ shopping list
 $ hash --root . notes.txt        # A and B both read it, and both see H1
 {"type":"hash","path":"notes.txt","algo":"sha256","hex":"936bb8ff57a0…","bytes":14}
 $ printf 'shopping list\n- milk (agent A)\n' | write --root . --if-sha256 H1 --stdin notes.txt   # agent A
-{"ok":true,"command":"write","schema":"write.v1","data":{"path":"notes.txt","changed":true,"created":false,"bytes":31,"before_sha256":"936bb8ff57a0…","after_sha256":"7bde7db5f30a…"},"meta":{"version":"0.1.0"}}
+{"ok":true,"command":"write","schema":"write.v1","data":{"path":"notes.txt","changed":true,"created":false,"bytes":31,"before_sha256":"936bb8ff57a0…","after_sha256":"7bde7db5f30a…","diff":[{"old_start":2,"new_start":2,"removed_count":0,"added_count":1,"removed":[],"added":["- milk (agent A)\n"]}],"diff_truncated":false},"meta":{"version":"0.1.0"}}
 $ printf 'shopping list\n- bread (agent B)\n' | write --root . --if-sha256 H1 --stdin notes.txt   # agent B, stale
 {"ok":false,"command":"write","schema":"write.v1","error":{"code":"CONFLICT","rule":"precondition.hash-mismatch","message":"the file does not hold the content --if-sha256 named","hint":"re-read the file, then decide","repair":{"kind":"none","reason":"the file changed since it was read; re-read, then decide"},"detail":{"path":"notes.txt","expected_sha256":"936bb8ff57a0…","actual_sha256":"7bde7db5f30a…","size":31}},"errors":[{"code":"CONFLICT","rule":"precondition.hash-mismatch","message":"the file does not hold the content --if-sha256 named","hint":"re-read the file, then decide","repair":{"kind":"none","reason":"the file changed since it was read; re-read, then decide"},"detail":{"path":"notes.txt","expected_sha256":"936bb8ff57a0…","actual_sha256":"7bde7db5f30a…","size":31}}],"meta":{"version":"0.1.0"}}
 $ echo $?
 5
 $ # agent B re-reads (the refusal carried the new hash, H2), re-applies its line, and retries
 $ printf 'shopping list\n- milk (agent A)\n- bread (agent B)\n' | write --root . --if-sha256 H2 --stdin notes.txt
-{"ok":true,"command":"write","schema":"write.v1","data":{"path":"notes.txt","changed":true,"created":false,"bytes":49,"before_sha256":"7bde7db5f30a…","after_sha256":"60e7843a980c…"},"meta":{"version":"0.1.0"}}
+{"ok":true,"command":"write","schema":"write.v1","data":{"path":"notes.txt","changed":true,"created":false,"bytes":49,"before_sha256":"7bde7db5f30a…","after_sha256":"60e7843a980c…","diff":[{"old_start":3,"new_start":3,"removed_count":0,"added_count":1,"removed":[],"added":["- bread (agent B)\n"]}],"diff_truncated":false},"meta":{"version":"0.1.0"}}
 $ cat notes.txt
 shopping list
 - milk (agent A)
@@ -254,7 +254,9 @@ HEX). The new content comes from `--stdin` or `--content-file`.
 ```console
 $ printf 'hello\n' | write --root . --create --stdin NOTES.md
 {"ok":true,"command":"write","schema":"write.v1","data":{"path":"NOTES.md","changed":true,"created":true,"bytes":6,
- "before_sha256":null,"after_sha256":"5891b5b5…be03"},"meta":{"version":"0.1.0"}}
+ "before_sha256":null,"after_sha256":"5891b5b5…be03",
+ "diff":[{"old_start":1,"new_start":1,"removed_count":0,"added_count":1,"removed":[],"added":["hello\n"]}],
+ "diff_truncated":false},"meta":{"version":"0.1.0"}}
 
 $ printf 'hello again\n' | write --root . --create --stdin NOTES.md                     # exit 5
 {"ok":false,…,"error":{"code":"CONFLICT","rule":"conflict.exists",
@@ -270,6 +272,7 @@ $ printf 'hello again\n' | write --root . --if-sha256 5891b5b5…be03 --stdin NO
 * **Atomic.** The content goes to a temporary file, which is synced and renamed over the target.
 * **Locked.** A lock is held from the check to the rename, so of two writers racing with the same `--if-sha256`, exactly one wins.
 * **Dry run.** `--dry-run` reports what would happen and exits 9 without changing anything.
+* **A diff.** The answer, and a dry run's `planned_actions`, carry `diff`: the lines that change (see `replace` below).
 
 ### `replace`: change exact text
 
@@ -277,12 +280,24 @@ $ printf 'hello again\n' | write --root . --if-sha256 5891b5b5…be03 --stdin NO
 $ replace --root . --old 'a + b' --new 'a.wrapping_add(b)' --dry-run src/main.rs        # exit 9
 {"ok":true,"command":"replace","schema":"replace.v1","data":{"path":"src/main.rs","changed":false,"replacements":1,…},
  "dry_run":true,"planned_actions":[{"op":"replace","path":"src/main.rs","replacements":1,
- "before_sha256":"98ace448…162c","after_sha256":"63261420…cf20","bytes":125}],…}
+ "before_sha256":"06ec9a71…5339","after_sha256":"1d5ece11…744d","bytes":56,
+ "diff":[{"old_start":2,"new_start":2,"removed_count":1,"added_count":1,
+          "removed":["    a + b\n"],"added":["    a.wrapping_add(b)\n"]}],"diff_truncated":false}],…}
 
 $ replace --root . --old 'a + b' --new 'a.wrapping_add(b)' src/main.rs
-{"ok":true,"command":"replace","schema":"replace.v1","data":{"path":"src/main.rs","changed":true,"replacements":1,"bytes":125,
- "before_sha256":"98ace448…162c","after_sha256":"63261420…cf20"},"meta":{"version":"0.1.0"}}
+{"ok":true,"command":"replace","schema":"replace.v1","data":{"path":"src/main.rs","changed":true,"replacements":1,"bytes":56,
+ "before_sha256":"06ec9a71…5339","after_sha256":"1d5ece11…744d","diff":[…],"diff_truncated":false},"meta":{"version":"0.1.0"}}
 ```
+
+**The diff** is one hunk: the lines between the common leading and trailing
+lines of the old and new content. Keeping the first `old_start - 1` old
+lines, then `added`, then the old lines after the `removed_count` removed
+gives the new content exactly (a gate checks this on random edits). Two
+edits far apart come out as one hunk spanning both. Lines that are not
+UTF-8 come out as `{"b64":…}`. `--max-diff-lines` (default 200) and a fixed
+1 MiB bound how many lines are shown, and `diff_truncated` says when some
+were left out; the counts are always whole. `write` holds the old file to
+diff it, up to `--max-bytes`; past that, `diff` is null.
 
 `--old` must occur exactly `--expect` times (default 1). Any other count is
 `precondition.count-mismatch` (exit 5), reporting the count found, and

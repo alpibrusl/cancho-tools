@@ -38,7 +38,7 @@ what came back. Each difference below is about that gap:
 | **can be led out of its workspace.** A path with `..`, an absolute path or a symbolic link reaches anything the process can. | **stays under `--root`.** `..`, absolute and outside paths are refused before anything is opened, and no link below the root is followed (`path.symlink`). |
 | **gets different answers in different places.** `sort` follows the locale; output can change with `LANG`, the terminal or the clock. | **gets the same bytes every time.** No locale, no clock, no environment: the same input is byte-identical through a pipe, a file or a terminal. |
 | **can blow its memory or its context.** A huge line or file goes straight through. | **has caps and is told about them.** Memory is bounded (about 1.7 MB at 256 MiB of input), and every cap is a flag with a ceiling and its own rule, such as `limit.line-too-long`, whose repair raises the cap. |
-| **learns the tool from `--help` prose**, or from memory of some version of it. | **asks the tool.** `introspect` gives the flags, rules, exit codes, limits and schema as JSON, and `skill` gives a `SKILL.md`, both generated from the tables the parser runs on, so they cannot drift. |
+| **learns the tool from `--help` prose**, or from memory of some version of it. | **asks the tool.** `introspect` gives the flags, rules, exit codes, limits and schema as JSON, and its `guarantees` (`deterministic`, `idempotent`, `atomic`, `requires_precondition`, `dry_run`, `bounded_memory`, `concurrency`) as booleans an agent can branch on, each tied to the gate that tests it. `skill` gives a `SKILL.md`. Both are generated from the tables the parser runs on, so they cannot drift. |
 | **has to trust the binary.** | **can check what it may do.** Each binary embeds its authority as the compiler derived it: no network, no foreign code, no clock, and no write except beneath a directory it opened. A sandbox can be configured from it. |
 
 ### Two agents, one file
@@ -112,7 +112,7 @@ seek --root . --format text 'fn main' tools/seek/seek.ls
 Every tool describes itself:
 
 ```sh
-seek introspect          # flags and their roles, exit codes, rules, limits, schema, authority (JSON)
+seek introspect          # flags and roles, exit codes, rules, limits, schema, authority, guarantees (JSON)
 seek skill               # a SKILL.md an agent can load
 ```
 

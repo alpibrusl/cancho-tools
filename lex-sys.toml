@@ -1,0 +1,34 @@
+[package]
+name = "lexsys-tools"
+lex-sys = "a18e5332b3c2a85a8d44dcb71b44b620311b448c"   # the compiler these sources were written for
+
+# One program per tool (D17): a program's authority is the union of what its
+# main reaches, so a multi-call binary would report every tool's row for every
+# invocation. `contract` is the shared package; `generated/<tool>` is the
+# manifest the build embeds (D12, scripts/manifest.py).
+
+[[bin]]
+name = "seek"
+sources = ["contract", "tools/seek", "generated/seek"]
+std = true
+out = "build/seek"
+
+[[test]]
+name = "sha"
+sources = ["contract", "tests/sha_test.ls"]
+std = true
+
+[[test]]
+name = "cli"
+sources = ["contract", "tests/cli_test.ls"]
+std = true
+
+[[test]]
+name = "path"
+sources = ["contract", "tests/path_test.ls"]
+std = true
+
+[[test]]
+name = "lines"
+sources = ["contract", "tests/lines_test.ls"]
+std = true

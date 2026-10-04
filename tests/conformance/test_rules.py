@@ -111,6 +111,7 @@ def fixtures(fx):
         add(tool, "path.absolute", at(str(fx.root / good)))
         add(tool, "path.outside-root", at(str(fx.dir / "outside" / "secret.txt")))
         add(tool, "path.too-long", at("a" * 5000))
+        add(tool, "path.symlink", at("link.txt"))
         if tool != "write":
             add(tool, "io.not-found", at("missing.txt"))
         add(tool, "io.not-a-directory", at("plain.txt/x"))

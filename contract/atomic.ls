@@ -1,17 +1,18 @@
-edition 5;
+edition 6;
 
 module toolbox.atomic;
 
 // `toolbox.atomic` -- the write side of D10: read what is there, lock,
 // replace atomically.
 //
-// A replacement is a sibling temporary file created with `open_new`
-// (`O_EXCL`), written, `file_sync`ed, closed, and `fs_rename`d over the
-// destination -- lex-sys `docs/agent-toolbox.md` A.8 probed that this is
-// expressible and that its authority is exactly `file_write` and
-// `fs_write("")`. The temporary's name is derived from the destination and
-// the content's hash, so two runs of one write collide on one name rather
-// than litter.
+// A replacement is a sibling temporary file created with `dir_open_new`
+// (`O_EXCL`), written, `file_sync`ed, closed, and `dir_rename`d over the
+// destination, all beneath the directory that holds it (`toolbox.place`'s
+// `parent`), so no step resolves a path string and none follows a link --
+// lex-sys `docs/directory-handles.md` slice 2, which turned A.8's
+// `fs_write("")` into `dir_write`. The temporary's name is derived from the
+// destination and the content's hash, so two runs of one write collide on
+// one name rather than litter.
 //
 // The lock is `flock` on a sidecar, `<path>.lexsys-lock`, held from before
 // the precondition is checked until after the rename, because a bare
@@ -32,24 +33,24 @@ pub fn would_block(errno: int) -> [] bool {
     return errno == 11 || errno == 35;
 }
 
-// Read the whole of `path` into `into`, refusing past `most` bytes.
+// Read the whole of an opened file into `into`, refusing past `most` bytes.
 // Answers the buffer, an errno (0 for none), and whether the file was
 // longer than `most` (then the buffer holds a prefix and must not be
 // used). Memory is the file, which is the job: a replace has to hold the
 // whole new content to write it.
-pub fn read_all[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], most: int, into: buffer.Buffer) -> [heap, fs_read(""), file_read] (buffer.Buffer, int, bool) {
+pub fn read_all[&h](heap: &!h Heap, opened: Opened, most: int, into: buffer.Buffer) -> [heap, file_read] (buffer.Buffer, int, bool) {
     var out = into;
     var errno = 0;
     var too_big = false;
-    match open_read(fs, path) {
+    match opened {
         Opened::Failed(reason) => {
             errno = reason;
             if errno == 0 {
                 errno = 5;
             }
         }
-        Opened::Ok(opened) => {
-            var file = opened;
+        Opened::Ok(handle_in) => {
+            var file = handle_in;
             var chunk = buffer.empty(heap, 65536);
             borrow mut file as &!handle in {
                 var going = true;
@@ -125,7 +126,7 @@ pub fn sha256_hex[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] buffer.Buff
     return hex;
 }
 
-// `<path>.lexsys-lock`.
+// `<name>.lexsys-lock`.
 pub fn lock_path[&h, &p](heap: &!h Heap, path: &p [byte]) -> [heap] buffer.Buffer {
     var b = buffer.empty(heap, len(path) + 13);
     b = buffer.append(heap, b, path);
@@ -133,6 +134,7 @@ pub fn lock_path[&h, &p](heap: &!h Heap, path: &p [byte]) -> [heap] buffer.Buffe
 }
 
 // The temporary for `path` and a content hash: `<dir>/.<name>.<hash16>.lexsys-tmp`.
+// A writer passes the leaf, so it is `.<name>.<hash16>.lexsys-tmp`.
 pub fn temp_path[&h, &p, &x](heap: &!h Heap, path: &p [byte], hex: &x [byte]) -> [heap] buffer.Buffer {
     var cut = len(path);
     while cut > 0 && int_of(path[cut - 1]) != '/' {
@@ -145,21 +147,6 @@ pub fn temp_path[&h, &p, &x](heap: &!h Heap, path: &p [byte], hex: &x [byte]) ->
     b = buffer.push(heap, b, byte_of('.'));
     b = buffer.append(heap, b, hex[0..16]);
     return buffer.append(heap, b, ".lexsys-tmp");
-}
-
-// The directory holding `path`, for the sync that makes a rename durable.
-pub fn parent_of[&p](path: &p [byte]) -> [] &p [byte] {
-    var cut = len(path);
-    while cut > 0 && int_of(path[cut - 1]) != '/' {
-        cut = cut - 1;
-    }
-    if cut == 0 {
-        return ".";
-    }
-    if cut == 1 {
-        return path[0..1];
-    }
-    return path[0..cut - 1];
 }
 
 // Write all of `data` to `file`, one `write(2)` at a time; an errno or 0.
@@ -184,24 +171,24 @@ fn write_all[&f, &d](file: &!f File, data: &d [byte]) -> [file_write] int {
     return 0;
 }
 
-// Replace `path` with `data` atomically, through `temp`. Answers 0, or the
+// Replace `name` beneath `dir` with `data` atomically, through `temp`. Answers 0, or the
 // errno of the step that failed and which step it was (1 create the
 // temporary, 2 write it, 3 sync it, 4 rename it). A temporary that exists
 // already is stale -- the caller holds the lock, so no live writer owns it
 // -- and is removed once before giving up.
-pub fn replace[&f, &p, &t, &d](fs: &f Fs(""), path: &p [byte], temp: &t [byte], data: &d [byte]) -> [fs_write(""), file_write] (int, int) {
+pub fn replace[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte]) -> [dir_write, file_write] (int, int) {
     var opened_ok = false;
     var errno = 0;
     var step = 0;
     var attempts = 0;
     while !opened_ok && attempts < 2 {
         attempts = attempts + 1;
-        match open_new(fs, temp) {
+        match dir_open_new(dir, temp) {
             Opened::Failed(reason) => {
                 errno = reason;
                 step = 1;
                 if reason == 17 && attempts == 1 {
-                    fs_remove(fs, temp);
+                    dir_remove(dir, temp);
                 }
             }
             Opened::Ok(opened) => {
@@ -230,64 +217,52 @@ pub fn replace[&f, &p, &t, &d](fs: &f Fs(""), path: &p [byte], temp: &t [byte], 
     }
     if errno != 0 {
         if step > 1 {
-            fs_remove(fs, temp);
+            dir_remove(dir, temp);
         }
         return (errno, step);
     }
-    match fs_rename(fs, temp, path) {
+    match dir_rename(dir, temp, name) {
         Done::Ok(n) => {
         }
         Done::Failed(reason) => {
-            fs_remove(fs, temp);
+            dir_remove(dir, temp);
             return (reason, 4);
         }
     }
     return (0, 0);
 }
 
-// Sync the directory holding `path`, so the rename survives a crash
-// (lex-sys `docs/file-writes.md` §5.2). Best effort: the rename has
-// happened, and a directory that cannot be opened for this is reported by
-// nothing a caller could act on.
-pub fn sync_parent[&f, &p](fs: &f Fs(""), path: &p [byte]) -> [fs_read(""), file_write] int {
-    match open_read(fs, parent_of(path)) {
-        Opened::Failed(reason) => {
-            return reason;
+// Sync the directory a replacement was renamed in, so the rename survives
+// a crash (lex-sys `docs/file-writes.md` §5.2). Best effort: the rename has
+// happened, and a sync that fails is reported by nothing a caller could act
+// on.
+pub fn sync_parent[&f](dir: &f Dir) -> [dir_write] int {
+    match dir_sync(dir) {
+        Done::Ok(n) => {
+            return 0;
         }
-        Opened::Ok(opened) => {
-            var dir = opened;
-            var errno = 0;
-            borrow mut dir as &!handle in {
-                match file_sync(handle) {
-                    Done::Ok(n) => {
-                    }
-                    Done::Failed(reason) => {
-                        errno = reason;
-                    }
-                }
-            }
-            file_close(dir);
-            return errno;
+        Done::Failed(reason) => {
+            return reason;
         }
     }
 }
 
-// SHA-256 of the file at `path`, streamed: memory is one chunk whatever the
+// SHA-256 of an opened file, streamed: memory is one chunk whatever the
 // file's size. Answers the hex digest (empty on failure), an errno (0 for
 // none) and the size.
-pub fn hash_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte]) -> [heap, fs_read(""), file_read] (buffer.Buffer, int, int) {
+pub fn hash_file[&h](heap: &!h Heap, opened: Opened) -> [heap, file_read] (buffer.Buffer, int, int) {
     var hex = buffer.empty(heap, 64);
     var errno = 0;
     var size = 0;
-    match open_read(fs, path) {
+    match opened {
         Opened::Failed(reason) => {
             errno = reason;
             if errno == 0 {
                 errno = 5;
             }
         }
-        Opened::Ok(opened) => {
-            var file = opened;
+        Opened::Ok(handle_in) => {
+            var file = handle_in;
             var chunk = buffer.empty(heap, 65536);
             var s = sha.sha256(heap);
             borrow mut file as &!handle in {
@@ -337,7 +312,7 @@ pub fn hash_file[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte]) -> 
     return (hex, errno, size);
 }
 
-// Open `<path>.lexsys-lock` and take its lock. `Opened::Ok` holds the
+// Open `<name>.lexsys-lock` beneath `dir` and take its lock. `Opened::Ok` holds the
 // lock until the file is closed; `Opened::Failed` carries the errno of
 // the open or of the lock (`would_block` for another holder).
 // End an `Opened` that is not wanted.
@@ -352,11 +327,11 @@ fn discard(o: Opened) -> [] int {
     return 0;
 }
 
-pub fn acquire[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte]) -> [heap, fs_write(""), file_write] Opened {
-    let lock = lock_path(heap, path);
+pub fn acquire[&h, &f, &p](heap: &!h Heap, dir: &f Dir, name: &p [byte]) -> [heap, dir_write, file_write] Opened {
+    let lock = lock_path(heap, name);
     var result = Opened::Failed(5);
     borrow lock as &l in {
-        match open_append(fs, buffer.bytes(l)) {
+        match dir_open_append(dir, buffer.bytes(l)) {
             Opened::Failed(reason) => {
                 discard(result);
                 result = Opened::Failed(reason);

@@ -3,7 +3,7 @@ was; a second apply is `changed: false`; a replacement is atomic; and of
 two writers racing with the same precondition, exactly one wins.
 
 The dry-run property is not in the type system: the row is the program's,
-not the invocation's, so `write --dry-run` reports `fs_write("")` like a real
+not the invocation's, so `write --dry-run` reports `dir_write` like a real
 write (lex-sys docs/agent-toolbox.md §2.4, D10). It is a property of the
 code, and this is the test of it: `strace` sees every file-system call.
 """

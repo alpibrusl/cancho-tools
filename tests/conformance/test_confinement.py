@@ -1,13 +1,14 @@
-"""M8 -- `--root` holds lexically, every refusal is a tag and none a trap,
-and the known limit is pinned: a symlink inside the root that points
-outside it is followed (L6). When a no-follow primitive lands in lex-sys
-(#227), `test_the_symlink_escape_is_known` flips and forces D9 and this
-file to be rewritten."""
+"""M8 -- `--root` holds, every refusal is a tag and none a trap, and a
+symlink inside the root cannot reach outside it: a path is checked
+lexically (`toolbox.path`) and then opened beneath the root one component
+at a time, following no link (`toolbox.place`, lex-sys #227). Until #227
+this file asserted the escape; the test that did is now the one that
+asserts the refusal."""
 
 import json
 import unittest
 
-from harness import TOOLS, Fixture, run, validate
+from harness import TOOLS, Fixture, introspect, run, validate
 
 CASES = [
     # (operand, rule or None for success)
@@ -27,6 +28,9 @@ CASES = [
     ("ROOT//plain.txt", "path.absolute"),
     ("ROOT/sub/", "io.is-a-directory"),
     ("ÿé日.txt", "io.not-found"),
+    ("link.txt", "path.symlink"),
+    ("dirlink/secret.txt", "path.symlink"),
+    ("sub/../link.txt", "path.dotdot"),
 ]
 
 
@@ -64,19 +68,63 @@ class Confinement(unittest.TestCase):
         finally:
             fx.cleanup()
 
-    def test_the_symlink_escape_is_known(self):
-        """The limit D9 states, asserted so it cannot change silently: a link
-        inside --root that points outside it is followed, and the outside
-        file is read."""
+    def test_no_link_reaches_outside_the_root(self):
+        """The escape D9 used to state, now refused by every tool: a link to a
+        file and a link to a directory, both pointing outside --root, are
+        `path.symlink`, and nothing outside is read or written."""
         fx = Fixture()
         try:
-            r = run("seek", "--root", str(fx.root), "outside", "link.txt", cwd=fx.dir)
+            outside = fx.dir / "outside"
+            before = sorted(p.name for p in outside.iterdir())
+            calls = []
+            for op in ("link.txt", "dirlink/secret.txt"):
+                calls += [
+                    ("seek", ["outside", op]),
+                    ("peek", [op]),
+                    ("hash", [op]),
+                    ("tally", [op]),
+                    ("jsonq", [op]),
+                    ("write", ["--if-sha256", "0" * 64, "--stdin", op]),
+                    ("write", ["--create", "--stdin", op]),
+                    ("replace", ["--old", "secret", "--new", "public", op]),
+                ]
+            calls.append(("write", ["--create", "--stdin", "dirlink/new.txt"]))
+            calls.append(("write", ["--create", "--content-file", "link.txt", "fresh.txt"]))
+            for tool, args in calls:
+                r = run(tool, "--root", str(fx.root), *args, stdin=b"new\n", cwd=fx.dir)
+                self.assertEqual(r.first_rule(), "path.symlink", (tool, args, r.stdout[:300]))
+                self.assertEqual(r.status, 4, (tool, args))
+                self.assertNotIn(b"secret gamma outside", r.stdout)
+            self.assertEqual(sorted(p.name for p in outside.iterdir()), before)
+            self.assertEqual((outside / "secret.txt").read_bytes(), b"secret gamma outside\n")
+            for tool in TOOLS:
+                self.assertEqual(introspect(tool)["confinement"], "beneath")
+                self.assertIn("following no symbolic link", introspect(tool)["confinement_note"])
+        finally:
+            fx.cleanup()
+
+    def test_a_link_in_the_root_spelling_is_followed(self):
+        """--root itself is the trust anchor: the caller named it, so a link
+        there is followed, and what is beneath it is confined."""
+        fx = Fixture()
+        try:
+            alias = fx.dir / "alias"
+            alias.symlink_to(fx.root)
+            r = run("seek", "--root", str(alias), "gamma", "sub/inner.txt", cwd=fx.dir)
+            self.assertEqual(r.status, 0, r.stdout)
+            r = run("seek", "--root", str(alias), "gamma", "link.txt", cwd=fx.dir)
+            self.assertEqual(r.first_rule(), "path.symlink")
+        finally:
+            fx.cleanup()
+
+    def test_without_a_root_a_reader_follows_links(self):
+        """No --root, no confinement to keep: a reader opens the path as
+        given, as `grep` would."""
+        fx = Fixture()
+        try:
+            r = run("seek", "outside", "root/link.txt", cwd=fx.dir)
             matches = [json.loads(l) for l in r.stdout.splitlines() if json.loads(l)["type"] == "match"]
             self.assertEqual([m["text"] for m in matches], ["secret gamma outside"])
-            for tool in TOOLS:
-                from harness import introspect
-                self.assertEqual(introspect(tool)["confinement"], "lexical")
-                self.assertIn("symlinks are followed", introspect(tool)["confinement_note"])
         finally:
             fx.cleanup()
 

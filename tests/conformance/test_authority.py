@@ -25,6 +25,11 @@ BRIDGE = {
     "net_out": "net with the host as scope",
     "file_read": "dropped: spent at open; fs_read is in the report",
     "file_write": "dropped: spent at open; fs_write is in the report",
+    # lex-sys docs/directory-handles.md: a handle label names no path. A
+    # directory is opened under an fs_read scope, and everything a Dir
+    # reaches is beneath one, so the scope is the fs_read in the report.
+    "dir_read": "dropped: spent at open_dir; fs_read is in the report",
+    "dir_write": "fs_write over the scope of the fs_read in the report: a Dir writes only beneath what it opened",
     "conn_read": "dropped",
     "conn_write": "dropped",
     "io_read": "off_lattice, reviewed",
@@ -56,7 +61,7 @@ class Authority(unittest.TestCase):
     def test_read_only_tools_hold_no_write(self):
         for tool in READ_ONLY:
             names = {l["name"] for l in introspect(tool)["authority"]["labels"]}
-            self.assertFalse(names & {"fs_write", "file_write", "net_out", "ffi"}, (tool, names))
+            self.assertFalse(names & {"fs_write", "dir_write", "file_write", "net_out", "ffi"}, (tool, names))
             self.assertTrue(introspect(tool)["authority"]["bounded"])
 
     def test_no_tool_reads_the_clock_or_the_network(self):

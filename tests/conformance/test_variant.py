@@ -43,7 +43,11 @@ class Variant(unittest.TestCase):
         self.assertIn(("fs_read", self.root), labels)
         self.assertNotIn(("fs_read", ""), labels)
         labels = {(l["name"], l["argument"]) for l in self.write_authority["labels"]}
-        self.assertIn(("fs_write", self.root), labels)
+        # A write is beneath a directory opened under the narrowed `Fs`: the
+        # row names the directory once, as fs_read, and writes by handle.
+        self.assertIn(("fs_read", self.root), labels)
+        self.assertIn(("dir_write", None), labels)
+        self.assertNotIn("fs_write", {name for name, _ in labels})
         embedded = json.loads(subprocess.run([str(self.seek), "introspect"], capture_output=True).stdout)["authority"]
         self.assertEqual(embedded, self.seek_authority)
 

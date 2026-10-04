@@ -23,21 +23,24 @@ those (§7.3). Every tool's `introspect` says the same in its `evidence` field.
 
 | Tool | Does | Output | Authority (derived by `lex-sys authority`) |
 |---|---|---|---|
-| `seek` | literal search over files (`grep -F`) | NDJSON stream | `args, err_write, file_read, fs_read(""), heap, io_write` |
-| `write` | replace a file atomically, only with `--create` or `--if-sha256`; idempotent; `--dry-run` | document | `args, err_write, file_read, file_write, fs_read(""), fs_write(""), heap, io_read, io_write` |
-| `replace` | replace exact text `--expect` times, atomically; `--dry-run` | document | `args, err_write, file_read, file_write, fs_read(""), fs_write(""), heap, io_write` |
-| `peek` | a line or byte range with numbers, offsets, size, a cursor (`head`/`tail`/`sed -n`/`cat -n`/`wc -l`) | document | `args, err_write, file_read, fs_read(""), heap, io_write` |
-| `jsonq` | one RFC 6901 pointer into one strict JSON document | document | `args, err_write, file_read, fs_read(""), heap, io_read, io_write` |
+| `seek` | literal search over files (`grep -F`) | NDJSON stream | `args, dir_read, err_write, file_read, fs_read(""), heap, io_write` |
+| `write` | replace a file atomically, only with `--create` or `--if-sha256`; idempotent; `--dry-run` | document | `args, dir_read, dir_write, err_write, file_read, file_write, fs_read(""), heap, io_read, io_write` |
+| `replace` | replace exact text `--expect` times, atomically; `--dry-run` | document | `args, dir_read, dir_write, err_write, file_read, file_write, fs_read(""), heap, io_write` |
+| `peek` | a line or byte range with numbers, offsets, size, a cursor (`head`/`tail`/`sed -n`/`cat -n`/`wc -l`) | document | `args, dir_read, err_write, file_read, fs_read(""), heap, io_write` |
+| `jsonq` | one RFC 6901 pointer into one strict JSON document | document | `args, dir_read, err_write, file_read, fs_read(""), heap, io_read, io_write` |
 | `tally` | distinct lines or fields, counted, ordered by count then bytes (`sort \| uniq -c \| sort -rn`) | document | `args, err_write, file_read, fs_read(""), heap, io_read, io_write` |
-| `hash` | SHA-256/512 of files of any size, `--verify` | NDJSON stream | `args, err_write, file_read, fs_read(""), heap, io_write` |
+| `hash` | SHA-256/512 of files of any size, `--verify` | NDJSON stream | `args, dir_read, err_write, file_read, fs_read(""), heap, io_write` |
 
 No tool holds `ffi`, a network label or a clock; every report is
-`bounded: true`. The five read-only tools hold no `fs_write`. The rows name
-*kinds* of access, not *extent*: a path from the command line is checked at
-run time, so the row says `fs_read("")` (§0 amendment 2). Extent comes from
-`--root` (lexical, D9), from a build with the root baked in (D14,
-`scripts/variant.py`, whose row then reads `fs_read("/srv/work")`), or from
-the perimeter.
+`bounded: true`. The five read-only tools hold no `dir_write` or
+`file_write`, and **no tool holds `fs_write`**: `write` and `replace` write
+only beneath a directory they opened (`dir_write`, lex-sys
+`docs/directory-handles.md`), never by path. The rows name *kinds* of access,
+not *extent*: a path from the command line is checked at run time, so the row
+says `fs_read("")` (§0 amendment 2). Extent comes from `--root` (D9: checked
+lexically, then opened beneath the root following no link), from a build with
+the root baked in (D14, `scripts/variant.py`, whose row then reads
+`fs_read("/srv/work")`), or from the perimeter.
 
 Each tool answers `tool introspect` (flags with their roles, exit codes, the
 rule catalogue, limits, the schema, the embedded authority) and `tool skill`
@@ -57,7 +60,7 @@ rule catalogue, limits, the schema, the embedded authority) and `tool skill`
   2 malformed invocation (nothing was read), 3 not found, 4 refused,
   5 conflict, 8 the answer is no or a limit was reached, 9 dry run.
 * **Errors are data** (D5): `{code, rule, message, hint, repair, detail}`.
-  36 rules in one catalogue (`contract/rules.ls`); every independent error is
+  37 rules in one catalogue (`contract/rules.ls`); every independent error is
   reported, the first decides the exit code.
 * **Repairs** (D6): `null`, `{"kind":"none","reason"}`, or
   `{"kind":"retry","argv":[…]}` that a script can run as it stands. A repair
@@ -65,7 +68,15 @@ rule catalogue, limits, the schema, the embedded authority) and `tool skill`
   `--create`, never removes `--dry-run`).
 * **Mutation** (D10): no blind overwrite; idempotent; a sidecar `flock` on
   `<path>.lexsys-lock` held across check and rename; a synced temporary
-  renamed over the target; `--dry-run` makes no mutating system call.
+  renamed over the target, every step beneath the directory that holds it;
+  `--dry-run` makes no mutating system call.
+* **Confinement** (D9): with `--root`, a path is checked lexically
+  (`..`, absolute, outside) and then opened beneath the root one component
+  at a time with `O_NOFOLLOW`; a symbolic link anywhere below the root is
+  `path.symlink` (exit 4), whether it points inside or out. The root's own
+  spelling is the caller's and may hold links. Without `--root`, a reader
+  opens the path as given, links and all; a writer never follows a link in
+  the file's own name. `introspect` says `confinement: beneath`.
 * **Memory** (D8): a chunk plus the longest line, capped, whatever the input.
 
 ## Layout
@@ -73,7 +84,8 @@ rule catalogue, limits, the schema, the embedded authority) and `tool skill`
 ```
 contract/           the shared package (S0): rules, fail, out, cli, path, lines,
                     text (text_or_bytes, base64), sha (incremental SHA-256/512),
-                    atomic (lock, temporary, rename), limit, describe
+                    atomic (lock, temporary, rename), place (open beneath
+                    --root, following no link), limit, describe
 tools/<tool>/       one program per tool (D17)
 generated/<tool>/   the embedded manifest -- written by scripts/manifest.py
 manifests/          the compiler's authority report per tool, committed
@@ -104,20 +116,20 @@ manifests and checks the fixed point; `lex-sys build` again embeds them.
 
 ## What the gates measured
 
-On the pinned compiler (`8fc3b3f`), Linux x86_64, a shared and noisy sandbox.
+On the pinned compiler (`066a810`), Linux x86_64, a shared and noisy sandbox.
 
 | Gate | Result |
 |---|---|
 | M1 schema conformance | a corpus of 58 invocations across all seven tools: every output valid against its schema (Draft 2020-12, `additionalProperties: false` except `error.detail`), every status in the tool's declared table |
 | M2 determinism | 765 runs (5 environments × pipe, file and pty sinks): byte-identical to the baseline |
-| M3 rules and repairs | 142 fixtures reach all 36 rules; each tool's declared rule list equals what its fixtures reach; 24 `retry` repairs applied by script, all succeed and none adds a flag of role other than `none` (hint soundness 24/24). Actionability (how many errors carry a repair) is reported, not gated, until a baseline exists |
+| M3 rules and repairs | 149 fixtures reach all 37 rules; each tool's declared rule list equals what its fixtures reach; 24 `retry` repairs applied by script, all succeed and none adds a flag of role other than `none` (hint soundness 24/24). Actionability (how many errors carry a repair) is reported, not gated, until a baseline exists |
 | M4 fault injection | 1,750 seeded cases in CI (N=250 per tool) plus a 1 GiB sparse file; 12,600 more across three other seeds here: **0 traps**, every JSON output valid |
 | M5 differential | `seek` = `grep -F -n -b -a [-i]`; `peek` = `sed -n`, `wc -l`; `jsonq` = `jq -c`; `hash` = `sha256sum`/`sha512sum` at every padding boundary and past 64 KiB; `write` = `cp`; `tally` = `sort \| uniq -c \| sort -k1,1nr -k2`: 0 divergences over the seeded and edge corpus |
 | M6 authority | the committed record equals a fresh derivation, the binary prints it, it is within `tools.toml`, the fixed point holds, and D13's bridge table is total for every label held |
 | M7 mutation | `--dry-run` under `strace`: no mutating call, tree unchanged (with a positive control); every write applied twice, the second `changed:false`; 200 two-writer races, exactly one winner each |
-| M8 confinement | `..`, absolute, `//`, `./`, trailing `/`, sibling prefix, empty, 4,097 bytes, non-ASCII: each a tag or a success, never a trap; **the symlink escape is asserted** (a link inside `--root` is followed), so it flips when lex-sys#227 lands |
-| M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,724/1,724/1,724 KB, `peek` 1,720/1,720/1,704, `hash` 1,708/1,708/1,708, `tally` 1,728/1,572/1,728 (max/min ≤ 1.10; the gate is 1.5; `/bin/true` measures 1,324 KB the same way). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
-| D14 variant | `seek` and `write` built with the root baked in: the authority names the directory, and every M8 case is a tag, not a trap, though the narrowed `Fs` would trap on any path the validation missed |
+| M8 confinement | `..`, absolute, `//`, `./`, trailing `/`, sibling prefix, empty, 4,097 bytes, non-ASCII, a link to a file and a link to a directory: each a tag or a success, never a trap. **No link reaches outside `--root`**: every tool, readers and writers, through a linked file and a linked directory, is `path.symlink` and leaves the outside untouched (until lex-sys#227 this row asserted the escape); a link in `--root`'s own spelling is followed |
+| M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,724/1,724/1,724 KB, `peek` 1,720/1,656/1,720, `hash` 1,704/1,640/1,704, `tally` 1,728/1,728/1,728 (max/min ≤ 1.10; the gate is 1.5; `/bin/true` measures 1,320 KB the same way). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
+| D14 variant | `seek` and `write` built with the root baked in: the authority names the directory (`fs_read("/srv/work")`, and for `write` `dir_write` with no `fs_write`), and every M8 case is a tag, not a trap, though the narrowed `Fs` would trap on any path the validation missed |
 
 **Speed is reported, not gated** (§1.2). One probe, 64 MiB of text,
 7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`). The
@@ -140,6 +152,11 @@ round's:
 
 `seek -i GAMMA`, measured the same way but outside `toolbench.py`: 0.58 s
 against `grep -F -n -b -i`'s 0.52 s.
+
+Opening beneath `--root` (D9, `toolbox.place`) costs one `open_dir`, one
+`openat` per component and the closes, per file: 2,000 one-line files searched
+in one call took 0.132 s with `--root .` against 0.121 s without, about 5.5 µs
+a file, and a single 56 MiB file the same either way (minimum of 7).
 
 What the profile (callgrind) found and what changed in this repository: `seek`
 searched with `std.bytes.find`, which tried every offset (44% of its time) --
@@ -228,7 +245,7 @@ Startup: 1.76 ms against 1.70 ms for `/usr/bin/true` (300 spawns each).
 | 12 | lex-sys#224 B2 `list` and `hash` | **`hash` done**; `list` waits on #222 |
 | 13 | lex-sys#225 D14 variant transform | **Built and tested, no variant shipped**, as D14 recommends: `scripts/variant.py`, `tests/conformance/test_variant.py` |
 | 14 | lex-sys#226 canary job in lex-sys CI | **Not done** (lex-sys CI) |
-| 15 | lex-sys#227 no-follow open (L6) | **Not done** (compiler); M8 pins the escape |
+| 15 | lex-sys#227 no-follow open (L6) | **Done** (lex-sys#250 and #254, directory handles). Every tool opens a path under `--root` beneath it with `toolbox.place`; `write` and `replace` create, rename, lock and sync beneath the parent `Dir` and hold no `fs_write`; M8 asserts the refusal |
 | 16 | lex-sys#228 S-last agent-in-the-loop evaluation | **Not run**: it needs a model in a loop and a frozen protocol, which this environment does not have |
 
 ## Where this differs from the design, and why

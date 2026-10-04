@@ -21,11 +21,12 @@ module toolbox.path;
 //   -> `path.outside-root`, exit 4;
 // * `.` components, repeated `/` and a trailing `/` are collapsed.
 //
-// **Symlinks are not handled.** There is no `lstat`, `readlink` or
-// no-follow open (L6), and a link inside the root that points outside it is
-// followed. `introspect` says `confinement: lexical`, and
-// `tests/conformance/test_confinement.py` asserts the escape, so the day a
-// no-follow primitive lands the test flips.
+// **Symlinks are `toolbox.place`'s.** A lexical check cannot see a link,
+// so this one only decides what to open; `place` opens it beneath the root
+// one component at a time with `O_NOFOLLOW` (lex-sys #227), and a link
+// anywhere below the root is `path.symlink`. `introspect` says
+// `confinement: beneath`, and `tests/conformance/test_confinement.py`
+// asserts that a link to a file and a link to a directory are refused.
 
 import std.buffer;
 import std.bytes;

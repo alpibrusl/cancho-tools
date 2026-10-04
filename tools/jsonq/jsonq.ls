@@ -30,6 +30,7 @@ import toolbox.describe;
 import toolbox.fail;
 import toolbox.out;
 import toolbox.path;
+import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
@@ -37,7 +38,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "jsonq", version: "0.1.0", summary: "Look up one JSON Pointer (RFC 6901) in one strictly parsed JSON document; the value byte for byte, its kind, keys or length, and a parse error's position as data.", usage: "jsonq [--root DIR] [--pointer /a/0/b] [--keys | --length | --type | --exists] [--max-bytes N] [--format json|text] [FILE | -]", output: "document", schema: "jsonq.v1", flags: flag_table(), operands: "FILE|path-read|the document, - or nothing reads standard input", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.input-too-large;parse.json;query.bad-pointer;query.no-such-path;query.wrong-kind;query.unsupported-syntax", limits: "max-bytes|4194304|33554432", reversibility: "reversible-cheap", stdin: "when FILE is - or absent" };
+    return describe.Tool { name: "jsonq", version: "0.1.0", summary: "Look up one JSON Pointer (RFC 6901) in one strictly parsed JSON document; the value byte for byte, its kind, keys or length, and a parse error's position as data.", usage: "jsonq [--root DIR] [--pointer /a/0/b] [--keys | --length | --type | --exists] [--max-bytes N] [--format json|text] [FILE | -]", output: "document", schema: "jsonq.v1", flags: flag_table(), operands: "FILE|path-read|the document, - or nothing reads standard input", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.input-too-large;parse.json;query.bad-pointer;query.no-such-path;query.wrong-kind;query.unsupported-syntax", limits: "max-bytes|4194304|33554432", reversibility: "reversible-cheap", stdin: "when FILE is - or absent" };
 }
 
 fn built() -> [] describe.Built {
@@ -400,7 +401,7 @@ fn answer[&h, &g, &p, &s, &n](heap: &!h Heap, args: &g Args, parsed: &p cli.Pars
     return (e, data, plain);
 }
 
-fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), file_read, io_read, io_write, err_write] int {
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, io_read, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
@@ -474,7 +475,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 borrow target as &tp in {
                     named = buffer.append(heap, named, path.shown(tp));
                     if path.ok(tp) {
-                        let (read, errno, too_big) = atomic.read_all(heap, fs, path.full(tp), most, src);
+                        let (read, errno, too_big) = atomic.read_all(heap, place.open_operand(fs, buffer.bytes(rr), path.shown(tp), path.full(tp)), most, src);
                         src = read;
                         if errno != 0 {
                             e = fail.io_error(heap, e, errno, false, path.shown(tp));
@@ -520,7 +521,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     return status;
 }
 
-fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), file_read, io_read, io_write, err_write] int {
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, file_read, io_read, io_write, err_write] int {
     let which = cli.subcommand(args);
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());

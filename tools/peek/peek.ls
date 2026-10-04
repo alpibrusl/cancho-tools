@@ -34,6 +34,7 @@ import toolbox.limit;
 import toolbox.lines;
 import toolbox.out;
 import toolbox.path;
+import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
@@ -41,7 +42,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "peek", version: "0.1.0", summary: "Read a range of a file -- lines with numbers and offsets, or bytes -- with its size, a binary flag and a cursor to the rest; head, tail, sed -n, cat -n and wc -l in one call.", usage: "peek [--root DIR] [--lines A:B | --bytes A:B] [--max-bytes N] [--max-line-bytes N] [--count-lines] [--format json|text] PATH", output: "document", schema: "peek.v1", flags: flag_table(), operands: "PATH|path-read|the file to read", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.line-too-long", limits: "max-bytes|65536|16777216;max-line-bytes|1048576|16777216", reversibility: "reversible-cheap", stdin: "no" };
+    return describe.Tool { name: "peek", version: "0.1.0", summary: "Read a range of a file -- lines with numbers and offsets, or bytes -- with its size, a binary flag and a cursor to the rest; head, tail, sed -n, cat -n and wc -l in one call.", usage: "peek [--root DIR] [--lines A:B | --bytes A:B] [--max-bytes N] [--max-line-bytes N] [--count-lines] [--format json|text] PATH", output: "document", schema: "peek.v1", flags: flag_table(), operands: "PATH|path-read|the file to read", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.line-too-long", limits: "max-bytes|65536|16777216;max-line-bytes|1048576|16777216", reversibility: "reversible-cheap", stdin: "no" };
 }
 
 fn built() -> [] describe.Built {
@@ -362,7 +363,7 @@ fn read[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     return (e, json.finish(w), plain);
 }
 
-fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), file_read, io_write, err_write] int {
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
@@ -405,7 +406,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
             e = checked;
             borrow target as &tp in {
                 if path.ok(tp) {
-                    match open_read(fs, path.full(tp)) {
+                    match place.open_operand(fs, buffer.bytes(rr), path.shown(tp), path.full(tp)) {
                         Opened::Failed(reason) => {
                             e = fail.io_error(heap, e, reason, false, path.shown(tp));
                         }
@@ -449,7 +450,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     return status;
 }
 
-fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), file_read, io_write, err_write] int {
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, file_read, io_write, err_write] int {
     let which = cli.subcommand(args);
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());

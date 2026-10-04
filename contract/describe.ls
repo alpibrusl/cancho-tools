@@ -239,9 +239,9 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
     w = json.end_array(heap, w);
 
     w = json.put_key(heap, w, "confinement");
-    w = json.put_string(heap, w, "lexical");
+    w = json.put_string(heap, w, "beneath");
     w = json.put_key(heap, w, "confinement_note");
-    w = json.put_string(heap, w, "with --root, paths are checked lexically against it before any is opened; without it, paths are relative to the working directory; symlinks are followed, so a link inside the root can reach outside it");
+    w = json.put_string(heap, w, "with --root, paths are checked lexically against it and then opened beneath it one component at a time, following no symbolic link (path.symlink), so nothing outside the root is reachable through one; without it, a reader opens the path as given, links and all, and a writer still follows no link in the file's own name");
     w = json.put_key(heap, w, "reads_environment");
     w = json.put_bool(heap, w, false);
     w = json.put_key(heap, w, "reads_clock");

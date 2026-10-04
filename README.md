@@ -103,7 +103,7 @@ On the pinned compiler (`a18e533`), Linux x86_64, a shared and noisy sandbox.
 
 | Gate | Result |
 |---|---|
-| M1 schema conformance | a corpus of 60+ invocations across all tools: every output valid against its schema (Draft 2020-12, `additionalProperties: false` except `error.detail`), every status in the tool's declared table |
+| M1 schema conformance | a corpus of 58 invocations across all seven tools: every output valid against its schema (Draft 2020-12, `additionalProperties: false` except `error.detail`), every status in the tool's declared table |
 | M2 determinism | 765 runs (5 environments × pipe, file and pty sinks): byte-identical to the baseline |
 | M3 rules and repairs | 142 fixtures reach all 36 rules; each tool's declared rule list equals what its fixtures reach; 24 `retry` repairs applied by script, all succeed and none adds a flag of role other than `none` (hint soundness 24/24). Actionability (how many errors carry a repair) is reported, not gated, until a baseline exists |
 | M4 fault injection | 1,750 seeded cases in CI (N=250 per tool) plus a 1 GiB sparse file; 12,600 more across three other seeds here: **0 traps**, every JSON output valid |
@@ -186,8 +186,9 @@ around silently.
 2. **A local binding shadows a module-qualified call of the same name.**
    `var size = 0; size = buffer.size(r);` is refused with "`size` is a local
    binding, not a function"; so are `failed = lines.failed(r)`,
-   `next = json.at(…)` after `let at`, and others. Met eleven times here; the
-   locals were renamed.
+   `next = json.at(…)` after `let at`, and others. Met in five source files
+   here (`contract/path.ls`, `seek`, `peek`, `jsonq`, `tally`); the locals were
+   renamed.
 3. **Two root-module test files that each `import std.test` cannot be one
    `[[test]]` set**: "`test` is already bound to another import". Each test
    file is its own set in `lex-sys.toml`.

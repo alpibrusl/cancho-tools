@@ -84,7 +84,7 @@ pub fn read_all[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], most
                             going = false;
                         } else {
                             borrow chunk as &c in {
-                                out = text.append_bytes(heap, out, buffer.bytes(c));
+                                out = buffer.append(heap, out, buffer.bytes(c));
                             }
                         }
                     }

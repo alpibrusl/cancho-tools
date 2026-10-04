@@ -206,13 +206,13 @@ fn match_record[&h, &i, &p, &t](heap: &!h Heap, io: &!i Io, into: buffer.Buffer,
     borrow mut b as &!w in {
         buffer.clear(w);
     }
-    b = text.append_bytes(heap, b, prefix);
+    b = buffer.append(heap, b, prefix);
     b = text.append_nat(heap, b, number);
-    b = text.append_bytes(heap, b, ",\"offset\":");
+    b = buffer.append(heap, b, ",\"offset\":");
     b = text.append_nat(heap, b, offset);
-    b = text.append_bytes(heap, b, ",\"text\":");
+    b = buffer.append(heap, b, ",\"text\":");
     b = text.append_json(heap, b, line);
-    b = text.append_bytes(heap, b, "}\n");
+    b = buffer.append(heap, b, "}\n");
     var ok = false;
     borrow b as &r in {
         ok = out.emit(io, buffer.bytes(r));
@@ -250,9 +250,9 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
     }
     var record = buffer.empty(heap, 256);
     var prefix = buffer.empty(heap, 64);
-    prefix = text.append_bytes(heap, prefix, "{\"type\":\"match\",\"path\":");
+    prefix = buffer.append(heap, prefix, "{\"type\":\"match\",\"path\":");
     prefix = text.append_json(heap, prefix, shown);
-    prefix = text.append_bytes(heap, prefix, ",\"line\":");
+    prefix = buffer.append(heap, prefix, ",\"line\":");
     var r = lines.start(heap, cap);
     borrow prefix as &pre in {
         var going = true;
@@ -470,6 +470,9 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         }
     }
     fail.drop(heap, e);
+    if !t.broken && !out.flushed(io) {
+        t = broken(t);
+    }
     if t.broken {
         out.write_failed(io, "seek");
         return 1;

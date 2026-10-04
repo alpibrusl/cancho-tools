@@ -5,13 +5,14 @@ module toolbox.out;
 // `toolbox.out` -- what a tool writes, and the check that it was written.
 //
 // lex-sys `docs/agent-toolbox.md` §2.1 (L1): `write_bytes` answers the
-// count stdio *buffered*, and a failed flush at exit is invisible. What a
-// program can see is a short count once the buffer fills, so every write
-// here is checked against the length it was handed, and a short one makes
-// the tool stop with `io.write-failed` (on standard error, the one place
-// left to say it). The last buffer's worth can still be lost where nothing
-// can look; that is why a stream ends with an `end` record and a reader
-// that does not see one must treat the stream as truncated (D2).
+// count stdio *buffered*. Every write here is checked against the length it
+// was handed, and the last one is followed by `flushed`, which is lex-sys's
+// `flush_out` (`docs/checked-output.md`): it flushes standard output and
+// reports a failure at any earlier point too. A short write or a failed
+// flush makes the tool say `io.write-failed` on standard error, the one
+// place left to say it, and exit 1. A stream still ends with an `end`
+// record, and a reader that does not see one must treat the stream as
+// truncated (D2): a killed process flushes nothing.
 //
 // The envelope (D3) is ACLI's without `meta.duration_ms`, which would make
 // two runs differ, and with `schema`, `error.rule`, `error.repair` and
@@ -29,6 +30,20 @@ pub fn emit[&i, &d](io: &!i Io, data: &d [byte]) -> [io_write] bool {
         return true;
     }
     return write_bytes(io, data) == len(data);
+}
+
+// Everything written to standard output so far arrived: one `flush_out`,
+// called once, after the last write. False on any failure, earlier ones
+// included (`docs/checked-output.md` §2).
+pub fn flushed[&i](io: &!i Io) -> [io_write] bool {
+    match flush_out(io) {
+        Done::Ok(n) => {
+            return true;
+        }
+        Done::Failed(e) => {
+            return false;
+        }
+    }
 }
 
 // `data` and a newline, checked.
@@ -186,7 +201,7 @@ pub fn respond[&h, &i, &d, &x, &e, &t](heap: &!h Heap, io: &!i Io, command: &sta
         let doc = document(heap, command, schema, version, data, extra, errs);
         ok = buffer_line(heap, io, doc);
     }
-    if !ok {
+    if !ok || !flushed(io) {
         write_failed(io, command);
         return 1;
     }

@@ -163,9 +163,11 @@ pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
     var vt = 0;
     borrow chunk as &c in {
         let data = buffer.bytes(c);
-        var k = at;
-        while k < len(data) && int_of(data[k]) != 10 {
-            k = k + 1;
+        // One `memchr` for the end of the line (lex-sys `docs/byte-search.md`).
+        var k = len(data);
+        let found = index_of_byte(data[at..len(data)], byte_of(10));
+        if found >= 0 {
+            k = at + found;
         }
         let piece = data[at..k];
         var held_now = 0;
@@ -218,14 +220,7 @@ pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
 }
 
 fn any_nul[&d](data: &d [byte]) -> [] bool {
-    var i = 0;
-    while i < len(data) {
-        if int_of(data[i]) == 0 {
-            return true;
-        }
-        i = i + 1;
-    }
-    return false;
+    return index_of_byte(data, byte_of(0)) >= 0;
 }
 
 // Refill from an open file. Call only after `next` answered `need`.

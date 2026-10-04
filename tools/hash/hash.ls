@@ -258,6 +258,9 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         }
     }
     fail.drop(heap, e);
+    if !broken && !out.flushed(io) {
+        broken = true;
+    }
     if broken {
         out.write_failed(io, "hash");
         return 1;

@@ -121,7 +121,7 @@ pub fn append_json[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) 
     }
     if plain == len(data) {
         var q = buffer.push(heap, out, byte_of('"'));
-        q = append_bytes(heap, q, data);
+        q = buffer.append(heap, q, data);
         return buffer.push(heap, q, byte_of('"'));
     }
     if !is_utf8(data) {
@@ -138,7 +138,7 @@ pub fn append_json[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) 
         if c >= 32 && c != '"' && c != '\\' {
             p = p + 1;
         } else {
-            o = append_bytes(heap, o, data[run..p]);
+            o = buffer.append(heap, o, data[run..p]);
             o = buffer.push(heap, o, byte_of('\\'));
             if c == '"' || c == '\\' {
                 o = buffer.push(heap, o, byte_of(c));
@@ -161,7 +161,7 @@ pub fn append_json[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) 
             run = p;
         }
     }
-    o = append_bytes(heap, o, data[run..p]);
+    o = buffer.append(heap, o, data[run..p]);
     return buffer.push(heap, o, byte_of('"'));
 }
 
@@ -185,26 +185,6 @@ pub fn append_nat[&h](heap: &!h Heap, out: buffer.Buffer, n: int) -> [heap] buff
             i = i - 1;
         }
         buffer.filled(w, digits);
-    }
-    return o;
-}
-
-// Append `data` to `out`: `std.buffer.append`'s job, with the copy written
-// into a slice exactly as long as `data`, so that the bound of every store
-// is the bound of the loop and the compiler can drop the per-byte checks.
-// (`buffer.append` indexes the whole allocation at `used + i`, which it
-// cannot prove in range; it was a quarter of a match-heavy `seek`.)
-pub fn append_bytes[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) -> [heap] buffer.Buffer {
-    let n = len(data);
-    var o = buffer.reserve(heap, out, n);
-    borrow mut o as &!w in {
-        let dst = buffer.room(w)[0..n];
-        var i = 0;
-        while i < n {
-            dst[i] = data[i];
-            i = i + 1;
-        }
-        buffer.filled(w, n);
     }
     return o;
 }

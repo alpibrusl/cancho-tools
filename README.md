@@ -9,6 +9,10 @@ build embeds. The design is lex-sys
 [lex-sys#214](https://github.com/alpibrusl/lex-sys/issues/214). This
 repository is D18's separate repository.
 
+**Site:** <https://alpibrusl.github.io/lexsys-tools/>, with one page per tool
+generated from its own `introspect` (flags, rules, exit codes, authority,
+schemas and `SKILL.md`) by `scripts/site.py` on every push to `main`.
+
 **What this repository does not claim.** Nothing here says these tools are
 "more agent-friendly" than the incumbents, or that they improve task success.
 That needs the agent-in-the-loop evaluation (§7.2, lex-sys#228), which has not
@@ -77,7 +81,7 @@ schemas/            one JSON Schema per tool -- written by scripts/schemas.py
 tools.toml          the authority ceiling a person writes (D12)
 tests/*.ls          unit tests of the contract (`lex-sys test`)
 tests/conformance/  the offline gates M1-M9 and D14, as processes
-scripts/            manifest.py, schemas.py, variant.py, toolbench.py
+scripts/            manifest.py, schemas.py, variant.py, toolbench.py, site.py
 ```
 
 ## Building and checking
@@ -92,6 +96,7 @@ python3 scripts/manifest.py --check    # M6: authority = compiler's, embedded, w
 python3 -m unittest discover -s tests/conformance -v      # M1-M9, D14 (needs jsonschema, jq, strace, cc)
 python3 scripts/toolbench.py --self-test                  # S3's own gate
 python3 scripts/toolbench.py --tool seek --size 64MiB     # a probe, not a result
+python3 scripts/site.py                                   # the Pages site, from build/ into site/
 ```
 
 After changing a tool, `python3 scripts/manifest.py` regenerates the
@@ -99,7 +104,7 @@ manifests and checks the fixed point; `lex-sys build` again embeds them.
 
 ## What the gates measured
 
-On the pinned compiler (`a18e533`), Linux x86_64, a shared and noisy sandbox.
+On the pinned compiler (`8fc3b3f`), Linux x86_64, a shared and noisy sandbox.
 
 | Gate | Result |
 |---|---|
@@ -111,37 +116,61 @@ On the pinned compiler (`a18e533`), Linux x86_64, a shared and noisy sandbox.
 | M6 authority | the committed record equals a fresh derivation, the binary prints it, it is within `tools.toml`, the fixed point holds, and D13's bridge table is total for every label held |
 | M7 mutation | `--dry-run` under `strace`: no mutating call, tree unchanged (with a positive control); every write applied twice, the second `changed:false`; 200 two-writer races, exactly one winner each |
 | M8 confinement | `..`, absolute, `//`, `./`, trailing `/`, sibling prefix, empty, 4,097 bytes, non-ASCII: each a tag or a success, never a trap; **the symlink escape is asserted** (a link inside `--root` is followed), so it flips when lex-sys#227 lands |
-| M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,572/1,572/1,572 KB, `peek` 1,572, `hash` 1,564, `tally` 1,580 (max/min ≤ 1.01; the gate is 1.5). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
+| M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,724/1,724/1,724 KB, `peek` 1,720/1,720/1,704, `hash` 1,708/1,708/1,708, `tally` 1,728/1,572/1,728 (max/min ≤ 1.10; the gate is 1.5; `/bin/true` measures 1,324 KB the same way). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
 | D14 variant | `seek` and `write` built with the root baked in: the authority names the directory, and every M8 case is a tag, not a trap, though the narrowed `Fs` would trap on any path the validation missed |
 
 **Speed is reported, not gated** (§1.2). One probe, 64 MiB of text,
-7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`):
+7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`). The
+three columns are three compilers and two rounds of work: the first version;
+the same sources after profiling, re-measured on the compiler they were written
+for (`a18e533`); and now, on `8fc3b3f`, with lex-sys's
+`calloc`, `copy_into`, `index_of_byte` and `flush_out` in use. The last two
+columns and the incumbents were measured in one session on one machine:
 
-| Tool | Before profiling | Now | Incumbent |
-|---|---|---|---|
-| `seek gamma` (about a million matches written) | 1.67 s | 0.85 s | `grep -F -n -b` 0.48 s, `rg` 0.36 s |
-| `seek` with no match | 2.7 s | 0.25 s | `grep -F -n -b` 0.09 s |
-| `hash` | 0.83 s | 0.65 s | `sha256sum` 0.18 s (OpenSSL's AVX2 assembly) |
-| `peek --count-lines --lines 1:100` | 0.19 s | 0.17 s | `sed -n 1,100p; wc -l` 0.13 s |
-| `tally --field 1` | 0.30 s | 0.22 s | `cut \| sort \| uniq -c \| sort \| head` 0.71 s |
-| `jsonq -p /0`, 16 MiB array | 0.41 s | 0.41 s | `jq -c .[0]` 0.73 s |
+| Tool | First version | Profiled (`a18e533`) | Now (`8fc3b3f`) | Incumbent |
+|---|---|---|---|---|
+| `seek gamma` (about a million matches written) | 1.67 s | 0.76 s | **0.67 s** | `grep -F -n -b` 0.49 s, `rg` 0.38 s |
+| `seek` with no match | 2.7 s | 0.22 s | **0.16 s** | `grep -F -n -b` 0.05 s |
+| `hash` | 0.83 s | 0.65 s | 0.67 s | `sha256sum` 0.20 s (OpenSSL's AVX2 assembly) |
+| `peek --count-lines --lines 1:100` | 0.19 s | 0.17 s | **0.08 s** | `sed -n 1,100p; wc -l` 0.13 s |
+| `tally --field 1` | 0.30 s | 0.23 s | **0.17 s** | `cut \| sort \| uniq -c \| sort \| head` 0.71 s |
+| `jsonq -p /0`, 16 MiB array | 0.41 s | 0.43 s | **0.15 s** | `jq -c .[0]` 0.81 s |
 
-What the profile (callgrind) found and what changed: `seek` searched with
-`std.bytes.find`, which tries every offset (44% of its time) -- it now uses
-Boyer-Moore-Horspool with a table built once per file; the line reader copied
-every line into a buffer (20%) -- it now answers a view into the read chunk
-and copies only a line that spans two reads; each match built a `json.Writer`
-and validated UTF-8 by decoding every byte -- a match is now encoded straight
-into one reused buffer with an ASCII fast path, and the path part is escaped
-once per file; `std.buffer.append` copies with a bounds check per byte that the
-compiler cannot remove (a quarter of a match-heavy run) -- `text.append_bytes`
-copies into a slice exactly as long as its source. Writing a match in nine
-`write_bytes` calls instead of one was tried and was slower (1.02 s). `hash`
-allocated a 64 KiB region per block and spent a checked add and a mask on every
-32-bit operation; the schedule is now reused and the rounds use wrapping adds
-and one mask per word. `jsonq`'s remaining cost is zero-filling its parse tape
-(24 bytes per byte of input, 43%) and `std.json`'s parser, neither of which is
-in this repository.
+What the profile (callgrind) found and what changed in this repository: `seek`
+searched with `std.bytes.find`, which tried every offset (44% of its time) --
+it now uses Boyer-Moore-Horspool with a table built once per file; the line
+reader copied every line into a buffer (20%) -- it now answers a view into the
+read chunk and copies only a line that spans two reads; each match built a
+`json.Writer` and validated UTF-8 by decoding every byte -- a match is now
+encoded straight into one reused buffer with an ASCII fast path, and the path
+part is escaped once per file. Writing a match in nine `write_bytes` calls
+instead of one was tried and was slower (1.02 s). `hash` allocated a 64 KiB
+region per block and spent a checked add and a mask on every 32-bit
+operation; the schedule is now reused and the rounds use wrapping adds and one
+mask per word.
+
+What the profile found that was **not** in this repository, and was fixed in
+lex-sys instead (the third column):
+
+* **`jsonq`'s parse tape was zero-filled byte by byte** (24 bytes per byte of
+  input, 43% of the instructions). A zero-filled `box_slice` is now `calloc`
+  (lex-sys#235, `docs/zeroed-slices.md`): the pages the parser never writes
+  are never touched. 0.43 s to 0.15 s, and peak memory from 427,540 KB to
+  88,888 KB.
+* **Copying bytes was a loop with a bounds check per byte**, a quarter of a
+  match-heavy `seek`. lex-sys now has `copy_into`, one `memmove`
+  (lex-sys#240, `docs/bulk-copy.md`), and `std.buffer.append` uses it, so
+  this repository's own copy (`text.append_bytes`) is deleted.
+* **Finding the end of a line was a loop** comparing every byte with `\n`.
+  `index_of_byte` is one `memchr` (lex-sys#241, `docs/byte-search.md`); the
+  line reader, which `peek`, `tally` and `seek` share, uses it. The three
+  changes were measured together, not one at a time.
+* **A failed write at exit was invisible.** `flush_out` (lex-sys#232,
+  `docs/checked-output.md`) is now called after the last write of every tool;
+  it costs nothing measurable.
+
+`hash` did not change (its cost is the SHA rounds, which none of this
+touches), and `seek gamma` is now mostly writing a million JSON records.
 
 **Corrected.** An earlier version of this table had `jsonq` at 0.08 s against
 `jq`'s 1.51 s. `jsonq` was refusing that document (exit 8: it was larger than
@@ -154,7 +183,7 @@ Startup: 1.76 ms against 1.70 ms for `/usr/bin/true` (300 spawns each).
 
 | N | Issue | Here |
 |---|---|---|
-| 1 | lex-sys#215 checked stdout writes (L1) | **Not done** (compiler). Mitigated as D2 says: every `write_bytes` is checked against its length, a short one stops the tool with `io.write-failed` on stderr and exit 1, and a stream's `end` record is the evidence nothing was lost. The last buffer's worth can still be lost invisibly until L1 lands |
+| 1 | lex-sys#215 checked stdout writes (L1) | **Done** (lex-sys#232, `flush_out`). Every `write_bytes` is checked against its length, and `toolbox.out.flushed` flushes standard output after the last write and reports a failure at any earlier point; either makes the tool say `io.write-failed` on stderr and exit 1. A stream still ends with an `end` record, because a killed process flushes nothing |
 | 2 | lex-sys#216 S0 the contract package | **Done**: `contract/`, unit tests in `tests/*.ls` |
 | 3 | lex-sys#217 S1a `seek` v1 | **Done** |
 | 4 | lex-sys#218 S1b `write` / `replace` | **Done** |

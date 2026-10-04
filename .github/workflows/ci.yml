@@ -66,6 +66,10 @@ jobs:
         working-directory: tools
         run: python3 scripts/manifest.py --check
 
+      - name: The Pages site generates from these binaries
+        working-directory: tools
+        run: python3 scripts/site.py --out "$RUNNER_TEMP/site"
+
       - name: M1-M9 and D14 -- the offline gates
         working-directory: tools
         run: python3 -W ignore -m unittest discover -s tests/conformance -v

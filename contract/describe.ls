@@ -42,6 +42,10 @@ pub struct Tool {
     reversibility: &static [byte],
     // Whether the tool reads standard input, for the skill's prose.
     stdin: &static [byte],
+    // The guarantees this tool makes, `;`-separated, from `guarantee_keys`:
+    // each one named is `true` in `introspect` and backed by a conformance
+    // gate (tests/conformance/test_guarantees.py), every other one `false`.
+    guarantees: &static [byte],
 }
 
 // What the build embeds (D12): the compiler's authority report for this
@@ -74,6 +78,23 @@ fn count(list: &static [byte]) -> [] int {
 
 fn item(list: &static [byte], i: int, f: int) -> [] &static [byte] {
     return bytes.field(bytes.field(list, ';', i + 1), '|', f);
+}
+
+// Every guarantee `introspect` reports, in order, with what it means.
+fn guarantee_keys() -> [] &static [byte] {
+    return "deterministic|the same input gives byte-identical output, through a pipe, a file or a terminal (M2);idempotent|running it twice leaves the same state as once (M7 for the writers, and a reader changes nothing);atomic|a reader never sees a partial target: the new content is a synced temporary renamed over it (M7);requires_precondition|it refuses to change a file without a stated belief about it: --create, --if-sha256 or --expect (M3);dry_run|--dry-run reports what an apply would do and makes no mutating system call (M7, under strace);bounded_memory|peak memory does not grow with the input's size (M9)";
+}
+
+// Whether `tool` names guarantee `key`.
+fn guarantees_has(tool: Tool, key: &static [byte]) -> [] bool {
+    var i = 0;
+    while i < count(tool.guarantees) {
+        if bytes.equal(item(tool.guarantees, i, 1), key) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
 }
 
 // Whether this tool can exit with `code`: 0 always, 9 for a tool that
@@ -254,6 +275,21 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
     w = put_list(heap, w, "path extent: a path from the command line is checked at run time, so the row says fs_read(\"\");what a symlink reaches;what standard output carries;resource use beyond the tool's own caps (memory, wall time);per-invocation behaviour such as --dry-run, which the row cannot see");
     w = json.put_key(heap, w, "reversibility");
     w = json.put_string(heap, w, tool.reversibility);
+    w = json.put_key(heap, w, "guarantees");
+    w = json.begin_object(heap, w);
+    var g = 0;
+    while g < count(guarantee_keys()) {
+        w = json.put_key(heap, w, item(guarantee_keys(), g, 1));
+        w = json.put_bool(heap, w, guarantees_has(tool, item(guarantee_keys(), g, 1)));
+        g = g + 1;
+    }
+    w = json.put_key(heap, w, "concurrency");
+    if guarantees_has(tool, "atomic") {
+        w = json.put_string(heap, w, "locked: of writers racing with the same precondition, exactly one wins and the others are refused (M7)");
+    } else {
+        w = json.put_string(heap, w, "read-only: it never writes, so any number may run at once");
+    }
+    w = json.end_object(heap, w);
     w = json.put_key(heap, w, "evidence");
     w = json.begin_object(heap, w);
     w = json.put_key(heap, w, "offline");
@@ -324,7 +360,24 @@ pub fn skill[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer.Buff
         b = md(heap, b, "\n");
         i = i + 1;
     }
-    b = md(heap, b, "\nAn unknown flag is refused (`args.unknown-flag`), never ignored. POSIX spellings are not promised.\n\n## Exit codes\n\n");
+    b = md(heap, b, "\nAn unknown flag is refused (`args.unknown-flag`), never ignored. POSIX spellings are not promised.\n\n## Guarantees\n\n");
+    var g = 0;
+    while g < count(guarantee_keys()) {
+        if guarantees_has(tool, item(guarantee_keys(), g, 1)) {
+            b = md(heap, b, "- **");
+            b = md(heap, b, item(guarantee_keys(), g, 1));
+            b = md(heap, b, "**: ");
+            b = md(heap, b, item(guarantee_keys(), g, 2));
+            b = md(heap, b, "\n");
+        }
+        g = g + 1;
+    }
+    if guarantees_has(tool, "atomic") {
+        b = md(heap, b, "- **concurrency**: locked; of writers racing with the same precondition, exactly one wins and the others are refused, so re-read and retry.\n");
+    } else {
+        b = md(heap, b, "- **concurrency**: read-only; it never writes.\n");
+    }
+    b = md(heap, b, "\n## Exit codes\n\n");
     var code = 0;
     while code <= 9 {
         if emits(tool, code) {

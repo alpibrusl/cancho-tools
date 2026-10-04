@@ -17,6 +17,12 @@ import unittest
 
 from harness import Fixture, binary, sha256
 
+
+# The tools M7 races, interrupts and straces: a guarantee of `atomic`,
+# `dry_run` or `requires_precondition` must name one of these
+# (tests/conformance/test_guarantees.py).
+WRITERS = {"write", "replace"}
+
 MUTATING = re.compile(rb"^(?:\d+ +|\[pid +\d+\] )?(rename\w*|unlink\w*|mkdir\w*|rmdir|truncate|ftruncate|link\w*|symlink\w*|fsync|fdatasync|flock)\(", re.M)
 OPEN_FOR_WRITE = re.compile(rb"open(?:at)?\([^)]*O_(?:WRONLY|RDWR|CREAT|TRUNC|APPEND)")
 

@@ -271,6 +271,8 @@ def tool_page(d):
     for k, v in [("output", "NDJSON stream ending in an <code>end</code> record" if d["output"] == "stream" else "one JSON document"),
                  ("schema", ", ".join(f'<a href="schemas/{s}.json">{s}</a>' for s in d["schemas"])),
                  ("reversibility", code(d["reversibility"])),
+                 ("guarantees", ", ".join(code(k) for k, v in d["guarantees"].items() if v is True) or "none"),
+                 ("concurrency", html.escape(d["guarantees"]["concurrency"])),
                  ("confinement", f"{code(d['confinement'])}: {html.escape(d['confinement_note'])}"),
                  ("reads the environment", "no" if not d["reads_environment"] else "yes"),
                  ("reads the clock", "no" if not d["reads_clock"] else "yes"),

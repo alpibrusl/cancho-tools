@@ -47,6 +47,11 @@ def peak_kb(measure, argv):
     return int(status), int(kb)
 
 
+
+# The tools M9 measures, and how: a guarantee of `bounded_memory` in a tool's
+# introspect must name one of these (tests/conformance/test_guarantees.py).
+MEASURED = [("seek", ["gamma"]), ("peek", ["--count-lines", "--lines", "1:10"]), ("hash", []), ("tally", [])]
+
 class MemoryFlatness(unittest.TestCase):
     def test_peak_memory_is_flat_in_the_input(self):
         sizes = [int(s) for s in os.environ.get("MEMORY_SIZES_MIB", "1,64,256").split(",")]
@@ -61,7 +66,7 @@ class MemoryFlatness(unittest.TestCase):
             for mib in sizes:
                 files[mib] = os.path.join(d, "%d.txt" % mib)
                 make(files[mib], mib << 20)
-            for tool, args in [("seek", ["gamma"]), ("peek", ["--count-lines", "--lines", "1:10"]), ("hash", []), ("tally", [])]:
+            for tool, args in MEASURED:
                 peaks = []
                 for mib in sizes:
                     status, kb = peak_kb(measure, [binary(tool)] + args + [files[mib]])

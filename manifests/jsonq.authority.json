@@ -1,7 +1,9 @@
 {
   "bounded": true,
+  "unbounded_by": [],
   "effects": [
     "args",
+    "dir_read",
     "err_write",
     "file_read",
     "fs_read",
@@ -12,6 +14,11 @@
   "labels": [
     {
       "name": "args",
+      "argument": null,
+      "bounded": true
+    },
+    {
+      "name": "dir_read",
       "argument": null,
       "bounded": true
     },
@@ -68,6 +75,7 @@
     "digit_of",
     "distance",
     "emits",
+    "enotdir",
     "entries",
     "entry",
     "entry",
@@ -115,6 +123,7 @@
     "is_digit",
     "is_flag",
     "is_hex",
+    "is_loop",
     "is_tail",
     "is_utf8",
     "is_valid",
@@ -166,5 +175,5 @@
   ],
   "folded_operators": 34,
   "folded_calls": 0,
-  "functions": 214
+  "functions": 219
 }

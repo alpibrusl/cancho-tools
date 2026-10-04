@@ -264,8 +264,13 @@ pub fn simple[&h, &m, &n, &k, &v](heap: &!h Heap, e: Errors, rule: &static [byte
 // An errno from opening or reading `shown`, as the rule it means
 // (`io.*`). A directory is found at the first read, not at open
 // (lex-sys `docs/agent-toolbox.md` A.5), which is why reading callers
-// come here too.
+// come here too. `ELOOP` (40 on Linux, 62 on macOS) is a link the tool
+// would not follow (`toolbox.place`): a refusal of the tool's own, not a
+// failure of the operating system's.
 pub fn io_rule(errno: int, writing: bool) -> [] &static [byte] {
+    if errno == 40 || errno == 62 {
+        return "path.symlink";
+    }
     if errno == 2 {
         return "io.not-found";
     }
@@ -298,6 +303,9 @@ pub fn io_error[&h, &p](heap: &!h Heap, e: Errors, errno: int, writing: bool, sh
         hint = "name a file inside it";
     } else if errno == 13 || errno == 1 {
         message = "permission denied";
+    } else if errno == 40 || errno == 62 {
+        message = "the path runs through a symbolic link, and the tool does not follow links";
+        hint = "name the file the link points to; under --root, it must be inside the root";
     }
     var w = open(heap, rule, message, hint);
     w = no_repair(heap, w);

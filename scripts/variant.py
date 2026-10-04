@@ -10,8 +10,10 @@ narrows its `Fs` to it, and --root is fixed to it (path.baked). The variant's
 manifest is derived like any other (D12): its authority reads
 fs_read("/srv/work"), and that is what its `introspect` prints.
 
-What it does not change: symlinks are still followed (L6), and the variant
-is built from the same sources, so its behaviour is the tool's.
+What it does not change: the variant is built from the same sources, so its
+behaviour is the tool's -- including `toolbox.place`, which opens every path
+beneath the root following no link. A writer's row names the directory once,
+as fs_read, and writes by handle (dir_write), so no fs_write appears.
 
 The design's recommendation is followed: the transform is built and used
 in the tests (tests/conformance/test_variant.py); no variant is shipped.

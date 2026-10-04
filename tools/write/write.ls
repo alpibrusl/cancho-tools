@@ -1,4 +1,4 @@
-edition 5;
+edition 6;
 
 // `write` -- replace a file's content atomically, and only when the caller
 // has said what it believes is there.
@@ -26,7 +26,7 @@ edition 5;
 //   call: no lock file, no temporary, no rename. That is a property of
 //   this code and of `tests/conformance/test_mutation.py` (strace), not of
 //   the type system: the row is the program's, not the invocation's
-//   (§2.4), so a dry run reports `fs_write("")` like a real one.
+//   (§2.4), so a dry run reports `dir_write` like a real one.
 //
 // No tool deletes (D15). The only removal here is of this tool's own
 // temporary, after a failed write.
@@ -41,6 +41,7 @@ import toolbox.describe;
 import toolbox.fail;
 import toolbox.out;
 import toolbox.path;
+import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
@@ -48,7 +49,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "write", version: "0.1.0", summary: "Replace a file atomically, only if it holds what the caller says it holds (--if-sha256) or does not exist (--create); idempotent, locked, with --dry-run.", usage: "write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX] [--dry-run] [--max-bytes N] (--stdin | --content-file PATH) [--format json|text] PATH", output: "document", schema: "write.v1", flags: flag_table(), operands: "PATH|path-write|the file to create or replace", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.required;precondition.hash-mismatch;precondition.content-mismatch;conflict.exists;conflict.locked", limits: "max-bytes|67108864|1073741824", reversibility: "irreversible-bounded", stdin: "with --stdin" };
+    return describe.Tool { name: "write", version: "0.1.0", summary: "Replace a file atomically, only if it holds what the caller says it holds (--if-sha256) or does not exist (--create); idempotent, locked, with --dry-run.", usage: "write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX] [--dry-run] [--max-bytes N] (--stdin | --content-file PATH) [--format json|text] PATH", output: "document", schema: "write.v1", flags: flag_table(), operands: "PATH|path-write|the file to create or replace", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.required;precondition.hash-mismatch;precondition.content-mismatch;conflict.exists;conflict.locked", limits: "max-bytes|67108864|1073741824", reversibility: "irreversible-bounded", stdin: "with --stdin" };
 }
 
 fn built() -> [] describe.Built {
@@ -145,11 +146,11 @@ fn planned[&h, &p, &b, &a](heap: &!h Heap, shown: &p [byte], o: Outcome, before:
 
 // The precondition, checked against the file as it is now, and the write.
 // Called with the lock held, or for a dry run without one.
-fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), full: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write] (fail.Errors, Outcome, buffer.Buffer) {
+fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
     let table = flag_table();
     var e = errs;
     var o = Outcome { changed: false, created: false, planned: false, bytes: len(content) };
-    let (before, errno, size) = atomic.hash_file(heap, fs, full);
+    let (before, errno, size) = atomic.hash_file(heap, dir_open_read(dir, name));
     let dry = cli.has(parsed, table, "dry-run");
     let creating = cli.has(parsed, table, "create");
     var go = false;
@@ -202,11 +203,11 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
     if go && dry {
         o = Outcome { changed: false, created: o.created, planned: true, bytes: len(content) };
     } else if go {
-        let temp = atomic.temp_path(heap, full, after);
+        let temp = atomic.temp_path(heap, name, after);
         var failed = 0;
         var step = 0;
         borrow temp as &t in {
-            let (errno2, step2) = atomic.replace(fs, full, buffer.bytes(t), content);
+            let (errno2, step2) = atomic.replace(dir, name, buffer.bytes(t), content);
             failed = errno2;
             step = step2;
         }
@@ -235,7 +236,7 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
                 e = fail.add(heap, e, w);
             }
         } else {
-            atomic.sync_parent(fs, full);
+            atomic.sync_parent(dir);
             o = Outcome { changed: true, created: o.created, planned: false, bytes: len(content) };
         }
     }
@@ -243,14 +244,14 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
 }
 
 // Take the lock and apply, or apply without one for a dry run.
-fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), full: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write] (fail.Errors, Outcome, buffer.Buffer) {
+fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
     if cli.has(parsed, flag_table(), "dry-run") {
-        return apply(heap, args, parsed, fs, full, shown, content, after, errs);
+        return apply(heap, args, parsed, dir, name, shown, content, after, errs);
     }
     var e = errs;
     var o = Outcome { changed: false, created: false, planned: false, bytes: len(content) };
     var before = buffer.empty(heap, 1);
-    match atomic.acquire(heap, fs, full) {
+    match atomic.acquire(heap, dir, name) {
         Opened::Failed(reason) => {
             if atomic.would_block(reason) {
                 var w = fail.open(heap, "conflict.locked", "another writer holds this file's lock", "retry after it finishes, then re-check the file's hash");
@@ -265,7 +266,7 @@ fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p 
         }
         Opened::Ok(lock) => {
             buffer.drop(heap, before);
-            let (applied, outcome, had) = apply(heap, args, parsed, fs, full, shown, content, after, e);
+            let (applied, outcome, had) = apply(heap, args, parsed, dir, name, shown, content, after, e);
             e = applied;
             o = outcome;
             before = had;
@@ -276,7 +277,39 @@ fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p 
     return (e, o, before);
 }
 
-fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write, io_read, io_write, err_write] int {
+// Open the directory that holds the file -- beneath --root when one is
+// given (`toolbox.place`) -- and take the lock and apply beneath it, so no
+// step follows a link in the file's own name.
+fn beneath[&h, &g, &p, &f, &r, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), root: &r [byte], full: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+    var e = errs;
+    let name = place.leaf(full);
+    if place.is_directory_name(name) {
+        e = fail.io_error(heap, e, 21, false, shown);
+        return (e, Outcome { changed: false, created: false, planned: false, bytes: len(content) }, buffer.empty(heap, 1));
+    }
+    match place.parent(fs, root, shown, full) {
+        DirOpened::Failed(reason) => {
+            e = fail.io_error(heap, e, reason, false, shown);
+            return (e, Outcome { changed: false, created: false, planned: false, bytes: len(content) }, buffer.empty(heap, 1));
+        }
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            var o = Outcome { changed: false, created: false, planned: false, bytes: len(content) };
+            var before = buffer.empty(heap, 1);
+            borrow dir as &d in {
+                buffer.drop(heap, before);
+                let (applied, outcome, had) = locked(heap, args, parsed, d, name, shown, content, after, e);
+                e = applied;
+                o = outcome;
+                before = had;
+            }
+            dir_close(dir);
+            return (e, o, before);
+        }
+    }
+}
+
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write, io_read, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
@@ -331,7 +364,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 e = checked2;
                 borrow source as &sp in {
                     if path.ok(sp) {
-                        let (read, errno, too_big) = atomic.read_all(heap, fs, path.full(sp), most, content);
+                        let (read, errno, too_big) = atomic.read_all(heap, place.open_operand(fs, buffer.bytes(rr), path.shown(sp), path.full(sp)), most, content);
                         content = read;
                         if errno != 0 {
                             e = fail.io_error(heap, e, errno, false, path.shown(sp));
@@ -378,7 +411,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 if path.ok(tp) && source_ok {
                     borrow content as &c in {
                         borrow after as &a in {
-                            let (applied, outcome, had) = locked(heap, args, parsed, fs, path.full(tp), path.shown(tp), buffer.bytes(c), buffer.bytes(a), e);
+                            let (applied, outcome, had) = beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), buffer.bytes(c), buffer.bytes(a), e);
                             e = applied;
                             o = outcome;
                             buffer.drop(heap, before);
@@ -444,7 +477,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     return status;
 }
 
-fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write, io_read, io_write, err_write] int {
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write, io_read, io_write, err_write] int {
     let which = cli.subcommand(args);
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());
@@ -459,11 +492,12 @@ fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io)
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
-    // No foreign code, no network, no clock.
+    let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
+    // No foreign code, no network, no clock, no signals.
     release(ffi);
     release(net);
     release(clock);
+    release(signals);
     var status = 0;
     borrow mut heap as &!h in {
         borrow args as &g in {

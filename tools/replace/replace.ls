@@ -1,4 +1,4 @@
-edition 5;
+edition 6;
 
 // `replace` -- replace exact text in a file, atomically, only when it
 // occurs as often as the caller says.
@@ -33,6 +33,7 @@ import toolbox.describe;
 import toolbox.fail;
 import toolbox.out;
 import toolbox.path;
+import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
@@ -40,7 +41,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "replace", version: "0.1.0", summary: "Replace exact text in a file atomically, only when it occurs --expect times (and, with --if-sha256, only when the file is what the caller read); idempotent, locked, with --dry-run.", usage: "replace [--root DIR] --old TEXT --new TEXT [--expect N] [--if-sha256 HEX] [--dry-run] [--max-bytes N] [--format json|text] PATH", output: "document", schema: "replace.v1", flags: flag_table(), operands: "PATH|path-write|the file to edit", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.hash-mismatch;precondition.count-mismatch;conflict.locked", limits: "max-bytes|67108864|1073741824", reversibility: "irreversible-bounded", stdin: "no" };
+    return describe.Tool { name: "replace", version: "0.1.0", summary: "Replace exact text in a file atomically, only when it occurs --expect times (and, with --if-sha256, only when the file is what the caller read); idempotent, locked, with --dry-run.", usage: "replace [--root DIR] --old TEXT --new TEXT [--expect N] [--if-sha256 HEX] [--dry-run] [--max-bytes N] [--format json|text] PATH", output: "document", schema: "replace.v1", flags: flag_table(), operands: "PATH|path-write|the file to edit", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.hash-mismatch;precondition.count-mismatch;conflict.locked", limits: "max-bytes|67108864|1073741824", reversibility: "irreversible-bounded", stdin: "no" };
 }
 
 fn built() -> [] describe.Built {
@@ -85,7 +86,7 @@ fn drop_hashes[&h](heap: &!h Heap, x: Hashes) -> [heap] int {
 
 // Read, decide, write. Called with the lock held, or for a dry run
 // without one.
-fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), full: &s [byte], shown: &s [byte], errs: fail.Errors) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write] (fail.Errors, Outcome, Hashes) {
+fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, Hashes) {
     let table = flag_table();
     let old = cli.text(args, parsed, table, "old");
     let new = cli.text(args, parsed, table, "new");
@@ -93,7 +94,7 @@ fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parse
     var e = errs;
     var o = Outcome { changed: false, planned: false, replacements: 0, bytes: 0 };
     var hashes = no_hashes(heap);
-    let (current, errno, too_big) = atomic.read_all(heap, fs, full, cli.nat(args, parsed, table, "max-bytes"), buffer.empty(heap, 4096));
+    let (current, errno, too_big) = atomic.read_all(heap, dir_open_read(dir, name), cli.nat(args, parsed, table, "max-bytes"), buffer.empty(heap, 4096));
     if errno != 0 {
         e = fail.io_error(heap, e, errno, false, shown);
     } else if too_big {
@@ -153,16 +154,16 @@ fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parse
                         var failed_errno = 0;
                         var step = 0;
                         borrow next as &a in {
-                            let temp = atomic.temp_path(heap, full, buffer.bytes(a));
+                            let temp = atomic.temp_path(heap, name, buffer.bytes(a));
                             borrow temp as &t in {
-                                let (errno2, step2) = atomic.replace(fs, full, buffer.bytes(t), content);
+                                let (errno2, step2) = atomic.replace(dir, name, buffer.bytes(t), content);
                                 failed_errno = errno2;
                                 step = step2;
                             }
                             buffer.drop(heap, temp);
                         }
                         if failed_errno == 0 {
-                            atomic.sync_parent(fs, full);
+                            atomic.sync_parent(dir);
                             o = Outcome { changed: true, planned: false, replacements: found, bytes: len(content) };
                         } else if step == 1 && failed_errno == 17 {
                             e = fail.simple(heap, e, "conflict.locked", "the temporary file could not be created; another writer may hold it", "retry later", "path", shown);
@@ -187,14 +188,14 @@ fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parse
     return (e, o, hashes);
 }
 
-fn locked[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), full: &s [byte], shown: &s [byte], errs: fail.Errors) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write] (fail.Errors, Outcome, Hashes) {
+fn locked[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, Hashes) {
     if cli.has(parsed, flag_table(), "dry-run") {
-        return apply(heap, args, parsed, fs, full, shown, errs);
+        return apply(heap, args, parsed, dir, name, shown, errs);
     }
     var e = errs;
     var o = Outcome { changed: false, planned: false, replacements: 0, bytes: 0 };
     var hashes = no_hashes(heap);
-    match atomic.acquire(heap, fs, full) {
+    match atomic.acquire(heap, dir, name) {
         Opened::Failed(reason) => {
             if atomic.would_block(reason) {
                 var w = fail.open(heap, "conflict.locked", "another writer holds this file's lock", "retry after it finishes, then re-check the file");
@@ -209,7 +210,7 @@ fn locked[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Pars
         }
         Opened::Ok(lock) => {
             drop_hashes(heap, hashes);
-            let (applied, outcome, had) = apply(heap, args, parsed, fs, full, shown, e);
+            let (applied, outcome, had) = apply(heap, args, parsed, dir, name, shown, e);
             e = applied;
             o = outcome;
             hashes = had;
@@ -218,6 +219,38 @@ fn locked[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Pars
         }
     }
     return (e, o, hashes);
+}
+
+// Open the directory that holds the file -- beneath --root when one is
+// given (`toolbox.place`) -- and take the lock and apply beneath it, so no
+// step follows a link in the file's own name.
+fn beneath[&h, &g, &p, &f, &r, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), root: &r [byte], full: &s [byte], shown: &s [byte], errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, Hashes) {
+    var e = errs;
+    let name = place.leaf(full);
+    if place.is_directory_name(name) {
+        e = fail.io_error(heap, e, 21, false, shown);
+        return (e, Outcome { changed: false, planned: false, replacements: 0, bytes: 0 }, no_hashes(heap));
+    }
+    match place.parent(fs, root, shown, full) {
+        DirOpened::Failed(reason) => {
+            e = fail.io_error(heap, e, reason, false, shown);
+            return (e, Outcome { changed: false, planned: false, replacements: 0, bytes: 0 }, no_hashes(heap));
+        }
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            var o = Outcome { changed: false, planned: false, replacements: 0, bytes: 0 };
+            var hashes = no_hashes(heap);
+            borrow dir as &d in {
+                drop_hashes(heap, hashes);
+                let (applied, outcome, had) = locked(heap, args, parsed, d, name, shown, e);
+                e = applied;
+                o = outcome;
+                hashes = had;
+            }
+            dir_close(dir);
+            return (e, o, hashes);
+        }
+    }
 }
 
 fn data[&h, &p, &q](heap: &!h Heap, shown: &p [byte], o: Outcome, x: &q Hashes) -> [heap] buffer.Buffer {
@@ -267,7 +300,7 @@ fn planned[&h, &p, &q](heap: &!h Heap, shown: &p [byte], o: Outcome, x: &q Hashe
     return buffer.append(heap, b, "]");
 }
 
-fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write, io_write, err_write] int {
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
@@ -302,7 +335,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 shown_copy = buffer.append(heap, shown_copy, path.shown(tp));
                 if path.ok(tp) {
                     drop_hashes(heap, hashes);
-                    let (applied, outcome, had) = locked(heap, args, parsed, fs, path.full(tp), path.shown(tp), e);
+                    let (applied, outcome, had) = beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), e);
                     e = applied;
                     o = outcome;
                     hashes = had;
@@ -359,7 +392,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     return status;
 }
 
-fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), file_read, fs_write(""), file_write, io_write, err_write] int {
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write, io_write, err_write] int {
     let which = cli.subcommand(args);
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());
@@ -374,11 +407,12 @@ fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io)
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
-    // No foreign code, no network, no clock.
+    let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
+    // No foreign code, no network, no clock, no signals.
     release(ffi);
     release(net);
     release(clock);
+    release(signals);
     var status = 0;
     borrow mut heap as &!h in {
         borrow args as &g in {

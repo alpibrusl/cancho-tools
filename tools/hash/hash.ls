@@ -24,6 +24,7 @@ import toolbox.describe;
 import toolbox.fail;
 import toolbox.out;
 import toolbox.path;
+import toolbox.place;
 import toolbox.sha;
 import toolbox.text;
 
@@ -32,7 +33,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "hash", version: "0.1.0", summary: "SHA-256 or SHA-512 of files of any size, as NDJSON records, with --verify; the hash write --if-sha256 wants, from a tool that cannot write.", usage: "hash [--root DIR] [--algo sha256|sha512] [--verify HEX] [--format ndjson|text] PATH...", output: "stream", schema: "hash.v1", flags: flag_table(), operands: "PATH...|path-read|the files to hash, in order", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.duplicate-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;precondition.hash-failed", limits: "", reversibility: "reversible-cheap", stdin: "no" };
+    return describe.Tool { name: "hash", version: "0.1.0", summary: "SHA-256 or SHA-512 of files of any size, as NDJSON records, with --verify; the hash write --if-sha256 wants, from a tool that cannot write.", usage: "hash [--root DIR] [--algo sha256|sha512] [--verify HEX] [--format ndjson|text] PATH...", output: "stream", schema: "hash.v1", flags: flag_table(), operands: "PATH...|path-read|the files to hash, in order", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.duplicate-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;precondition.hash-failed", limits: "", reversibility: "reversible-cheap", stdin: "no" };
 }
 
 fn built() -> [] describe.Built {
@@ -118,7 +119,7 @@ fn sync[&h, &i, &e](heap: &!h Heap, io: &!i Io, errs: &e fail.Errors, t: Tally, 
     return Tally { files: t.files, broken: broken, emitted: fail.count(errs) };
 }
 
-fn one[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, root: &r [byte], at: int, errs: fail.Errors, tally: Tally) -> [heap, args, fs_read(""), file_read, io_write] (fail.Errors, Tally) {
+fn one[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, root: &r [byte], at: int, errs: fail.Errors, tally: Tally) -> [heap, args, fs_read(""), dir_read, file_read, io_write] (fail.Errors, Tally) {
     let table = flag_table();
     let wide = bytes.equal(cli.text(args, parsed, table, "algo"), "sha512");
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
@@ -127,7 +128,7 @@ fn one[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Par
     var e = checked;
     borrow resolved as &rp in {
         if path.ok(rp) {
-            match open_read(fs, path.full(rp)) {
+            match place.open_operand(fs, root, path.shown(rp), path.full(rp)) {
                 Opened::Failed(reason) => {
                     e = fail.io_error(heap, e, reason, false, path.shown(rp));
                 }
@@ -200,7 +201,7 @@ fn one[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Par
     return (e, t);
 }
 
-fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), file_read, io_write, err_write] int {
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
@@ -268,7 +269,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     return status;
 }
 
-fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), file_read, io_write, err_write] int {
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, file_read, io_write, err_write] int {
     let which = cli.subcommand(args);
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());

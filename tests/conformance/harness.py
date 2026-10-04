@@ -172,6 +172,7 @@ class Fixture:
         outside.mkdir()
         (outside / "secret.txt").write_bytes(b"secret gamma outside\n")
         os.symlink(outside / "secret.txt", self.root / "link.txt")
+        os.symlink(outside, self.root / "dirlink")
 
     def path(self, name):
         return self.root / name

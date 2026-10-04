@@ -121,20 +121,25 @@ On the pinned compiler (`8fc3b3f`), Linux x86_64, a shared and noisy sandbox.
 
 **Speed is reported, not gated** (§1.2). One probe, 64 MiB of text,
 7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`). The
-three columns are three compilers and two rounds of work: the first version;
-the same sources after profiling, re-measured on the compiler they were written
-for (`a18e533`); and now, on `8fc3b3f`, with lex-sys's
-`calloc`, `copy_into`, `index_of_byte` and `flush_out` in use. The last two
-columns and the incumbents were measured in one session on one machine:
+columns are rounds of work: the first version; the same sources after
+profiling, on the compiler they were written for (`a18e533`); on `8fc3b3f`,
+with lex-sys's `calloc`, `copy_into`, `index_of_byte` and `flush_out` in use;
+and now, on the same compiler, with `seek` scanning blocks instead of lines and
+`hash`'s rounds reworked (below). The last three columns and the incumbents
+were measured on one machine on the same day; the incumbents' times are this
+round's:
 
-| Tool | First version | Profiled (`a18e533`) | Now (`8fc3b3f`) | Incumbent |
-|---|---|---|---|---|
-| `seek gamma` (about a million matches written) | 1.67 s | 0.76 s | **0.67 s** | `grep -F -n -b` 0.49 s, `rg` 0.38 s |
-| `seek` with no match | 2.7 s | 0.22 s | **0.16 s** | `grep -F -n -b` 0.05 s |
-| `hash` | 0.83 s | 0.65 s | 0.67 s | `sha256sum` 0.20 s (OpenSSL's AVX2 assembly) |
-| `peek --count-lines --lines 1:100` | 0.19 s | 0.17 s | **0.08 s** | `sed -n 1,100p; wc -l` 0.13 s |
-| `tally --field 1` | 0.30 s | 0.23 s | **0.17 s** | `cut \| sort \| uniq -c \| sort \| head` 0.71 s |
-| `jsonq -p /0`, 16 MiB array | 0.41 s | 0.43 s | **0.15 s** | `jq -c .[0]` 0.81 s |
+| Tool | First version | Profiled (`a18e533`) | `8fc3b3f` | Now | Incumbent |
+|---|---|---|---|---|---|
+| `seek gamma` (about a million matches written) | 1.67 s | 0.76 s | 0.67 s | **0.49 s** | `grep -F -n -b` 0.51 s, `rg` 0.39 s |
+| `seek` with no match | 2.7 s | 0.22 s | 0.16 s | **0.04 s** | `grep -F -n -b` 0.04 s |
+| `hash` | 0.83 s | 0.65 s | 0.67 s | **0.52 s** | `sha256sum` 0.17 s (OpenSSL's AVX2/BMI2 assembly) |
+| `peek --count-lines --lines 1:100` | 0.19 s | 0.17 s | **0.08 s** | 0.08 s | `sed -n 1,100p; wc -l` 0.13 s |
+| `tally --field 1` | 0.30 s | 0.23 s | **0.17 s** | 0.16 s | `cut \| sort \| uniq -c \| sort \| head` 0.68 s |
+| `jsonq -p /0`, 16 MiB array | 0.41 s | 0.43 s | **0.15 s** | 0.14 s | `jq -c .[0]` 0.73 s |
+
+`seek -i GAMMA`, measured the same way but outside `toolbench.py`: 0.58 s
+against `grep -F -n -b -i`'s 0.52 s.
 
 What the profile (callgrind) found and what changed in this repository: `seek`
 searched with `std.bytes.find`, which tried every offset (44% of its time) --
@@ -169,8 +174,34 @@ lex-sys instead (the third column):
   `docs/checked-output.md`) is now called after the last write of every tool;
   it costs nothing measurable.
 
-`hash` did not change (its cost is the SHA rounds, which none of this
-touches), and `seek gamma` is now mostly writing a million JSON records.
+The fourth column, in this repository again:
+
+* **`seek` scans blocks, not lines.** After the changes above, a search with
+  no match was still 93% per-line work: the search of each line, the line
+  reader and the loop between them (callgrind). `seek` now reads into a
+  buffer of `--max-line-bytes` plus one read, searches all the whole lines in
+  it in one pass, and finds a line's start, end and number only around a
+  match, counting newlines with `memchr`. Only a block longer than the cap is
+  walked line by line, to report the lines over it, as before. The search
+  itself runs `memchr` on the needle byte that is rarest *in this file's
+  first block* (counted, not guessed: a table of English letter frequencies
+  picked `z`, and a corpus full of "zeta" made every `z` a false candidate),
+  and falls back to Horspool when candidates come too thick; `-i` stays on
+  Horspool. Every gate, M5's differential against `grep` included, is
+  unchanged.
+* **Writing a match got cheaper.** `text.append_json`'s check for bytes that
+  need no escaping is one table load instead of four comparisons, and
+  `text.append_nat` writes its digits in one pass instead of two (together
+  they were 52% of a match-heavy run).
+* **`hash` rotates without a rotate.** lex-sys has no 32-bit type, so a
+  32-bit rotation was two shifts, an or and a mask. A word written twice,
+  `x << 32 | x`, holds all its rotations: the low 32 bits of `(x << 32 | x) >> n`
+  are `x` rotated by `n`, and one doubled word serves all three rotations of a
+  Σ. The 64 rounds are also unrolled by eight, so the working variables are
+  renamed instead of shuffled (eight moves a round). 112 instructions a byte
+  became 81. The rest of the gap to `sha256sum` is OpenSSL's hand-written
+  AVX2/BMI2 assembly; closing it needs vector instructions the language does
+  not have.
 
 **Corrected.** An earlier version of this table had `jsonq` at 0.08 s against
 `jq`'s 1.51 s. `jsonq` was refusing that document (exit 8: it was larger than

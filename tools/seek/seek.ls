@@ -101,46 +101,141 @@ fn upper(c: int) -> [] int {
     return c;
 }
 
-// Whether `needle` occurs in `line`, folding ASCII letters when `fold`.
-fn contains[&l, &n, &t](line: &l [byte], needle: &n [byte], fold: bool, table: &t [int]) -> [] bool {
+// The index of the needle byte to look for first: the one that occurs least
+// often in `sample` (the file's first block). Measured rather than guessed
+// from a table of letter frequencies: such a table called `z` rare, and a
+// file full of "zeta" made every `z` a false candidate. Ties go to the
+// earlier byte. Counting is one `memchr` per occurrence of each needle byte
+// in at most 64 KiB, once per file.
+fn rarest[&n, &s](needle: &n [byte], sample: &s [byte]) -> [] int {
+    var part = sample;
+    if len(part) > 65536 {
+        part = sample[0..65536];
+    }
+    var best = 0;
+    var fewest = bytes.count_byte(part, int_of(needle[0]));
+    var i = 1;
+    while i < len(needle) && fewest > 0 {
+        let n = bytes.count_byte(part, int_of(needle[i]));
+        if n < fewest {
+            best = i;
+            fewest = n;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+// Where `needle` next occurs in `text` at or after `from`, or -1, folding
+// ASCII letters when `fold`. `text` is a whole block of lines, not one line
+// (see `search`): a match that crossed a newline would need the needle to
+// hold one, and `search` never asks for such a needle.
+//
+// Without folding, the candidates are found by `memchr` on the needle's
+// rarest byte (`rare`, from `rarest`), which skips text that cannot match at
+// libc's speed -- what grep and ripgrep do. When candidates turn out to be
+// dense anyway (every byte of the needle is common here), the rest of the
+// block is searched with Boyer-Moore-Horspool, whose cost does not depend on
+// how common any byte is.
+fn find_from[&l, &n, &t](text: &l [byte], from: int, needle: &n [byte], fold: bool, table: &t [int], rare: int) -> [] int {
     let m = len(needle);
     if m == 0 {
-        return true;
+        return from;
     }
+    if fold || m < 2 {
+        return horspool(text, from, needle, fold, table);
+    }
+    let wanted = needle[rare];
+    let stop = len(text) - m + rare + 1;
+    var at = from;
+    var misses = 0;
+    while at + m <= len(text) {
+        if misses > 16 && misses * 64 > at - from {
+            return horspool(text, at, needle, fold, table);
+        }
+        let k = index_of_byte(text[at + rare..stop], wanted);
+        if k < 0 {
+            return 0 - 1;
+        }
+        let start = at + k;
+        var j = 0;
+        while j < m && text[start + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return start;
+        }
+        misses = misses + 1;
+        at = start + 1;
+    }
+    return 0 - 1;
+}
+
+// Boyer-Moore-Horspool from `from`, with the shift table `shifts` built.
+fn horspool[&l, &n, &t](text: &l [byte], from: int, needle: &n [byte], fold: bool, table: &t [int]) -> [] int {
+    let m = len(needle);
     let last = m - 1;
-    var at = 0;
+    var at = from;
     if !fold {
         let tail = int_of(needle[last]);
-        while at + m <= len(line) {
-            let c = int_of(line[at + last]);
+        while at + m <= len(text) {
+            let c = int_of(text[at + last]);
             if c == tail {
                 var j = 0;
-                while j < last && line[at + j] == needle[j] {
+                while j < last && text[at + j] == needle[j] {
                     j = j + 1;
                 }
                 if j == last {
-                    return true;
+                    return at;
                 }
             }
             at = at + table[c];
         }
-        return false;
+        return 0 - 1;
     }
     let tail = lower(int_of(needle[last]));
-    while at + m <= len(line) {
-        let c = int_of(line[at + last]);
+    while at + m <= len(text) {
+        let c = int_of(text[at + last]);
         if lower(c) == tail {
             var j = 0;
-            while j < last && lower(int_of(line[at + j])) == lower(int_of(needle[j])) {
+            while j < last && lower(int_of(text[at + j])) == lower(int_of(needle[j])) {
                 j = j + 1;
             }
             if j == last {
-                return true;
+                return at;
             }
         }
         at = at + table[c];
     }
-    return false;
+    return 0 - 1;
+}
+
+// Where the last newline in `data` is, or -1. Read backwards, so its cost is
+// the length of the unfinished line after it, not of the block.
+fn last_newline[&d](data: &d [byte]) -> [] int {
+    var i = len(data) - 1;
+    while i >= 0 && int_of(data[i]) != 10 {
+        i = i - 1;
+    }
+    return i;
+}
+
+// Where the line holding `at` begins.
+fn line_start[&d](data: &d [byte], at: int) -> [] int {
+    var i = at;
+    while i > 0 && int_of(data[i - 1]) != 10 {
+        i = i - 1;
+    }
+    return i;
+}
+
+// Where the line holding `at` ends (its newline, or the end of `data`).
+fn line_end[&d](data: &d [byte], at: int) -> [] int {
+    let k = index_of_byte(data[at..len(data)], byte_of(10));
+    if k < 0 {
+        return len(data);
+    }
+    return at + k;
 }
 
 // ---- the run -------------------------------------------------------------
@@ -253,64 +348,174 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
     prefix = buffer.append(heap, prefix, "{\"type\":\"match\",\"path\":");
     prefix = text.append_json(heap, prefix, shown);
     prefix = buffer.append(heap, prefix, ",\"line\":");
-    var r = lines.start(heap, cap);
+    // The file is scanned a block at a time, not a line at a time: each read
+    // fills `buf` after the unfinished line the last block left at its front,
+    // and the whole lines in it are searched in one pass. Lines are found only
+    // around a match, and counted with `memchr` (`bytes.count_byte`) only so
+    // that a match's number is right; a file with no match never has its lines
+    // taken apart. (Line by line, the search, the reader and the loop between
+    // them were 93% of a search with no match, measured with callgrind.)
+    //
+    // `buf` holds `cap` bytes of unfinished line plus one read, so a line that
+    // fits under --max-line-bytes always fits; one that does not is skipped up
+    // to its newline and reported with its length, as before. The allocation is
+    // zero-filled, so pages a short-lined file never reaches are never touched
+    // (lex-sys `docs/zeroed-slices.md`), and memory stays flat (M9).
+    let block = cap + lines.chunk_size();
+    let buf = box_slice(heap, block, byte_of(0));
+    var filled = 0;
+    var base = 0;
+    var before = 0;
+    var ended = false;
+    var errno = 0;
+    var read_total = 0;
+    var binary = false;
+    var skipping = false;
+    var skip_len = 0;
+    // A needle that holds a newline is in no line.
+    let plain = index_of_byte(pattern, byte_of(10)) < 0;
+    var rare = 0 - 1;
     borrow prefix as &pre in {
-        var going = true;
-        while going && !t.broken {
-            let (next, status) = lines.next(heap, r);
-            r = next;
-            if status == lines.need() {
-                r = lines.fill_file(r, file);
-            } else if status == lines.done() {
-                going = false;
-            } else if status == lines.long() {
-                borrow r as &rr in {
-                    overlong = limit.more(overlong, lines.number(rr), lines.length(rr));
-                }
-            } else {
-                var hit = false;
-                borrow r as &rr in {
-                    borrow skip_table as &tr in {
-                        hit = contains(lines.text(rr), pattern, fold, contents(tr));
+        borrow skip_table as &tr in {
+            var going = true;
+            while going && !t.broken {
+                if !ended && filled < block {
+                    var top = filled + lines.chunk_size();
+                    if top > block {
+                        top = block;
                     }
-                }
-                if hit {
-                    if most >= 0 && t.reported >= most {
-                        t = truncated(t);
-                        going = false;
-                    } else {
-                        here = here + 1;
-                        let shows = t.found + 1 > skip;
-                        t = counted(t, shows);
-                        if shows {
-                            var wrote = true;
-                            borrow r as &rr in {
-                                if text_mode {
-                                    wrote = out.buffer_line(heap, io, text_line(heap, shown, lines.number(rr), lines.text(rr)));
-                                } else {
-                                    let (kept, written) = match_record(heap, io, record, buffer.bytes(pre), lines.number(rr), lines.offset(rr), lines.text(rr));
-                                    record = kept;
-                                    wrote = written;
+                    borrow mut buf as &!bw in {
+                        let room = contents(bw)[filled..top];
+                        match file_read(file, room) {
+                            Read::Got(n) => {
+                                if !binary && index_of_byte(room[0..n], byte_of(0)) >= 0 {
+                                    binary = true;
                                 }
+                                filled = filled + n;
+                                read_total = read_total + n;
                             }
-                            if !wrote {
-                                t = broken(t);
+                            Read::End => {
+                                ended = true;
+                            }
+                            Read::Failed(reason) => {
+                                ended = true;
+                                errno = reason;
+                                if errno == 0 {
+                                    errno = 5;
+                                }
                             }
                         }
                     }
                 }
+                // `whole`: the bytes of whole lines at the front, to search now. `dropped`:
+                // bytes of an over-long line, to discard unsearched.
+                var whole = 0;
+                var dropped = 0;
+                borrow buf as &br in {
+                    let data = contents(br)[0..filled];
+                    if skipping {
+                        let k = index_of_byte(data, byte_of(10));
+                        if k < 0 {
+                            skip_len = skip_len + filled;
+                            dropped = filled;
+                            if ended {
+                                overlong = limit.more(overlong, before + 1, skip_len);
+                                skipping = false;
+                            }
+                        } else {
+                            overlong = limit.more(overlong, before + 1, skip_len + k);
+                            skipping = false;
+                            before = before + 1;
+                            dropped = k + 1;
+                        }
+                    } else {
+                        let nl = last_newline(data);
+                        if nl >= 0 {
+                            whole = nl + 1;
+                        } else if ended {
+                            // The last line, with no newline (or nothing at all).
+                            whole = filled;
+                        } else if filled > cap {
+                            skipping = true;
+                            skip_len = filled;
+                            dropped = filled;
+                        }
+                    }
+                    if whole > 0 {
+                        let text_block = data[0..whole];
+                        if rare < 0 && len(pattern) > 0 {
+                            rare = rarest(pattern, text_block);
+                        }
+                        // Only a block longer than the cap can hold a line over it.
+                        if whole > cap {
+                            var at = 0;
+                            var number = before;
+                            while at < whole {
+                                let e = line_end(text_block, at);
+                                number = number + 1;
+                                if e - at > cap {
+                                    overlong = limit.more(overlong, number, e - at);
+                                }
+                                at = e + 1;
+                            }
+                        }
+                        var seen_at = 0;
+                        var seen = before;
+                        var from = 0;
+                        while plain && from < whole && going && !t.broken {
+                            let hit = find_from(text_block, from, pattern, fold, contents(tr), rare);
+                            if hit < 0 {
+                                from = whole;
+                            } else {
+                                let s0 = line_start(text_block, hit);
+                                let e0 = line_end(text_block, hit);
+                                seen = seen + bytes.count_byte(text_block[seen_at..s0], 10);
+                                seen_at = s0;
+                                if e0 - s0 <= cap {
+                                    if most >= 0 && t.reported >= most {
+                                        t = truncated(t);
+                                        going = false;
+                                    } else {
+                                        here = here + 1;
+                                        let shows = t.found + 1 > skip;
+                                        t = counted(t, shows);
+                                        if shows {
+                                            var wrote = true;
+                                            if text_mode {
+                                                wrote = out.buffer_line(heap, io, text_line(heap, shown, seen + 1, text_block[s0..e0]));
+                                            } else {
+                                                let (kept, written) = match_record(heap, io, record, buffer.bytes(pre), seen + 1, base + s0, text_block[s0..e0]);
+                                                record = kept;
+                                                wrote = written;
+                                            }
+                                            if !wrote {
+                                                t = broken(t);
+                                            }
+                                        }
+                                    }
+                                }
+                                from = e0 + 1;
+                            }
+                        }
+                        before = seen + bytes.count_byte(text_block[seen_at..whole], 10);
+                    }
+                }
+                let consumed = whole + dropped;
+                if consumed > 0 {
+                    borrow mut buf as &!bw in {
+                        copy_within(contents(bw), 0, consumed, filled - consumed);
+                    }
+                    filled = filled - consumed;
+                    base = base + consumed;
+                }
+                if ended && filled == 0 && !skipping {
+                    going = false;
+                }
             }
         }
     }
-    var errno = 0;
-    var size = 0;
-    var binary = false;
-    borrow r as &rr in {
-        errno = lines.failed(rr);
-        size = lines.bytes_read(rr);
-        binary = lines.saw_nul(rr);
-    }
-    lines.drop(heap, r);
+    unbox_slice(heap, buf);
+    let size = read_total;
     unbox_slice(heap, skip_table);
     buffer.drop(heap, record);
     buffer.drop(heap, prefix);

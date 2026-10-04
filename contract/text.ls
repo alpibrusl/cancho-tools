@@ -107,17 +107,26 @@ fn hex_digit(v: int) -> [] int {
 // The escaping is `std.json`'s (`"`, `\\`, the named controls, `\u00XX` for
 // the rest below 32), and bytes of 128 and above are copied as they are,
 // which is valid because the text was checked to be UTF-8 first.
+// 1 for a byte JSON writes as itself: printable ASCII other than `"` and
+// `\`. One load per byte instead of four comparisons (the check was most
+// of `append_json`, the largest cost of a match-heavy `seek`).
+static json_plain: [int] {
+    let t = alloc_slice[static](256, 0);
+    var c = 32;
+    while c < 128 {
+        if c != '"' && c != '\\' {
+            t[c] = 1;
+        }
+        c = c + 1;
+    }
+    return t;
+}
+
 pub fn append_json[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) -> [heap] buffer.Buffer {
     // The common case, in one pass: printable ASCII with nothing to escape.
     var plain = 0;
-    var clean = true;
-    while clean && plain < len(data) {
-        let c = int_of(data[plain]);
-        if c < 32 || c >= 128 || c == '"' || c == '\\' {
-            clean = false;
-        } else {
-            plain = plain + 1;
-        }
+    while plain < len(data) && json_plain[int_of(data[plain])] == 1 {
+        plain = plain + 1;
     }
     if plain == len(data) {
         var q = buffer.push(heap, out, byte_of('"'));
@@ -168,23 +177,23 @@ pub fn append_json[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) 
 // Append a non-negative integer in decimal, written into reserved room
 // rather than one checked push per digit.
 pub fn append_nat[&h](heap: &!h Heap, out: buffer.Buffer, n: int) -> [heap] buffer.Buffer {
-    var digits = 1;
-    var rest = n / 10;
-    while rest > 0 {
-        digits = digits + 1;
-        rest = rest / 10;
-    }
-    var o = buffer.reserve(heap, out, digits);
+    // One pass: the digits are written backwards at the end of 20 bytes of
+    // room (enough for any non-negative `int`) and moved to the front, rather
+    // than counted with one round of divisions and written with another.
+    var o = buffer.reserve(heap, out, 20);
     borrow mut o as &!w in {
         let room = buffer.room(w);
         var v = n;
-        var i = digits - 1;
-        while i >= 0 {
+        var i = 19;
+        room[i] = byte_of('0' + v % 10);
+        v = v / 10;
+        while v > 0 {
+            i = i - 1;
             room[i] = byte_of('0' + v % 10);
             v = v / 10;
-            i = i - 1;
         }
-        buffer.filled(w, digits);
+        copy_within(room, 0, i, 20 - i);
+        buffer.filled(w, 20 - i);
     }
     return o;
 }

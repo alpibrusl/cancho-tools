@@ -37,6 +37,7 @@ import toolbox.built;
 import toolbox.cli;
 import toolbox.describe;
 import toolbox.fail;
+import toolbox.limit;
 import toolbox.lines;
 import toolbox.out;
 import toolbox.path;
@@ -166,53 +167,6 @@ fn text_line[&h, &p, &t](heap: &!h Heap, shown: &p [byte], number: int, line: &t
     return buffer.append(heap, b, line);
 }
 
-// The lines of one file that were longer than the cap: one error per file,
-// after the file, naming how many there were, the first, and the longest.
-// The repair raises the cap to the longest -- so applying it clears this
-// error for this file -- when that is within the ceiling; and it replaces
-// only the number when the cap was given as a whole argument, or adds the
-// flag (role `none`, no authority) when the cap was the default.
-fn too_long[&h, &g, &p, &s](heap: &!h Heap, e: fail.Errors, args: &g Args, parsed: &p cli.Parsed, shown: &s [byte], count: int, first: int, longest: int, cap: int) -> [heap, args] fail.Errors {
-    var w = fail.open(heap, "limit.line-too-long", "lines longer than --max-line-bytes were skipped; the rest of the file was searched", "raise --max-line-bytes, up to 16777216");
-    let at = cli.value_index(parsed, flag_table(), "max-line-bytes");
-    var n = buffer.empty(heap, 20);
-    n = buffer.push_nat(heap, n, longest);
-    if longest <= ceiling() && at >= 0 && cli.value_is_whole(parsed, flag_table(), "max-line-bytes") {
-        borrow n as &r in {
-            w = fail.retry_replacing(heap, w, args, at, buffer.bytes(r));
-        }
-    } else if longest <= ceiling() && at < 0 {
-        var o = fail.retry_open(heap, w);
-        var i = 0;
-        while i < arg_count(args) {
-            o = json.put_string(heap, o, arg(args, i));
-            if i == 0 {
-                o = json.put_string(heap, o, "--max-line-bytes");
-                borrow n as &r in {
-                    o = json.put_string(heap, o, buffer.bytes(r));
-                }
-            }
-            i = i + 1;
-        }
-        w = fail.retry_close(heap, o);
-    } else {
-        w = fail.repair_none(heap, w, "the longest line is longer than the ceiling this tool can hold");
-    }
-    buffer.drop(heap, n);
-    w = fail.detail_open(heap, w);
-    w = json.put_key(heap, w, "path");
-    w = text.put(heap, w, shown);
-    w = json.put_key(heap, w, "lines");
-    w = json.put_int(heap, w, count);
-    w = json.put_key(heap, w, "first_line");
-    w = json.put_int(heap, w, first);
-    w = json.put_key(heap, w, "longest");
-    w = json.put_int(heap, w, longest);
-    w = json.put_key(heap, w, "limit");
-    w = json.put_int(heap, w, cap);
-    return fail.add(heap, e, w);
-}
-
 // Search one open file.
 fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, file: &!f File, io: &!i Io, pattern: &n [byte], shown: &s [byte], errs: fail.Errors, tally: Tally) -> [heap, args, file_read, io_write] (fail.Errors, Tally, int) {
     let table = flag_table();
@@ -227,9 +181,7 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
     var e = errs;
     var t = tally;
     var here = 0;
-    var long_count = 0;
-    var long_first = 0;
-    var long_most = 0;
+    var overlong = limit.none();
     var r = lines.start(heap, cap);
     var going = true;
     while going && !t.broken {
@@ -241,14 +193,8 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
             going = false;
         } else if status == lines.long() {
             borrow r as &rr in {
-                if long_count == 0 {
-                    long_first = lines.number(rr);
-                }
-                if lines.length(rr) > long_most {
-                    long_most = lines.length(rr);
-                }
+                overlong = limit.more(overlong, lines.number(rr), lines.length(rr));
             }
-            long_count = long_count + 1;
         } else {
             var hit = false;
             borrow r as &rr in {
@@ -288,8 +234,8 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
         binary = lines.saw_nul(rr);
     }
     lines.drop(heap, r);
-    if long_count > 0 {
-        e = too_long(heap, e, args, parsed, shown, long_count, long_first, long_most, cap);
+    if overlong.count > 0 {
+        e = limit.too_long(heap, e, args, parsed, flag_table(), shown, overlong, cap, ceiling(), "lines longer than --max-line-bytes were skipped; the rest of the file was searched");
         borrow e as &er in {
             t = sync(heap, io, er, t, text_mode);
         }

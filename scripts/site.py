@@ -153,6 +153,10 @@ def markdown(text):
     out, i = [], 0
     while i < len(lines):
         line = lines[i]
+        # A one-line HTML comment (a generated section's marker) shows nothing.
+        if line.startswith("<!--") and line.rstrip().endswith("-->"):
+            i += 1
+            continue
         if line.startswith("```"):
             j = i + 1
             while j < len(lines) and not lines[j].startswith("```"):

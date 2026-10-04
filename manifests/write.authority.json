@@ -117,11 +117,13 @@
     "index_of",
     "index_of_short",
     "io_rule",
+    "is_ascii",
     "is_digit",
     "is_digit",
     "is_flag",
     "is_hex",
     "is_tail",
+    "is_utf8",
     "is_valid",
     "is_ws",
     "item",
@@ -136,7 +138,6 @@
     "message_of",
     "name_of",
     "nearest",
-    "not32",
     "ok",
     "operand_count",
     "operand_index",
@@ -144,7 +145,6 @@
     "parse_nat",
     "repairable_of",
     "role_of",
-    "rotr32",
     "rotr64",
     "rule_of",
     "schema",
@@ -171,5 +171,5 @@
   ],
   "folded_operators": 25,
   "folded_calls": 0,
-  "functions": 217
+  "functions": 218
 }

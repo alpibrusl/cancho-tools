@@ -24,6 +24,7 @@ module toolbox.atomic;
 import std.buffer;
 import std.bytes;
 import toolbox.sha;
+import toolbox.text;
 
 // `EWOULDBLOCK`: 11 on Linux, 35 on macOS (lex-sys
 // `docs/file-writes.md` §10.1).
@@ -83,7 +84,7 @@ pub fn read_all[&h, &f, &p](heap: &!h Heap, fs: &f Fs(""), path: &p [byte], most
                             going = false;
                         } else {
                             borrow chunk as &c in {
-                                out = buffer.append(heap, out, buffer.bytes(c));
+                                out = text.append_bytes(heap, out, buffer.bytes(c));
                             }
                         }
                     }

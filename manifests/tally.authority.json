@@ -112,12 +112,14 @@
     "index_of",
     "index_of_short",
     "io_rule",
+    "is_ascii",
     "is_digit",
     "is_digit",
     "is_flag",
     "is_hex",
     "is_live$int",
     "is_tail",
+    "is_utf8",
     "is_valid",
     "is_ws",
     "item",
@@ -176,5 +178,5 @@
   ],
   "folded_operators": 35,
   "folded_calls": 0,
-  "functions": 230
+  "functions": 232
 }

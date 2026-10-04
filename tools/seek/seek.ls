@@ -68,24 +68,77 @@ fn lower(c: int) -> [] int {
     return c;
 }
 
-// Whether `needle` occurs in `line`, folding ASCII letters when `fold`.
-fn contains[&l, &n](line: &l [byte], needle: &n [byte], fold: bool) -> [] bool {
-    if !fold {
-        return bytes.find(line, needle) >= 0;
-    }
-    if len(needle) == 0 {
-        return true;
+// The Boyer-Moore-Horspool shift for each byte: how far the window may
+// move when that byte is under its last position. Built once per file, so
+// the search of a line skips up to `len(needle)` bytes at a time instead
+// of trying every offset (`std.bytes.find` does; the naive loop was 44% of
+// `seek`'s time, measured with callgrind). With `fold`, the table is built
+// over ASCII-lowered bytes.
+fn shifts[&n, &t](needle: &n [byte], fold: bool, table: &!t [int]) -> [] int {
+    let m = len(needle);
+    var c = 0;
+    while c < 256 {
+        table[c] = m;
+        c = c + 1;
     }
     var i = 0;
-    while i + len(needle) <= len(line) {
-        var j = 0;
-        while j < len(needle) && lower(int_of(line[i + j])) == lower(int_of(needle[j])) {
-            j = j + 1;
+    while i + 1 < m {
+        var b = int_of(needle[i]);
+        if fold {
+            b = lower(b);
+            table[upper(b)] = m - 1 - i;
         }
-        if j == len(needle) {
-            return true;
-        }
+        table[b] = m - 1 - i;
         i = i + 1;
+    }
+    return 0;
+}
+
+fn upper(c: int) -> [] int {
+    if c >= 'a' && c <= 'z' {
+        return c - 32;
+    }
+    return c;
+}
+
+// Whether `needle` occurs in `line`, folding ASCII letters when `fold`.
+fn contains[&l, &n, &t](line: &l [byte], needle: &n [byte], fold: bool, table: &t [int]) -> [] bool {
+    let m = len(needle);
+    if m == 0 {
+        return true;
+    }
+    let last = m - 1;
+    var at = 0;
+    if !fold {
+        let tail = int_of(needle[last]);
+        while at + m <= len(line) {
+            let c = int_of(line[at + last]);
+            if c == tail {
+                var j = 0;
+                while j < last && line[at + j] == needle[j] {
+                    j = j + 1;
+                }
+                if j == last {
+                    return true;
+                }
+            }
+            at = at + table[c];
+        }
+        return false;
+    }
+    let tail = lower(int_of(needle[last]));
+    while at + m <= len(line) {
+        let c = int_of(line[at + last]);
+        if lower(c) == tail {
+            var j = 0;
+            while j < last && lower(int_of(line[at + j])) == lower(int_of(needle[j])) {
+                j = j + 1;
+            }
+            if j == last {
+                return true;
+            }
+        }
+        at = at + table[c];
     }
     return false;
 }
@@ -141,21 +194,30 @@ fn sync[&h, &i, &e](heap: &!h Heap, io: &!i Io, errs: &e fail.Errors, tally: Tal
     return emitted(t, fail.count(errs));
 }
 
-fn match_record[&h, &p, &t](heap: &!h Heap, shown: &p [byte], number: int, offset: int, line: &t [byte]) -> [heap] buffer.Buffer {
-    var w = json.writer(heap, len(line) + 96);
-    w = json.begin_object(heap, w);
-    w = json.put_key(heap, w, "type");
-    w = json.put_string(heap, w, "match");
-    w = json.put_key(heap, w, "path");
-    w = text.put(heap, w, shown);
-    w = json.put_key(heap, w, "line");
-    w = json.put_int(heap, w, number);
-    w = json.put_key(heap, w, "offset");
-    w = json.put_int(heap, w, offset);
-    w = json.put_key(heap, w, "text");
-    w = text.put(heap, w, line);
-    w = json.end_object(heap, w);
-    return json.finish(w);
+// One match record and its newline,
+// `{"type":"match","path":…,"line":…,"offset":…,"text":…}`, built into
+// `into` and written with one `write_bytes`. `prefix` is the part that does
+// not change within a file -- the type and the path, escaped once per file --
+// and the buffer is reused for every match: a writer per match was most of a
+// match-heavy search's time. The schema test (M1) and the differential test
+// against grep (M5) check what this writes like any other output.
+fn match_record[&h, &i, &p, &t](heap: &!h Heap, io: &!i Io, into: buffer.Buffer, prefix: &p [byte], number: int, offset: int, line: &t [byte]) -> [heap, io_write] (buffer.Buffer, bool) {
+    var b = into;
+    borrow mut b as &!w in {
+        buffer.clear(w);
+    }
+    b = text.append_bytes(heap, b, prefix);
+    b = text.append_nat(heap, b, number);
+    b = text.append_bytes(heap, b, ",\"offset\":");
+    b = text.append_nat(heap, b, offset);
+    b = text.append_bytes(heap, b, ",\"text\":");
+    b = text.append_json(heap, b, line);
+    b = text.append_bytes(heap, b, "}\n");
+    var ok = false;
+    borrow b as &r in {
+        ok = out.emit(io, buffer.bytes(r));
+    }
+    return (b, ok);
 }
 
 fn text_line[&h, &p, &t](heap: &!h Heap, shown: &p [byte], number: int, line: &t [byte]) -> [heap] buffer.Buffer {
@@ -182,43 +244,58 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
     var t = tally;
     var here = 0;
     var overlong = limit.none();
+    let skip_table = box_slice(heap, 256, 0);
+    borrow mut skip_table as &!tw in {
+        shifts(pattern, fold, contents(tw));
+    }
+    var record = buffer.empty(heap, 256);
+    var prefix = buffer.empty(heap, 64);
+    prefix = text.append_bytes(heap, prefix, "{\"type\":\"match\",\"path\":");
+    prefix = text.append_json(heap, prefix, shown);
+    prefix = text.append_bytes(heap, prefix, ",\"line\":");
     var r = lines.start(heap, cap);
-    var going = true;
-    while going && !t.broken {
-        let (next, status) = lines.next(heap, r);
-        r = next;
-        if status == lines.need() {
-            r = lines.fill_file(r, file);
-        } else if status == lines.done() {
-            going = false;
-        } else if status == lines.long() {
-            borrow r as &rr in {
-                overlong = limit.more(overlong, lines.number(rr), lines.length(rr));
-            }
-        } else {
-            var hit = false;
-            borrow r as &rr in {
-                hit = contains(lines.text(rr), pattern, fold);
-            }
-            if hit {
-                if most >= 0 && t.reported >= most {
-                    t = truncated(t);
-                    going = false;
-                } else {
-                    here = here + 1;
-                    let shows = t.found + 1 > skip;
-                    t = counted(t, shows);
-                    if shows {
-                        var wrote = true;
-                        borrow r as &rr in {
-                            if text_mode {
-                                wrote = out.buffer_line(heap, io, text_line(heap, shown, lines.number(rr), lines.text(rr)));
-                            } else {
-                                wrote = out.buffer_line(heap, io, match_record(heap, shown, lines.number(rr), lines.offset(rr), lines.text(rr)));
+    borrow prefix as &pre in {
+        var going = true;
+        while going && !t.broken {
+            let (next, status) = lines.next(heap, r);
+            r = next;
+            if status == lines.need() {
+                r = lines.fill_file(r, file);
+            } else if status == lines.done() {
+                going = false;
+            } else if status == lines.long() {
+                borrow r as &rr in {
+                    overlong = limit.more(overlong, lines.number(rr), lines.length(rr));
+                }
+            } else {
+                var hit = false;
+                borrow r as &rr in {
+                    borrow skip_table as &tr in {
+                        hit = contains(lines.text(rr), pattern, fold, contents(tr));
+                    }
+                }
+                if hit {
+                    if most >= 0 && t.reported >= most {
+                        t = truncated(t);
+                        going = false;
+                    } else {
+                        here = here + 1;
+                        let shows = t.found + 1 > skip;
+                        t = counted(t, shows);
+                        if shows {
+                            var wrote = true;
+                            borrow r as &rr in {
+                                if text_mode {
+                                    wrote = out.buffer_line(heap, io, text_line(heap, shown, lines.number(rr), lines.text(rr)));
+                                } else {
+                                    let (kept, written) = match_record(heap, io, record, buffer.bytes(pre), lines.number(rr), lines.offset(rr), lines.text(rr));
+                                    record = kept;
+                                    wrote = written;
+                                }
                             }
-                        }
-                        if !wrote {
-                            t = broken(t);
+                            if !wrote {
+                                t = broken(t);
+                            }
                         }
                     }
                 }
@@ -234,6 +311,9 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
         binary = lines.saw_nul(rr);
     }
     lines.drop(heap, r);
+    unbox_slice(heap, skip_table);
+    buffer.drop(heap, record);
+    buffer.drop(heap, prefix);
     if overlong.count > 0 {
         e = limit.too_long(heap, e, args, parsed, flag_table(), shown, overlong, cap, ceiling(), "lines longer than --max-line-bytes were skipped; the rest of the file was searched");
         borrow e as &er in {

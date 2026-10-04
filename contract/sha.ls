@@ -27,6 +27,11 @@ pub res struct Hasher {
     total: int,
     // SHA-512 when true: 128-byte blocks, 80 rounds, 64-bit words.
     wide: bool,
+    // The message schedule, reused for every block. `std.crypto` takes it
+    // from a fresh `region` per block, which is a 64 KiB allocation and a
+    // free each time; that was most of the difference from `sha256sum` that
+    // was not the hardware's.
+    schedule: Box[[int]],
 }
 
 static sha256_h0: [int] {
@@ -221,64 +226,66 @@ fn not32(x: int) -> [] int {
     return 0xffffffff - x;
 }
 
-fn compress[&st, &b](state: &!st [int], block: &b [byte]) -> [] int {
-    region a {
-        let w = alloc_slice[a](64, 0);
-
-        var t = 0;
-        while t < 16 {
-            let i = t * 4;
-            w[t] = int_of(block[i]) << 24 | int_of(block[i + 1]) << 16 | int_of(block[i + 2]) << 8 | int_of(block[i + 3]);
-            t = t + 1;
-        }
-
-        t = 16;
-        while t < 64 {
-            let s0 = rotr32(w[t - 15], 7) ^ rotr32(w[t - 15], 18) ^ w[t - 15] >> 3;
-            let s1 = rotr32(w[t - 2], 17) ^ rotr32(w[t - 2], 19) ^ w[t - 2] >> 10;
-            w[t] = mask32(w[t - 16] + s0 + w[t - 7] + s1);
-            t = t + 1;
-        }
-
-        var wa = state[0];
-        var wb = state[1];
-        var wc = state[2];
-        var wd = state[3];
-        var we = state[4];
-        var wf = state[5];
-        var wg = state[6];
-        var wh = state[7];
-
-        t = 0;
-        while t < 64 {
-            let s1 = rotr32(we, 6) ^ rotr32(we, 11) ^ rotr32(we, 25);
-            let ch = we & wf ^ not32(we) & wg;
-            let temp1 = mask32(wh + s1 + ch + sha256_k[t] + w[t]);
-            let s0 = rotr32(wa, 2) ^ rotr32(wa, 13) ^ rotr32(wa, 22);
-            let maj = wa & wb ^ wa & wc ^ wb & wc;
-            let temp2 = mask32(s0 + maj);
-
-            wh = wg;
-            wg = wf;
-            wf = we;
-            we = mask32(wd + temp1);
-            wd = wc;
-            wc = wb;
-            wb = wa;
-            wa = mask32(temp1 + temp2);
-
-            t = t + 1;
-        }
-
-        state[0] = mask32(state[0] + wa);
-        state[1] = mask32(state[1] + wb);
-        state[2] = mask32(state[2] + wc);
-        state[3] = mask32(state[3] + wd);
-        state[4] = mask32(state[4] + we);
-        state[5] = mask32(state[5] + wf);
-        state[6] = mask32(state[6] + wg);
-        state[7] = mask32(state[7] + wh);
+fn compress[&st, &b, &w](state: &!st [int], block: &b [byte], w: &!w [int]) -> [] int {
+    var t = 0;
+    while t < 16 {
+        let i = t * 4;
+        w[t] = int_of(block[i]) << 24 | int_of(block[i + 1]) << 16 | int_of(block[i + 2]) << 8 | int_of(block[i + 3]);
+        t = t + 1;
     }
+
+    t = 16;
+    // Words are 32 bits held in 64-bit ints, so a rotation is two shifts and
+    // one mask, and a sum of a few words cannot overflow: the masks and the
+    // wrapping adds below are what `std.crypto` spends a checked add and a
+    // mask on per operation. (The per-round cost was 1.7 times SHA-512's.)
+    while t < 64 {
+        let x = w[t - 15];
+        let y = w[t - 2];
+        let s0 = ((x >> 7 | x << 25) ^ (x >> 18 | x << 14) ^ x >> 3) & 0xffffffff;
+        let s1 = ((y >> 17 | y << 15) ^ (y >> 19 | y << 13) ^ y >> 10) & 0xffffffff;
+        w[t] = wrapping_add(wrapping_add(w[t - 16], s0), wrapping_add(w[t - 7], s1)) & 0xffffffff;
+        t = t + 1;
+    }
+
+    var wa = state[0];
+    var wb = state[1];
+    var wc = state[2];
+    var wd = state[3];
+    var we = state[4];
+    var wf = state[5];
+    var wg = state[6];
+    var wh = state[7];
+
+    t = 0;
+    while t < 64 {
+        let s1 = ((we >> 6 | we << 26) ^ (we >> 11 | we << 21) ^ (we >> 25 | we << 7)) & 0xffffffff;
+        let ch = we & wf ^ ~we & wg;
+        let temp1 = wrapping_add(wrapping_add(wrapping_add(wh, s1), wrapping_add(ch, sha256_k[t])), w[t]);
+        let s0 = ((wa >> 2 | wa << 30) ^ (wa >> 13 | wa << 19) ^ (wa >> 22 | wa << 10)) & 0xffffffff;
+        let maj = wa & wb ^ wa & wc ^ wb & wc;
+        let temp2 = wrapping_add(s0, maj);
+
+        wh = wg;
+        wg = wf;
+        wf = we;
+        we = wrapping_add(wd, temp1) & 0xffffffff;
+        wd = wc;
+        wc = wb;
+        wb = wa;
+        wa = wrapping_add(temp1, temp2) & 0xffffffff;
+
+        t = t + 1;
+    }
+
+    state[0] = mask32(state[0] + wa);
+    state[1] = mask32(state[1] + wb);
+    state[2] = mask32(state[2] + wc);
+    state[3] = mask32(state[3] + wd);
+    state[4] = mask32(state[4] + we);
+    state[5] = mask32(state[5] + wf);
+    state[6] = mask32(state[6] + wg);
+    state[7] = mask32(state[7] + wh);
     return 0;
 }
 
@@ -297,64 +304,60 @@ fn rotr64(x: int, n: int) -> [] int {
     return lshr64(x, n) | x << 64 - n;
 }
 
-fn compress512[&st, &b](state: &!st [int], block: &b [byte]) -> [] int {
-    region a {
-        let w = alloc_slice[a](80, 0);
-
-        var t = 0;
-        while t < 16 {
-            let i = t * 8;
-            w[t] = int_of(block[i]) << 56 | int_of(block[i + 1]) << 48 | int_of(block[i + 2]) << 40 | int_of(block[i + 3]) << 32 | int_of(block[i + 4]) << 24 | int_of(block[i + 5]) << 16 | int_of(block[i + 6]) << 8 | int_of(block[i + 7]);
-            t = t + 1;
-        }
-
-        t = 16;
-        while t < 80 {
-            let s0 = rotr64(w[t - 15], 1) ^ rotr64(w[t - 15], 8) ^ lshr64(w[t - 15], 7);
-            let s1 = rotr64(w[t - 2], 19) ^ rotr64(w[t - 2], 61) ^ lshr64(w[t - 2], 6);
-            w[t] = wrapping_add(wrapping_add(w[t - 16], s0), wrapping_add(w[t - 7], s1));
-            t = t + 1;
-        }
-
-        var wa = state[0];
-        var wb = state[1];
-        var wc = state[2];
-        var wd = state[3];
-        var we = state[4];
-        var wf = state[5];
-        var wg = state[6];
-        var wh = state[7];
-
-        t = 0;
-        while t < 80 {
-            let s1 = rotr64(we, 14) ^ rotr64(we, 18) ^ rotr64(we, 41);
-            let ch = we & wf ^ ~we & wg;
-            let temp1 = wrapping_add(wrapping_add(wrapping_add(wh, s1), ch), wrapping_add(sha512_k[t], w[t]));
-            let s0 = rotr64(wa, 28) ^ rotr64(wa, 34) ^ rotr64(wa, 39);
-            let maj = wa & wb ^ wa & wc ^ wb & wc;
-            let temp2 = wrapping_add(s0, maj);
-
-            wh = wg;
-            wg = wf;
-            wf = we;
-            we = wrapping_add(wd, temp1);
-            wd = wc;
-            wc = wb;
-            wb = wa;
-            wa = wrapping_add(temp1, temp2);
-
-            t = t + 1;
-        }
-
-        state[0] = wrapping_add(state[0], wa);
-        state[1] = wrapping_add(state[1], wb);
-        state[2] = wrapping_add(state[2], wc);
-        state[3] = wrapping_add(state[3], wd);
-        state[4] = wrapping_add(state[4], we);
-        state[5] = wrapping_add(state[5], wf);
-        state[6] = wrapping_add(state[6], wg);
-        state[7] = wrapping_add(state[7], wh);
+fn compress512[&st, &b, &w](state: &!st [int], block: &b [byte], w: &!w [int]) -> [] int {
+    var t = 0;
+    while t < 16 {
+        let i = t * 8;
+        w[t] = int_of(block[i]) << 56 | int_of(block[i + 1]) << 48 | int_of(block[i + 2]) << 40 | int_of(block[i + 3]) << 32 | int_of(block[i + 4]) << 24 | int_of(block[i + 5]) << 16 | int_of(block[i + 6]) << 8 | int_of(block[i + 7]);
+        t = t + 1;
     }
+
+    t = 16;
+    while t < 80 {
+        let s0 = rotr64(w[t - 15], 1) ^ rotr64(w[t - 15], 8) ^ lshr64(w[t - 15], 7);
+        let s1 = rotr64(w[t - 2], 19) ^ rotr64(w[t - 2], 61) ^ lshr64(w[t - 2], 6);
+        w[t] = wrapping_add(wrapping_add(w[t - 16], s0), wrapping_add(w[t - 7], s1));
+        t = t + 1;
+    }
+
+    var wa = state[0];
+    var wb = state[1];
+    var wc = state[2];
+    var wd = state[3];
+    var we = state[4];
+    var wf = state[5];
+    var wg = state[6];
+    var wh = state[7];
+
+    t = 0;
+    while t < 80 {
+        let s1 = rotr64(we, 14) ^ rotr64(we, 18) ^ rotr64(we, 41);
+        let ch = we & wf ^ ~we & wg;
+        let temp1 = wrapping_add(wrapping_add(wrapping_add(wh, s1), ch), wrapping_add(sha512_k[t], w[t]));
+        let s0 = rotr64(wa, 28) ^ rotr64(wa, 34) ^ rotr64(wa, 39);
+        let maj = wa & wb ^ wa & wc ^ wb & wc;
+        let temp2 = wrapping_add(s0, maj);
+
+        wh = wg;
+        wg = wf;
+        wf = we;
+        we = wrapping_add(wd, temp1);
+        wd = wc;
+        wc = wb;
+        wb = wa;
+        wa = wrapping_add(temp1, temp2);
+
+        t = t + 1;
+    }
+
+    state[0] = wrapping_add(state[0], wa);
+    state[1] = wrapping_add(state[1], wb);
+    state[2] = wrapping_add(state[2], wc);
+    state[3] = wrapping_add(state[3], wd);
+    state[4] = wrapping_add(state[4], we);
+    state[5] = wrapping_add(state[5], wf);
+    state[6] = wrapping_add(state[6], wg);
+    state[7] = wrapping_add(state[7], wh);
     return 0;
 }
 
@@ -376,7 +379,7 @@ fn start[&h](heap: &!h Heap, wide: bool) -> [heap] Hasher {
             i = i + 1;
         }
     }
-    return Hasher { state: state, block: box_slice(heap, size, byte_of(0)), used: 0, total: 0, wide: wide };
+    return Hasher { state: state, block: box_slice(heap, size, byte_of(0)), used: 0, total: 0, wide: wide, schedule: box_slice(heap, 80, 0) };
 }
 
 pub fn sha256[&h](heap: &!h Heap) -> [heap] Hasher {
@@ -395,57 +398,59 @@ pub fn digest_size[&s](hasher: &s Hasher) -> [] int {
     return 32;
 }
 
-fn fold[&st, &b](state: &!st [int], block: &b [byte], wide: bool) -> [] int {
+fn fold[&st, &b, &w](state: &!st [int], block: &b [byte], wide: bool, w: &!w [int]) -> [] int {
     if wide {
-        return compress512(state, block);
+        return compress512(state, block, w);
     }
-    return compress(state, block);
+    return compress(state, block, w);
 }
 
 // Feed `data`. Whole blocks are compressed straight from `data`; only a
 // partial block at either end is copied.
 pub fn update[&d](hasher: Hasher, data: &d [byte]) -> [] Hasher {
-    let Hasher { state, block, used, total, wide } = hasher;
+    let Hasher { state, block, used, total, wide, schedule } = hasher;
     var size = 64;
     if wide {
         size = 128;
     }
     var have = used;
     var at = 0;
-    borrow mut state as &!sw in {
-        borrow mut block as &!bw in {
-            let s = contents(sw);
-            let b = contents(bw);
-            // Top up a partial block first.
-            while have > 0 && at < len(data) {
-                b[have] = data[at];
-                have = have + 1;
-                at = at + 1;
-                if have == size {
-                    fold(s, b, wide);
-                    have = 0;
+    borrow mut schedule as &!ww in {
+        borrow mut state as &!sw in {
+            borrow mut block as &!bw in {
+                let s = contents(sw);
+                let b = contents(bw);
+                // Top up a partial block first.
+                while have > 0 && at < len(data) {
+                    b[have] = data[at];
+                    have = have + 1;
+                    at = at + 1;
+                    if have == size {
+                        fold(s, b, wide, contents(ww));
+                        have = 0;
+                    }
                 }
-            }
-            // Whole blocks, in place.
-            while len(data) - at >= size {
-                fold(s, data[at..at + size], wide);
-                at = at + size;
-            }
-            // What is left waits for the next call.
-            while at < len(data) {
-                b[have] = data[at];
-                have = have + 1;
-                at = at + 1;
+                // Whole blocks, in place.
+                while len(data) - at >= size {
+                    fold(s, data[at..at + size], wide, contents(ww));
+                    at = at + size;
+                }
+                // What is left waits for the next call.
+                while at < len(data) {
+                    b[have] = data[at];
+                    have = have + 1;
+                    at = at + 1;
+                }
             }
         }
     }
-    return Hasher { state: state, block: block, used: have, total: total + len(data), wide: wide };
+    return Hasher { state: state, block: block, used: have, total: total + len(data), wide: wide, schedule: schedule };
 }
 
 // Pad, fold the last block(s), write the digest into `digest` (at least
 // `digest_size` bytes) and free the hasher. Answers the digest's length.
 pub fn finish[&h, &o](heap: &!h Heap, hasher: Hasher, digest: &!o [byte]) -> [heap] int {
-    let Hasher { state, block, used, total, wide } = hasher;
+    let Hasher { state, block, used, total, wide, schedule } = hasher;
     var size = 64;
     var field = 8;
     var words = 8;
@@ -455,59 +460,63 @@ pub fn finish[&h, &o](heap: &!h Heap, hasher: Hasher, digest: &!o [byte]) -> [he
         field = 16;
         word = 8;
     }
-    borrow mut state as &!sw in {
-        borrow mut block as &!bw in {
-            let s = contents(sw);
-            let b = contents(bw);
-            var have = used;
-            b[have] = byte_of(0x80);
-            have = have + 1;
-            // No room for the length field: zero the rest, fold, start a
-            // fresh block.
-            if have > size - field {
+    borrow mut schedule as &!ww in {
+        borrow mut state as &!sw in {
+            borrow mut block as &!bw in {
+                let s = contents(sw);
+                let b = contents(bw);
+                var have = used;
+                b[have] = byte_of(0x80);
+                have = have + 1;
+                // No room for the length field: zero the rest, fold, start a
+                // fresh block.
+                if have > size - field {
+                    while have < size {
+                        b[have] = byte_of(0);
+                        have = have + 1;
+                    }
+                    fold(s, b, wide, contents(ww));
+                    have = 0;
+                }
                 while have < size {
                     b[have] = byte_of(0);
                     have = have + 1;
                 }
-                fold(s, b, wide);
-                have = 0;
-            }
-            while have < size {
-                b[have] = byte_of(0);
-                have = have + 1;
-            }
-            // The bit length, big-endian, in the last eight bytes. SHA-512's
-            // field is sixteen, and its top eight stay zero: `total * 8` is
-            // a checked multiply, so a length that needed them traps here
-            // rather than wrapping (`docs/sha512.md` §3, lex-sys).
-            let bits = total * 8;
-            var k = 0;
-            while k < 8 {
-                b[size - 8 + k] = byte_of(bits >> (7 - k) * 8 & 0xff);
-                k = k + 1;
-            }
-            fold(s, b, wide);
-            var i = 0;
-            while i < words {
-                var j = 0;
-                while j < word {
-                    digest[i * word + j] = byte_of(s[i] >> (word - 1 - j) * 8 & 0xff);
-                    j = j + 1;
+                // The bit length, big-endian, in the last eight bytes. SHA-512's
+                // field is sixteen, and its top eight stay zero: `total * 8` is
+                // a checked multiply, so a length that needed them traps here
+                // rather than wrapping (`docs/sha512.md` §3, lex-sys).
+                let bits = total * 8;
+                var k = 0;
+                while k < 8 {
+                    b[size - 8 + k] = byte_of(bits >> (7 - k) * 8 & 0xff);
+                    k = k + 1;
                 }
-                i = i + 1;
+                fold(s, b, wide, contents(ww));
+                var i = 0;
+                while i < words {
+                    var j = 0;
+                    while j < word {
+                        digest[i * word + j] = byte_of(s[i] >> (word - 1 - j) * 8 & 0xff);
+                        j = j + 1;
+                    }
+                    i = i + 1;
+                }
             }
         }
     }
     unbox_slice(heap, state);
     unbox_slice(heap, block);
+    unbox_slice(heap, schedule);
     return words * word;
 }
 
 // End a hasher without a digest, on a path that gave up.
 pub fn discard[&h](heap: &!h Heap, hasher: Hasher) -> [heap] int {
-    let Hasher { state, block, used, total, wide } = hasher;
+    let Hasher { state, block, used, total, wide, schedule } = hasher;
     unbox_slice(heap, state);
     unbox_slice(heap, block);
+    unbox_slice(heap, schedule);
     return total;
 }
 

@@ -161,13 +161,20 @@ def bench(args):
         f = os.path.join(d, "corpus.txt")
         jf = os.path.join(d, "corpus.json")
         corpus(f, size, args.seed)
-        json_corpus(jf, min(size, 32 << 20), args.seed)
+        json_corpus(jf, min(size, 16 << 20), args.seed)
         commands = cases(args.tool, f, jf)
         times = interleaved(commands, args.runs, args.sink)
         corpus_hash = hashlib.sha256(open(f, "rb").read()).hexdigest()
     report = {"tool": args.tool, "size": size, "sink": args.sink, "seed": args.seed, "corpus_sha256": corpus_hash,
               "results": summary(times), "exit_statuses": interleaved.statuses, "environment": environment(),
               "note": "a probe on this machine, not a protocol result; speed against GNU is not a goal (§1.2)"}
+    # A command that did not succeed did not do the job being timed. The
+    # first version of this harness reported jsonq at 0.08 s against jq's
+    # 1.5 s while jsonq was refusing the document (exit 8, past --max-bytes).
+    failed = {name: s for name, s in interleaved.statuses.items() if s != [0]}
+    if failed:
+        report["ok"] = False
+        report["invalid"] = "these commands did not exit 0, so their times measure a failure: %s" % failed
     return report
 
 

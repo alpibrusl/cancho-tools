@@ -114,13 +114,41 @@ On the pinned compiler (`a18e533`), Linux x86_64, a shared and noisy sandbox.
 | M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,572/1,572/1,572 KB, `peek` 1,572, `hash` 1,564, `tally` 1,580 (max/min ≤ 1.01; the gate is 1.5). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
 | D14 variant | `seek` and `write` built with the root baked in: the authority names the directory, and every M8 case is a tag, not a trap, though the narrowed `Fs` would trap on any path the validation missed |
 
-**Speed is reported, not gated** (§1.2). One probe, 64 MiB, 7 interleaved
-rounds, minimum: `seek` 1.67 s against `grep -F -n -b` 0.48 s and `rg` 0.36 s
-(about a million matches written); `hash` 0.83 s against `sha256sum` 0.18 s;
-`peek --count-lines` 0.19 s against `sed -n 1,100p; wc -l` 0.12 s; `tally` on
-a field 0.30 s against `cut | sort | uniq -c | sort | head` 0.71 s; `jsonq` on
-a 32 MiB array 0.08 s against `jq` 1.51 s. Startup: 1.76 ms against 1.70 ms
-for `/usr/bin/true` (300 spawns each).
+**Speed is reported, not gated** (§1.2). One probe, 64 MiB of text,
+7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`):
+
+| Tool | Before profiling | Now | Incumbent |
+|---|---|---|---|
+| `seek gamma` (about a million matches written) | 1.67 s | 0.85 s | `grep -F -n -b` 0.48 s, `rg` 0.36 s |
+| `seek` with no match | 2.7 s | 0.25 s | `grep -F -n -b` 0.09 s |
+| `hash` | 0.83 s | 0.65 s | `sha256sum` 0.18 s (OpenSSL's AVX2 assembly) |
+| `peek --count-lines --lines 1:100` | 0.19 s | 0.17 s | `sed -n 1,100p; wc -l` 0.13 s |
+| `tally --field 1` | 0.30 s | 0.22 s | `cut \| sort \| uniq -c \| sort \| head` 0.71 s |
+| `jsonq -p /0`, 16 MiB array | 0.41 s | 0.41 s | `jq -c .[0]` 0.73 s |
+
+What the profile (callgrind) found and what changed: `seek` searched with
+`std.bytes.find`, which tries every offset (44% of its time) -- it now uses
+Boyer-Moore-Horspool with a table built once per file; the line reader copied
+every line into a buffer (20%) -- it now answers a view into the read chunk
+and copies only a line that spans two reads; each match built a `json.Writer`
+and validated UTF-8 by decoding every byte -- a match is now encoded straight
+into one reused buffer with an ASCII fast path, and the path part is escaped
+once per file; `std.buffer.append` copies with a bounds check per byte that the
+compiler cannot remove (a quarter of a match-heavy run) -- `text.append_bytes`
+copies into a slice exactly as long as its source. Writing a match in nine
+`write_bytes` calls instead of one was tried and was slower (1.02 s). `hash`
+allocated a 64 KiB region per block and spent a checked add and a mask on every
+32-bit operation; the schedule is now reused and the rounds use wrapping adds
+and one mask per word. `jsonq`'s remaining cost is zero-filling its parse tape
+(24 bytes per byte of input, 43%) and `std.json`'s parser, neither of which is
+in this repository.
+
+**Corrected.** An earlier version of this table had `jsonq` at 0.08 s against
+`jq`'s 1.51 s. `jsonq` was refusing that document (exit 8: it was larger than
+`--max-bytes`), so the time measured a refusal. `toolbench.py` now marks a run
+invalid when any command exits non-zero.
+
+Startup: 1.76 ms against 1.70 ms for `/usr/bin/true` (300 spawns each).
 
 ## The epic, sub-issue by sub-issue
 

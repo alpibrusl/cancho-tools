@@ -110,11 +110,13 @@
     "index_of",
     "index_of_short",
     "io_rule",
+    "is_ascii",
     "is_digit",
     "is_digit",
     "is_flag",
     "is_hex",
     "is_tail",
+    "is_utf8",
     "is_valid",
     "is_ws",
     "item",
@@ -164,5 +166,5 @@
   ],
   "folded_operators": 34,
   "folded_calls": 0,
-  "functions": 211
+  "functions": 214
 }

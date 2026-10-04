@@ -21,6 +21,32 @@ the compiler proved it needs.
 generated from the tool itself: flags, rules, exit codes, authority, JSON
 schemas and a ready-made `SKILL.md`.
 
+## Why an agent would use these instead
+
+`grep`, `sed` and `jq` were made for a person at a terminal, who reads the
+prose, notices when something is off and retries. An agent reads text it
+has to parse, often cannot see stderr, and has to decide its next step from
+what came back. Each difference below is about that gap:
+
+| An agent with the classic tool… | With lexsys-tools |
+|---|---|
+| **parses text.** `grep` prints `path:line:text`, which is ambiguous when a file name holds a `:`; a match in a binary file becomes the sentence `binary file matches`; bytes that are not UTF-8 reach the model raw or replaced. | **reads records with a schema.** Every output is JSON against a published schema (`seek.v1` …). A path, a line number and a byte offset are fields. Binary content is flagged and still searched. Bytes that are not UTF-8 come back as `{"b64": …}`, so nothing is lost. |
+| **cannot tell a short answer from a cut one.** Output that stopped because of a pipe, a timeout or a kill looks like output that ended. | **knows when it has everything.** A stream ends with an `end` record, so a stream without one was cut short. A capped answer says `truncated: true` and gives the `next` cursor (`--skip`, `next.line`) to continue exactly where it stopped. |
+| **guesses from exit codes and English.** `grep` exits 2 when one of three files is missing even though it printed matches; `jq` answers `Cannot index number with number`, exit 5. | **branches on a rule.** Each error is `{code, rule, message, hint, repair, detail}`, with 37 stable rule tags (`io.not-found`, `path.dotdot`, `precondition.hash-mismatch` …) and exit codes with one meaning each. One bad file is an error record in the stream, and the other files are still searched. |
+| **has to work out the fix.** | **is often handed the fix.** When the correction is mechanical, `repair` is an argv to run as it stands, and a repair never widens what the tool may touch. |
+| **overwrites blindly.** `sed -i`, `>` and `cp` replace whatever is there, even if the file changed since the agent read it, or another agent is writing it. | **states what it expects.** `write` needs `--create` or `--if-sha256` of the content it read. `replace` needs the text to occur exactly `--expect` times. A stale view is `precondition.hash-mismatch`, not a lost edit. Writes are atomic and locked (of two racing writers exactly one wins), idempotent (a retried write that already landed answers `changed: false`), and `--dry-run` previews the change without making it. |
+| **can be led out of its workspace.** A path with `..`, an absolute path or a symbolic link reaches anything the process can. | **stays under `--root`.** `..`, absolute and outside paths are refused before anything is opened, and no link below the root is followed (`path.symlink`). |
+| **gets different answers in different places.** `sort` follows the locale; output can change with `LANG`, the terminal or the clock. | **gets the same bytes every time.** No locale, no clock, no environment: the same input is byte-identical through a pipe, a file or a terminal. |
+| **can blow its memory or its context.** A huge line or file goes straight through. | **has caps and is told about them.** Memory is bounded (about 1.7 MB at 256 MiB of input), and every cap is a flag with a ceiling and its own rule, such as `limit.line-too-long`, whose repair raises the cap. |
+| **learns the tool from `--help` prose**, or from memory of some version of it. | **asks the tool.** `introspect` gives the flags, rules, exit codes, limits and schema as JSON, and `skill` gives a `SKILL.md`, both generated from the tables the parser runs on, so they cannot drift. |
+| **has to trust the binary.** | **can check what it may do.** Each binary embeds its authority as the compiler derived it: no network, no foreign code, no clock, and no write except beneath a directory it opened. A sandbox can be configured from it. |
+
+What is **not** claimed: that agents finish more tasks, or finish them
+faster, with these tools. That needs an agent-in-the-loop evaluation
+([lex-sys#228](https://github.com/alpibrusl/lex-sys/issues/228)) that has
+not been run. Everything in the table is a property the conformance gates
+check on every commit.
+
 ## Quick start
 
 The tools are built by the lex-sys compiler at the commit pinned in

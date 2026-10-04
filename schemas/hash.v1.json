@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alpibrusl/lexsys-tools/schemas/hash.v1.json",
+  "title": "hash.v1",
+  "description": "One line of an NDJSON stream. The last line of a stream that finished is the end record; a stream without one was cut short.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hash"
+    },
+    {
+      "$ref": "#/$defs/error_record"
+    },
+    {
+      "$ref": "#/$defs/end"
+    }
+  ],
+  "$defs": {
+    "text_or_bytes": {
+      "description": "UTF-8 text as a string; other bytes as base64 (RFC 4648 section 4, padded).",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "b64": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+            }
+          },
+          "required": [
+            "b64"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "repair": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "retry"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "kind",
+            "argv"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "none"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "choose"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "argv": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "argv"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "GENERAL_ERROR",
+            "INVALID_ARGS",
+            "NOT_FOUND",
+            "PERMISSION_DENIED",
+            "CONFLICT",
+            "PRECONDITION_FAILED"
+          ]
+        },
+        "rule": {
+          "type": "string",
+          "pattern": "^[a-z]+\\.[a-z0-9-]+$"
+        },
+        "message": {
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repair": {
+          "$ref": "#/$defs/repair"
+        },
+        "detail": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "rule",
+        "message",
+        "hint",
+        "repair",
+        "detail"
+      ],
+      "additionalProperties": false
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "end": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "end"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "command": {
+          "const": "hash"
+        },
+        "schema": {
+          "const": "hash.v1"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "ok",
+        "command",
+        "schema",
+        "complete",
+        "files",
+        "errors"
+      ],
+      "additionalProperties": false
+    },
+    "error_record": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        }
+      },
+      "required": [
+        "type",
+        "error"
+      ],
+      "additionalProperties": false
+    },
+    "hash": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "hash"
+        },
+        "path": {
+          "$ref": "#/$defs/text_or_bytes"
+        },
+        "algo": {
+          "enum": [
+            "sha256",
+            "sha512"
+          ]
+        },
+        "hex": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64}|[0-9a-f]{128})$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "type",
+        "path",
+        "algo",
+        "hex",
+        "bytes"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

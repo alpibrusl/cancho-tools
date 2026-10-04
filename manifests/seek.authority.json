@@ -98,6 +98,8 @@
     "flag_table",
     "full",
     "get$int",
+    "guarantee_keys",
+    "guarantees_has",
     "has",
     "has_dotdot",
     "help_of",
@@ -170,5 +172,5 @@
   ],
   "folded_operators": 31,
   "folded_calls": 0,
-  "functions": 220
+  "functions": 222
 }

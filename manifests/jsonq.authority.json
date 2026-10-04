@@ -106,6 +106,8 @@
     "full",
     "get",
     "get$int",
+    "guarantee_keys",
+    "guarantees_has",
     "has",
     "has_dotdot",
     "help_of",
@@ -175,5 +177,5 @@
   ],
   "folded_operators": 34,
   "folded_calls": 0,
-  "functions": 219
+  "functions": 221
 }

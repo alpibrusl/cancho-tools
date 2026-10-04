@@ -153,6 +153,10 @@ def markdown(text):
     out, i = [], 0
     while i < len(lines):
         line = lines[i]
+        # A one-line HTML comment (a generated section's marker) shows nothing.
+        if line.startswith("<!--") and line.rstrip().endswith("-->"):
+            i += 1
+            continue
         if line.startswith("```"):
             j = i + 1
             while j < len(lines) and not lines[j].startswith("```"):
@@ -271,6 +275,8 @@ def tool_page(d):
     for k, v in [("output", "NDJSON stream ending in an <code>end</code> record" if d["output"] == "stream" else "one JSON document"),
                  ("schema", ", ".join(f'<a href="schemas/{s}.json">{s}</a>' for s in d["schemas"])),
                  ("reversibility", code(d["reversibility"])),
+                 ("guarantees", ", ".join(code(k) for k, v in d["guarantees"].items() if v is True) or "none"),
+                 ("concurrency", html.escape(d["guarantees"]["concurrency"])),
                  ("confinement", f"{code(d['confinement'])}: {html.escape(d['confinement_note'])}"),
                  ("reads the environment", "no" if not d["reads_environment"] else "yes"),
                  ("reads the clock", "no" if not d["reads_clock"] else "yes"),

@@ -37,17 +37,18 @@ import toolbox.built;
 import toolbox.cli;
 import toolbox.describe;
 import toolbox.fail;
+import toolbox.limit;
 import toolbox.lines;
 import toolbox.out;
 import toolbox.path;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve every FILE relative to this directory and refuse paths outside it;max-count|m|nat|none||stop after this many matches in total, and report truncated with a next cursor;skip||nat|none|0|skip this many matches before reporting any (the next cursor of a truncated run);max-line-bytes||nat|none|1048576|the longest line held; a longer one is limit.line-too-long (ceiling 16777216);ascii-case-insensitive|i|bool|none||fold ASCII letters only when comparing;require-match||bool|none||exit 8 (precondition.no-match) when nothing matched;format||choice:ndjson/text|none|ndjson|ndjson for a program, text (path:line:text) for a person";
+    return "root||path|root||resolve every FILE relative to this directory and refuse paths outside it;max-count|m|nat|none||stop after this many matches in total, and report truncated with a next cursor;skip||nat|none|0|skip this many matches before reporting any (the next cursor of a truncated run);max-line-bytes||nat|none|1048576|the longest line held, a longer one is limit.line-too-long (ceiling 16777216);ascii-case-insensitive|i|bool|none||fold ASCII letters only when comparing;require-match||bool|none||exit 8 (precondition.no-match) when nothing matched;format||choice:ndjson/text|none|ndjson|ndjson for a program, text (path:line:text) for a person";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "seek", version: "0.1.0", summary: "Search files for a literal string; NDJSON records with tagged errors, bounded memory, and an authority with no write, network or foreign code.", usage: "seek [--root DIR] [--max-count N] [--skip N] [--max-line-bytes N] [--ascii-case-insensitive] [--require-match] [--format ndjson|text] PATTERN FILE...", output: "stream", schema: "seek.v1", flags: flag_table(), operands: "PATTERN|none|the literal bytes to find; not a regular expression;FILE...|path-read|the files to search, in order", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.missing-operand;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.line-too-long;precondition.no-match", limits: "max-line-bytes|1048576|16777216", reversibility: "reversible-cheap", stdin: "no" };
+    return describe.Tool { name: "seek", version: "0.1.0", summary: "Search files for a literal string; NDJSON records with tagged errors, bounded memory, and an authority with no write, network or foreign code.", usage: "seek [--root DIR] [--max-count N] [--skip N] [--max-line-bytes N] [--ascii-case-insensitive] [--require-match] [--format ndjson|text] PATTERN FILE...", output: "stream", schema: "seek.v1", flags: flag_table(), operands: "PATTERN|none|the literal bytes to find, not a regular expression;FILE...|path-read|the files to search, in order", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.missing-operand;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.line-too-long;precondition.no-match", limits: "max-line-bytes|1048576|16777216", reversibility: "reversible-cheap", stdin: "no" };
 }
 
 fn built() -> [] describe.Built {
@@ -67,24 +68,77 @@ fn lower(c: int) -> [] int {
     return c;
 }
 
-// Whether `needle` occurs in `line`, folding ASCII letters when `fold`.
-fn contains[&l, &n](line: &l [byte], needle: &n [byte], fold: bool) -> [] bool {
-    if !fold {
-        return bytes.find(line, needle) >= 0;
-    }
-    if len(needle) == 0 {
-        return true;
+// The Boyer-Moore-Horspool shift for each byte: how far the window may
+// move when that byte is under its last position. Built once per file, so
+// the search of a line skips up to `len(needle)` bytes at a time instead
+// of trying every offset (`std.bytes.find` does; the naive loop was 44% of
+// `seek`'s time, measured with callgrind). With `fold`, the table is built
+// over ASCII-lowered bytes.
+fn shifts[&n, &t](needle: &n [byte], fold: bool, table: &!t [int]) -> [] int {
+    let m = len(needle);
+    var c = 0;
+    while c < 256 {
+        table[c] = m;
+        c = c + 1;
     }
     var i = 0;
-    while i + len(needle) <= len(line) {
-        var j = 0;
-        while j < len(needle) && lower(int_of(line[i + j])) == lower(int_of(needle[j])) {
-            j = j + 1;
+    while i + 1 < m {
+        var b = int_of(needle[i]);
+        if fold {
+            b = lower(b);
+            table[upper(b)] = m - 1 - i;
         }
-        if j == len(needle) {
-            return true;
-        }
+        table[b] = m - 1 - i;
         i = i + 1;
+    }
+    return 0;
+}
+
+fn upper(c: int) -> [] int {
+    if c >= 'a' && c <= 'z' {
+        return c - 32;
+    }
+    return c;
+}
+
+// Whether `needle` occurs in `line`, folding ASCII letters when `fold`.
+fn contains[&l, &n, &t](line: &l [byte], needle: &n [byte], fold: bool, table: &t [int]) -> [] bool {
+    let m = len(needle);
+    if m == 0 {
+        return true;
+    }
+    let last = m - 1;
+    var at = 0;
+    if !fold {
+        let tail = int_of(needle[last]);
+        while at + m <= len(line) {
+            let c = int_of(line[at + last]);
+            if c == tail {
+                var j = 0;
+                while j < last && line[at + j] == needle[j] {
+                    j = j + 1;
+                }
+                if j == last {
+                    return true;
+                }
+            }
+            at = at + table[c];
+        }
+        return false;
+    }
+    let tail = lower(int_of(needle[last]));
+    while at + m <= len(line) {
+        let c = int_of(line[at + last]);
+        if lower(c) == tail {
+            var j = 0;
+            while j < last && lower(int_of(line[at + j])) == lower(int_of(needle[j])) {
+                j = j + 1;
+            }
+            if j == last {
+                return true;
+            }
+        }
+        at = at + table[c];
     }
     return false;
 }
@@ -140,21 +194,30 @@ fn sync[&h, &i, &e](heap: &!h Heap, io: &!i Io, errs: &e fail.Errors, tally: Tal
     return emitted(t, fail.count(errs));
 }
 
-fn match_record[&h, &p, &t](heap: &!h Heap, shown: &p [byte], number: int, offset: int, line: &t [byte]) -> [heap] buffer.Buffer {
-    var w = json.writer(heap, len(line) + 96);
-    w = json.begin_object(heap, w);
-    w = json.put_key(heap, w, "type");
-    w = json.put_string(heap, w, "match");
-    w = json.put_key(heap, w, "path");
-    w = text.put(heap, w, shown);
-    w = json.put_key(heap, w, "line");
-    w = json.put_int(heap, w, number);
-    w = json.put_key(heap, w, "offset");
-    w = json.put_int(heap, w, offset);
-    w = json.put_key(heap, w, "text");
-    w = text.put(heap, w, line);
-    w = json.end_object(heap, w);
-    return json.finish(w);
+// One match record and its newline,
+// `{"type":"match","path":…,"line":…,"offset":…,"text":…}`, built into
+// `into` and written with one `write_bytes`. `prefix` is the part that does
+// not change within a file -- the type and the path, escaped once per file --
+// and the buffer is reused for every match: a writer per match was most of a
+// match-heavy search's time. The schema test (M1) and the differential test
+// against grep (M5) check what this writes like any other output.
+fn match_record[&h, &i, &p, &t](heap: &!h Heap, io: &!i Io, into: buffer.Buffer, prefix: &p [byte], number: int, offset: int, line: &t [byte]) -> [heap, io_write] (buffer.Buffer, bool) {
+    var b = into;
+    borrow mut b as &!w in {
+        buffer.clear(w);
+    }
+    b = text.append_bytes(heap, b, prefix);
+    b = text.append_nat(heap, b, number);
+    b = text.append_bytes(heap, b, ",\"offset\":");
+    b = text.append_nat(heap, b, offset);
+    b = text.append_bytes(heap, b, ",\"text\":");
+    b = text.append_json(heap, b, line);
+    b = text.append_bytes(heap, b, "}\n");
+    var ok = false;
+    borrow b as &r in {
+        ok = out.emit(io, buffer.bytes(r));
+    }
+    return (b, ok);
 }
 
 fn text_line[&h, &p, &t](heap: &!h Heap, shown: &p [byte], number: int, line: &t [byte]) -> [heap] buffer.Buffer {
@@ -164,53 +227,6 @@ fn text_line[&h, &p, &t](heap: &!h Heap, shown: &p [byte], number: int, line: &t
     b = buffer.push_nat(heap, b, number);
     b = buffer.push(heap, b, byte_of(':'));
     return buffer.append(heap, b, line);
-}
-
-// The lines of one file that were longer than the cap: one error per file,
-// after the file, naming how many there were, the first, and the longest.
-// The repair raises the cap to the longest -- so applying it clears this
-// error for this file -- when that is within the ceiling; and it replaces
-// only the number when the cap was given as a whole argument, or adds the
-// flag (role `none`, no authority) when the cap was the default.
-fn too_long[&h, &g, &p, &s](heap: &!h Heap, e: fail.Errors, args: &g Args, parsed: &p cli.Parsed, shown: &s [byte], count: int, first: int, longest: int, cap: int) -> [heap, args] fail.Errors {
-    var w = fail.open(heap, "limit.line-too-long", "lines longer than --max-line-bytes were skipped; the rest of the file was searched", "raise --max-line-bytes, up to 16777216");
-    let at = cli.value_index(parsed, flag_table(), "max-line-bytes");
-    var n = buffer.empty(heap, 20);
-    n = buffer.push_nat(heap, n, longest);
-    if longest <= ceiling() && at >= 0 && cli.value_is_whole(parsed, flag_table(), "max-line-bytes") {
-        borrow n as &r in {
-            w = fail.retry_replacing(heap, w, args, at, buffer.bytes(r));
-        }
-    } else if longest <= ceiling() && at < 0 {
-        var o = fail.retry_open(heap, w);
-        var i = 0;
-        while i < arg_count(args) {
-            o = json.put_string(heap, o, arg(args, i));
-            if i == 0 {
-                o = json.put_string(heap, o, "--max-line-bytes");
-                borrow n as &r in {
-                    o = json.put_string(heap, o, buffer.bytes(r));
-                }
-            }
-            i = i + 1;
-        }
-        w = fail.retry_close(heap, o);
-    } else {
-        w = fail.repair_none(heap, w, "the longest line is longer than the ceiling this tool can hold");
-    }
-    buffer.drop(heap, n);
-    w = fail.detail_open(heap, w);
-    w = json.put_key(heap, w, "path");
-    w = text.put(heap, w, shown);
-    w = json.put_key(heap, w, "lines");
-    w = json.put_int(heap, w, count);
-    w = json.put_key(heap, w, "first_line");
-    w = json.put_int(heap, w, first);
-    w = json.put_key(heap, w, "longest");
-    w = json.put_int(heap, w, longest);
-    w = json.put_key(heap, w, "limit");
-    w = json.put_int(heap, w, cap);
-    return fail.add(heap, e, w);
 }
 
 // Search one open file.
@@ -227,52 +243,59 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
     var e = errs;
     var t = tally;
     var here = 0;
-    var long_count = 0;
-    var long_first = 0;
-    var long_most = 0;
+    var overlong = limit.none();
+    let skip_table = box_slice(heap, 256, 0);
+    borrow mut skip_table as &!tw in {
+        shifts(pattern, fold, contents(tw));
+    }
+    var record = buffer.empty(heap, 256);
+    var prefix = buffer.empty(heap, 64);
+    prefix = text.append_bytes(heap, prefix, "{\"type\":\"match\",\"path\":");
+    prefix = text.append_json(heap, prefix, shown);
+    prefix = text.append_bytes(heap, prefix, ",\"line\":");
     var r = lines.start(heap, cap);
-    var going = true;
-    while going && !t.broken {
-        let (next, status) = lines.next(heap, r);
-        r = next;
-        if status == lines.need() {
-            r = lines.fill_file(r, file);
-        } else if status == lines.done() {
-            going = false;
-        } else if status == lines.long() {
-            borrow r as &rr in {
-                if long_count == 0 {
-                    long_first = lines.number(rr);
+    borrow prefix as &pre in {
+        var going = true;
+        while going && !t.broken {
+            let (next, status) = lines.next(heap, r);
+            r = next;
+            if status == lines.need() {
+                r = lines.fill_file(r, file);
+            } else if status == lines.done() {
+                going = false;
+            } else if status == lines.long() {
+                borrow r as &rr in {
+                    overlong = limit.more(overlong, lines.number(rr), lines.length(rr));
                 }
-                if lines.length(rr) > long_most {
-                    long_most = lines.length(rr);
+            } else {
+                var hit = false;
+                borrow r as &rr in {
+                    borrow skip_table as &tr in {
+                        hit = contains(lines.text(rr), pattern, fold, contents(tr));
+                    }
                 }
-            }
-            long_count = long_count + 1;
-        } else {
-            var hit = false;
-            borrow r as &rr in {
-                hit = contains(lines.text(rr), pattern, fold);
-            }
-            if hit {
-                if most >= 0 && t.reported >= most {
-                    t = truncated(t);
-                    going = false;
-                } else {
-                    here = here + 1;
-                    let shows = t.found + 1 > skip;
-                    t = counted(t, shows);
-                    if shows {
-                        var wrote = true;
-                        borrow r as &rr in {
-                            if text_mode {
-                                wrote = out.buffer_line(heap, io, text_line(heap, shown, lines.number(rr), lines.text(rr)));
-                            } else {
-                                wrote = out.buffer_line(heap, io, match_record(heap, shown, lines.number(rr), lines.offset(rr), lines.text(rr)));
+                if hit {
+                    if most >= 0 && t.reported >= most {
+                        t = truncated(t);
+                        going = false;
+                    } else {
+                        here = here + 1;
+                        let shows = t.found + 1 > skip;
+                        t = counted(t, shows);
+                        if shows {
+                            var wrote = true;
+                            borrow r as &rr in {
+                                if text_mode {
+                                    wrote = out.buffer_line(heap, io, text_line(heap, shown, lines.number(rr), lines.text(rr)));
+                                } else {
+                                    let (kept, written) = match_record(heap, io, record, buffer.bytes(pre), lines.number(rr), lines.offset(rr), lines.text(rr));
+                                    record = kept;
+                                    wrote = written;
+                                }
                             }
-                        }
-                        if !wrote {
-                            t = broken(t);
+                            if !wrote {
+                                t = broken(t);
+                            }
                         }
                     }
                 }
@@ -288,8 +311,11 @@ fn search[&h, &g, &p, &f, &i, &n, &s](heap: &!h Heap, args: &g Args, parsed: &p 
         binary = lines.saw_nul(rr);
     }
     lines.drop(heap, r);
-    if long_count > 0 {
-        e = too_long(heap, e, args, parsed, shown, long_count, long_first, long_most, cap);
+    unbox_slice(heap, skip_table);
+    buffer.drop(heap, record);
+    buffer.drop(heap, prefix);
+    if overlong.count > 0 {
+        e = limit.too_long(heap, e, args, parsed, flag_table(), shown, overlong, cap, ceiling(), "lines longer than --max-line-bytes were skipped; the rest of the file was searched");
         borrow e as &er in {
             t = sync(heap, io, er, t, text_mode);
         }

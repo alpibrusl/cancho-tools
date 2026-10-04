@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+
+      # The compiler is whichever commit lex-sys.toml says these sources were
+      # written for: one place, which the compiler itself checks.
+      - name: Read the compiler pin from lex-sys.toml
+        id: pin
+        run: echo "rev=$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' tools/lex-sys.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/lex-sys
+          ref: ${{ steps.pin.outputs.rev }}
+          path: lex-sys
+
+      - name: Cache the compiler
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: lex-sys/target/release/lex-sys
+          key: lex-sys-${{ steps.pin.outputs.rev }}
+
+      - name: Build lex-sys
+        if: steps.compiler.outputs.cache-hit != 'true'
+        working-directory: lex-sys
+        run: cargo build --release -p lex-sys
+
+      - name: Put the compiler on PATH
+        run: echo "$GITHUB_WORKSPACE/lex-sys/target/release" >> "$GITHUB_PATH"
+
+      - name: What the gates compare against (jq, strace, ripgrep) and validate with (jsonschema)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q jq strace ripgrep
+          pip install jsonschema
+
+      - name: Formatting
+        working-directory: tools
+        run: lex-sys fmt --check contract tools tests generated
+
+      - name: Build every tool
+        working-directory: tools
+        run: lex-sys build
+
+      - name: Unit tests of the contract package
+        working-directory: tools
+        run: lex-sys test
+
+      - name: Schemas are generated, not edited
+        working-directory: tools
+        run: python3 scripts/schemas.py --check
+
+      - name: M6 -- the authority is the compiler's, embedded, within its ceiling
+        working-directory: tools
+        run: python3 scripts/manifest.py --check
+
+      - name: M1-M9 and D14 -- the offline gates
+        working-directory: tools
+        run: python3 -W ignore -m unittest discover -s tests/conformance -v
+
+  # The benchmark harness's own self-test (S3): power and the /dev/null
+  # pitfall. It reports a probe and gates nothing against GNU; it is a
+  # separate job because a shared runner is noisy.
+  toolbench-self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Self-test
+        run: python3 scripts/toolbench.py --self-test

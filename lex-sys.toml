@@ -13,6 +13,42 @@ sources = ["contract", "tools/seek", "generated/seek"]
 std = true
 out = "build/seek"
 
+[[bin]]
+name = "write"
+sources = ["contract", "tools/write", "generated/write"]
+std = true
+out = "build/write"
+
+[[bin]]
+name = "replace"
+sources = ["contract", "tools/replace", "generated/replace"]
+std = true
+out = "build/replace"
+
+[[bin]]
+name = "peek"
+sources = ["contract", "tools/peek", "generated/peek"]
+std = true
+out = "build/peek"
+
+[[bin]]
+name = "jsonq"
+sources = ["contract", "tools/jsonq", "generated/jsonq"]
+std = true
+out = "build/jsonq"
+
+[[bin]]
+name = "tally"
+sources = ["contract", "tools/tally", "generated/tally"]
+std = true
+out = "build/tally"
+
+[[bin]]
+name = "hash"
+sources = ["contract", "tools/hash", "generated/hash"]
+std = true
+out = "build/hash"
+
 [[test]]
 name = "sha"
 sources = ["contract", "tests/sha_test.ls"]

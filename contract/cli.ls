@@ -19,7 +19,7 @@ module toolbox.cli;
 //
 // `short` is one letter or empty. `kind` is `bool`, `nat` (a decimal of at
 // most 18 digits, so it cannot overflow), `hex64` (a SHA-256 digest in
-// lowercase hex), `text`, `path`, or `choice:a/b/c`. `role` is `none`,
+// lowercase hex), `text` (not empty), `any` (empty allowed), `path`, or `choice:a/b/c`. `role` is `none`,
 // `path-read`, `path-write`, `root` or `guard` -- what the flag does to
 // the tool's reach, which a mediator reads (D13) and which decides whether
 // a repair may suggest it (D6 rule 1: only `none`). `default` is the value
@@ -154,6 +154,9 @@ pub fn valid[&v](kind: &static [byte], value: &v [byte]) -> [] bool {
     }
     if bytes.starts_with(kind, "choice:") {
         return in_choice(kind, value);
+    }
+    if bytes.equal(kind, "any") {
+        return true;
     }
     return len(value) > 0;
 }

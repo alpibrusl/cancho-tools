@@ -70,20 +70,30 @@ pub res struct Lines {
     nul: bool,
     // The errno of a failed read, 0 for none.
     failed: int,
+    // When the current line lies whole inside `chunk`, it is not copied:
+    // `chunk[view_from..view_to]` is the line and `held` is unused. Only a
+    // line that spans two reads is assembled in `held`. (Copying every line
+    // was a fifth of `seek`'s time, measured with callgrind.)
+    viewing: bool,
+    view_from: int,
+    view_to: int,
 }
 
 pub fn start[&h](heap: &!h Heap, cap: int) -> [heap] Lines {
-    return Lines { chunk: buffer.empty(heap, chunk_size()), pos: 0, held: buffer.empty(heap, 256), cap: cap, seen: 0, begin: 0, count: 0, over: 0, ended: false, newline: false, ready: false, read: 0, nul: false, failed: 0 };
+    return Lines { chunk: buffer.empty(heap, chunk_size()), pos: 0, held: buffer.empty(heap, 256), cap: cap, seen: 0, begin: 0, count: 0, over: 0, ended: false, newline: false, ready: false, read: 0, nul: false, failed: 0, viewing: false, view_from: 0, view_to: 0 };
 }
 
 pub fn drop[&h](heap: &!h Heap, r: Lines) -> [heap] int {
-    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed } = r;
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
     buffer.drop(heap, chunk);
     buffer.drop(heap, held);
     return seen;
 }
 
 pub fn text[&r](r: &r Lines) -> [] &r [byte] {
+    if r.viewing {
+        return buffer.bytes(r.chunk)[r.view_from..r.view_to];
+    }
     return buffer.bytes(r.held);
 }
 
@@ -104,6 +114,9 @@ pub fn newline[&r](r: &r Lines) -> [] bool {
 pub fn length[&r](r: &r Lines) -> [] int {
     if r.over > 0 {
         return r.over;
+    }
+    if r.viewing {
+        return r.view_to - r.view_from;
     }
     return buffer.size(r.held);
 }
@@ -130,7 +143,7 @@ pub fn ended[&r](r: &r Lines) -> [] bool {
 
 // The next line, or what is needed to get one.
 pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
-    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed } = r;
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
     var h = held;
     var o = over;
     var b = begin;
@@ -145,6 +158,9 @@ pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
     }
     var status = need();
     var nl = false;
+    var view = false;
+    var vf = 0;
+    var vt = 0;
     borrow chunk as &c in {
         let data = buffer.bytes(c);
         var k = at;
@@ -156,10 +172,16 @@ pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
         borrow h as &hr in {
             held_now = buffer.size(hr);
         }
+        let whole = k < len(data) && held_now == 0 && o == 0;
         if o > 0 {
             o = o + len(piece);
         } else if held_now + len(piece) > cap {
             o = held_now + len(piece);
+        } else if whole {
+            // The line is all in this chunk: answer a view of it.
+            view = true;
+            vf = at;
+            vt = k;
         } else {
             h = buffer.append(heap, h, piece);
         }
@@ -192,7 +214,7 @@ pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
         }
     }
     let answered = status == line() || status == long();
-    return (Lines { chunk: chunk, pos: at, held: h, cap: cap, seen: s, begin: b, count: number, over: o, ended: ended, newline: nl, ready: answered, read: read, nul: nul, failed: failed }, status);
+    return (Lines { chunk: chunk, pos: at, held: h, cap: cap, seen: s, begin: b, count: number, over: o, ended: ended, newline: nl, ready: answered, read: read, nul: nul, failed: failed, viewing: view, view_from: vf, view_to: vt }, status);
 }
 
 fn any_nul[&d](data: &d [byte]) -> [] bool {
@@ -208,7 +230,7 @@ fn any_nul[&d](data: &d [byte]) -> [] bool {
 
 // Refill from an open file. Call only after `next` answered `need`.
 pub fn fill_file[&f](r: Lines, file: &!f File) -> [file_read] Lines {
-    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed } = r;
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
     var c = chunk;
     var e = ended;
     var got = 0;
@@ -240,13 +262,13 @@ pub fn fill_file[&f](r: Lines, file: &!f File) -> [file_read] Lines {
             }
         }
     }
-    return Lines { chunk: c, pos: 0, held: held, cap: cap, seen: seen, begin: begin, count: count, over: over, ended: e, newline: newline, ready: ready, read: read + got, nul: z, failed: bad };
+    return Lines { chunk: c, pos: 0, held: held, cap: cap, seen: seen, begin: begin, count: count, over: over, ended: e, newline: newline, ready: ready, read: read + got, nul: z, failed: bad, viewing: false, view_from: 0, view_to: 0 };
 }
 
 // Refill from standard input, one `getchar` at a time (the only way the
 // language reads it, lex-sys `docs/standard-input.md`).
 pub fn fill_stdin[&h, &i](heap: &!h Heap, r: Lines, io: &!i Io) -> [heap, io_read] Lines {
-    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed } = r;
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
     var c = chunk;
     var e = ended;
     var got = 0;
@@ -267,5 +289,5 @@ pub fn fill_stdin[&h, &i](heap: &!h Heap, r: Lines, io: &!i Io) -> [heap, io_rea
             got = got + 1;
         }
     }
-    return Lines { chunk: c, pos: 0, held: held, cap: cap, seen: seen, begin: begin, count: count, over: over, ended: e, newline: newline, ready: ready, read: read + got, nul: z, failed: failed };
+    return Lines { chunk: c, pos: 0, held: held, cap: cap, seen: seen, begin: begin, count: count, over: over, ended: e, newline: newline, ready: ready, read: read + got, nul: z, failed: failed, viewing: false, view_from: 0, view_to: 0 };
 }

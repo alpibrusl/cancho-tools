@@ -333,3 +333,26 @@ pub fn operand[&h, &g, &r](heap: &!h Heap, args: &g Args, root: &r [byte], at: i
 pub fn lexical[&h, &p](heap: &!h Heap, p: &p [byte]) -> [heap] (buffer.Buffer, bool) {
     return normalise(heap, p, true);
 }
+
+// The root of a build-time variant (D14, `scripts/variant.py`): the
+// program's `Fs` is narrowed to `baked`, so its authority names the
+// directory, and every path must be under it. `--root` may be omitted or
+// may name `baked` itself; any other value is refused, because a path
+// outside the narrowed prefix would trap rather than answer.
+pub fn baked[&h, &g](heap: &!h Heap, args: &g Args, baked: &static [byte], given: &static [byte], at: int, errs: fail.Errors) -> [heap, args] (buffer.Buffer, fail.Errors) {
+    var e = errs;
+    if at >= 0 {
+        let (norm, flagged) = normalise(heap, given, false);
+        var same = false;
+        borrow norm as &n in {
+            same = bytes.equal(buffer.bytes(n), baked) && !has_dotdot(given);
+        }
+        buffer.drop(heap, norm);
+        if !same {
+            e = path_error(heap, e, args, "path.outside-root", "this build is confined to one directory, and --root names another", "omit --root: this build's root is fixed (introspect names it)", at, "");
+        }
+    }
+    var out = buffer.empty(heap, len(baked));
+    out = buffer.append(heap, out, baked);
+    return (out, e);
+}

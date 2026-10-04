@@ -13,6 +13,18 @@ sources = ["contract", "tools/seek", "generated/seek"]
 std = true
 out = "build/seek"
 
+[[bin]]
+name = "write"
+sources = ["contract", "tools/write", "generated/write"]
+std = true
+out = "build/write"
+
+[[bin]]
+name = "replace"
+sources = ["contract", "tools/replace", "generated/replace"]
+std = true
+out = "build/replace"
+
 [[test]]
 name = "sha"
 sources = ["contract", "tests/sha_test.ls"]

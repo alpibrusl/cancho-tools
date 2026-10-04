@@ -168,3 +168,30 @@ pub fn buffer_line[&h, &i](heap: &!h Heap, io: &!i Io, b: buffer.Buffer) -> [hea
     buffer.drop(heap, b);
     return ok;
 }
+
+// Answer a document tool's invocation and say what to exit with: the first
+// error's code, else `success` (0, or 9 for a completed dry run); 1 when
+// standard output took fewer bytes than were written. In `--format text`
+// mode `text` goes to standard output when there are no errors and the
+// errors' sentences go to standard error.
+pub fn respond[&h, &i, &d, &x, &e, &t](heap: &!h Heap, io: &!i Io, command: &static [byte], schema: &static [byte], version: &static [byte], data: &d [byte], extra: &x [byte], errs: &e fail.Errors, text_mode: bool, text: &t [byte], success: int) -> [heap, io_write, err_write] int {
+    var ok = true;
+    if text_mode {
+        if fail.count(errs) == 0 {
+            ok = emit(io, text);
+        } else {
+            say_errors(io, command, errs);
+        }
+    } else {
+        let doc = document(heap, command, schema, version, data, extra, errs);
+        ok = buffer_line(heap, io, doc);
+    }
+    if !ok {
+        write_failed(io, command);
+        return 1;
+    }
+    if fail.count(errs) > 0 {
+        return fail.exit_code(errs);
+    }
+    return success;
+}

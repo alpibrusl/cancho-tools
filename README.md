@@ -104,7 +104,7 @@ manifests and checks the fixed point; `lex-sys build` again embeds them.
 
 ## What the gates measured
 
-On the pinned compiler (PIN_SHORT), Linux x86_64, a shared and noisy sandbox.
+On the pinned compiler (`8fc3b3f`), Linux x86_64, a shared and noisy sandbox.
 
 | Gate | Result |
 |---|---|
@@ -116,18 +116,18 @@ On the pinned compiler (PIN_SHORT), Linux x86_64, a shared and noisy sandbox.
 | M6 authority | the committed record equals a fresh derivation, the binary prints it, it is within `tools.toml`, the fixed point holds, and D13's bridge table is total for every label held |
 | M7 mutation | `--dry-run` under `strace`: no mutating call, tree unchanged (with a positive control); every write applied twice, the second `changed:false`; 200 two-writer races, exactly one winner each |
 | M8 confinement | `..`, absolute, `//`, `./`, trailing `/`, sibling prefix, empty, 4,097 bytes, non-ASCII: each a tag or a success, never a trap; **the symlink escape is asserted** (a link inside `--root` is followed), so it flips when lex-sys#227 lands |
-| M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,572/1,572/1,572 KB, `peek` 1,572, `hash` 1,564, `tally` 1,580 (max/min ≤ 1.01; the gate is 1.5). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
+| M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,724/1,724/1,724 KB, `peek` 1,720/1,720/1,704, `hash` 1,708/1,708/1,708, `tally` 1,728/1,572/1,728 (max/min ≤ 1.10; the gate is 1.5; `/bin/true` measures 1,324 KB the same way). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
 | D14 variant | `seek` and `write` built with the root baked in: the authority names the directory, and every M8 case is a tag, not a trap, though the narrowed `Fs` would trap on any path the validation missed |
 
 **Speed is reported, not gated** (§1.2). One probe, 64 MiB of text,
 7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`). The
 three columns are three compilers and two rounds of work: the first version;
 the same sources after profiling, re-measured on the compiler they were written
-for (`a18e533`); and now, on PIN_SHORT, with lex-sys's
+for (`a18e533`); and now, on `8fc3b3f`, with lex-sys's
 `calloc`, `copy_into`, `index_of_byte` and `flush_out` in use. The last two
 columns and the incumbents were measured in one session on one machine:
 
-| Tool | First version | Profiled (`a18e533`) | Now (PIN_SHORT) | Incumbent |
+| Tool | First version | Profiled (`a18e533`) | Now (`8fc3b3f`) | Incumbent |
 |---|---|---|---|---|
 | `seek gamma` (about a million matches written) | 1.67 s | 0.76 s | **0.67 s** | `grep -F -n -b` 0.49 s, `rg` 0.38 s |
 | `seek` with no match | 2.7 s | 0.22 s | **0.16 s** | `grep -F -n -b` 0.05 s |

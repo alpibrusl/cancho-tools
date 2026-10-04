@@ -9,6 +9,10 @@ build embeds. The design is lex-sys
 [lex-sys#214](https://github.com/alpibrusl/lex-sys/issues/214). This
 repository is D18's separate repository.
 
+**Site:** <https://alpibrusl.github.io/lexsys-tools/>, with one page per tool
+generated from its own `introspect` (flags, rules, exit codes, authority,
+schemas and `SKILL.md`) by `scripts/site.py` on every push to `main`.
+
 **What this repository does not claim.** Nothing here says these tools are
 "more agent-friendly" than the incumbents, or that they improve task success.
 That needs the agent-in-the-loop evaluation (§7.2, lex-sys#228), which has not
@@ -77,7 +81,7 @@ schemas/            one JSON Schema per tool -- written by scripts/schemas.py
 tools.toml          the authority ceiling a person writes (D12)
 tests/*.ls          unit tests of the contract (`lex-sys test`)
 tests/conformance/  the offline gates M1-M9 and D14, as processes
-scripts/            manifest.py, schemas.py, variant.py, toolbench.py
+scripts/            manifest.py, schemas.py, variant.py, toolbench.py, site.py
 ```
 
 ## Building and checking
@@ -92,6 +96,7 @@ python3 scripts/manifest.py --check    # M6: authority = compiler's, embedded, w
 python3 -m unittest discover -s tests/conformance -v      # M1-M9, D14 (needs jsonschema, jq, strace, cc)
 python3 scripts/toolbench.py --self-test                  # S3's own gate
 python3 scripts/toolbench.py --tool seek --size 64MiB     # a probe, not a result
+python3 scripts/site.py                                   # the Pages site, from build/ into site/
 ```
 
 After changing a tool, `python3 scripts/manifest.py` regenerates the

@@ -2,7 +2,7 @@
 
 > **Status: designed, then built** (`scripts/agentbench.py`,
 > `scripts/agentbench_tasks.py`, `tests/conformance/test_agentbench.py`).
-> What it measured is §9, and is empty until a run is recorded there.
+> What it measured is §10, and is empty until a run is recorded there.
 
 The README claims what the gates measure and says plainly what it does not
 claim: that an agent does better with these tools than with `grep`, `sed`
@@ -34,7 +34,8 @@ the model and its settings, and the task prompt are the same in every arm.
 | `mcp` | only the eight tools through the MCP server (`server/mcp.cho`), confined to the workspace. The shell and the harness's own tools are off |
 | `skills` | the shell, restricted to the eight binaries, with their generated `SKILL.md` files installed where the harness reads skills. The harness's own tools are off |
 
-The prompt never names a tool, a flag or an arm, and never says "be careful":
+The prompt never names a tool, a flag or an arm, and never says "be careful"
+(one fixed sentence before it says the current directory is the workspace):
 it says what is wanted, and, where a task is a safety case, what the
 situation is. A prompt that asks for caution is a different experiment, and
 would be a separate factor, not folded in.
@@ -90,7 +91,10 @@ told the check exists.
 For each run, one JSON line: agent, model, arm, task, repeat, pass or fail
 and why, the answer, the turns, tokens in and out (and the first call's input
 tokens), cost where the agent reports one, the calls by tool name, how many
-calls failed, seconds, and a path to the raw transcript. Results append, a
+calls failed, **how many files it left behind that nobody asked for**
+("litter": the writers' lock sidecar `<file>.lexsys-lock`, which is deliberate
+and which the checkers ignore, and any `.tmp`, `.bak`, `.orig` or `~` file),
+seconds, and a path to the raw transcript. Results append, a
 run already recorded is skipped, so an interrupted benchmark resumes.
 
 ## 6. Agents and where it runs
@@ -108,7 +112,7 @@ Two adapters, the same arms:
 The order is: the pilot (seven tasks, one repeat, to find the harness's own
 bugs cheaply: a version, the `TODO`s, an append, a rename, both stale checks and
 the link), then the full set on the local model, then Claude Code. Spend is
-reported per agent in §9; the local model costs time and nothing else.
+reported per agent in §10; the local model costs time and nothing else.
 
 ## 7. How to read it
 
@@ -136,6 +140,25 @@ reported per agent in §9; the local model costs time and nothing else.
 * A local model on macOS and a hosted one on Linux differ in everything but the
   arms. Compare arms within a row, never rows across agents.
 
-## 9. What it measured
+## 9. What building it found
+
+* **The writers leave a file behind.** `write` and `replace` keep
+  `<path>.lexsys-lock` after every edit (`docs/history.md`: removing a lock another
+  process may be about to take is how lock files race). Checking that "nothing
+  else changed" turned this up before any model ran. It is deliberate, so it
+  does not decide a pass, and it is counted as litter in every arm, because a
+  person sees it in `git status`.
+* **`cwd=` is not `$PWD`.** The first opencode run's session directory was the
+  repository the benchmark was started from, not the workspace: opencode trusts
+  `$PWD`, and a child started with `cwd=` inherits its parent's. Every run now
+  sets `PWD` and gets `--dir`. Nothing had run yet (the runs failed at the model
+  lookup), but an agent's tools would have worked in the real repository.
+* **The arms' limits hold.** In the `skills` arm, a plain `grep` is refused by the
+  permission rule, and the model loaded the skill and then called the tool.
+* **The tools' definitions are a per-turn cost, measured:** the first call's input
+  tokens on the same one-line task, with the same model, were 3,621 (`bash`),
+  4,507 (`mcp`) and 6,636 (`skills`).
+
+## 10. What it measured
 
 *Empty: no run is recorded yet.*

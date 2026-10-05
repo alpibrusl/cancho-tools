@@ -101,6 +101,14 @@ class SchemaConformance(unittest.TestCase):
             for flag in introspect(tool)["flags"]:
                 self.assertIn("`" + flag["name"], text)
 
+    def test_a_tool_a_shell_reserves_says_how_to_call_it(self):
+        # `hash` is a shell builtin, which an agent runtime's Bash check
+        # refuses by name (docs/mcp.md §9); only its skill carries the note.
+        for tool in TOOLS:
+            text = run(tool, "skill").stdout.decode()
+            self.assertEqual("## Calling it" in text, tool == "hash", tool)
+        self.assertIn("absolute path", run("hash", "skill").stdout.decode())
+
 
 if __name__ == "__main__":
     unittest.main()

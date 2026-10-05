@@ -323,6 +323,15 @@ fn md[&h](heap: &!h Heap, b: buffer.Buffer, text: &static [byte]) -> [heap] buff
     return buffer.append(heap, b, text);
 }
 
+// Does a shell take this name for a builtin of its own? `hash` is one in bash
+// and zsh, and an agent runtime that checks a Bash command before running it
+// refuses `hash --root . f` by name ("evaluates arguments as shell code"),
+// where the binary at its absolute path runs (docs/mcp.md §9). The tools'
+// names are fixed (hash.v1 is a schema id), so the skill says how to call it.
+fn shell_builtin(name: &static [byte]) -> [] bool {
+    return bytes.equal(name, "hash");
+}
+
 // The agentskills.io `SKILL.md`, from the same data.
 pub fn skill[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer.Buffer {
     var b = buffer.empty(heap, 4096);
@@ -338,7 +347,15 @@ pub fn skill[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer.Buff
     b = md(heap, b, tool.summary);
     b = md(heap, b, "\n\n```\n");
     b = md(heap, b, tool.usage);
-    b = md(heap, b, "\n```\n\n## Output\n\n");
+    b = md(heap, b, "\n```\n\n");
+    if shell_builtin(tool.name) {
+        b = md(heap, b, "## Calling it\n\n`");
+        b = md(heap, b, tool.name);
+        b = md(heap, b, "` is also a shell builtin, so a shell runs the builtin and not this tool, and an agent runtime that checks Bash commands may refuse `");
+        b = md(heap, b, tool.name);
+        b = md(heap, b, " ...` by name. **Call the binary by its absolute path** (where it was built or installed), or use the MCP server, where the name is only an identifier.\n\n");
+    }
+    b = md(heap, b, "## Output\n\n");
     if bytes.equal(tool.output, "stream") {
         b = md(heap, b, "NDJSON: one JSON object per line, schema `");
         b = md(heap, b, tool.schema);

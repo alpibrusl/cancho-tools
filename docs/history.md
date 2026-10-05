@@ -196,3 +196,11 @@ around silently.
    forked from the test runner inherits the runner's resident high-water
    mark across `exec`, so every peak first read 24,448 KB. `maxrss.c`
    measures from a small launcher; documented in `test_memory.py`.
+5. **`file_size` on a directory is the filesystem's answer.** It is
+   `lseek(SEEK_END)`: ext4 and APFS answer a number, tmpfs
+   (`dcache_dir_lseek`) answers `EINVAL`. `peek` sized the file before its
+   first read, so on a machine whose `/tmp` is tmpfs a directory was
+   `io.read-failed` rather than `io.is-a-directory`, and CI (ext4) did not
+   see it. There is no `fstat` on a `File`; `place.file_length` asks the
+   handle with a one-byte `pread` first, which answers `EISDIR` everywhere,
+   and M3 runs a second time with its tree on `/dev/shm` when that is tmpfs.

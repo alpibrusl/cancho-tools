@@ -21,7 +21,7 @@ import signal
 import subprocess
 import unittest
 
-from harness import ROOT, TOOLS, Fixture, binary, introspect, run_argv
+from harness import ROOT, TOOLS, Fixture, binary, introspect, run_argv, tmpfs
 
 
 def catalogue():
@@ -196,9 +196,9 @@ def flags_in(argv):
 
 
 class Rules(unittest.TestCase):
-    def run_fixture(self, index):
+    def run_fixture(self, index, base=None):
         # Each fixture runs in a fresh tree, and its arguments name that tree.
-        fx = Fixture()
+        fx = Fixture(base)
         fx.held = None
         tool, rule, args, stdin, preexec, setup = fixtures(fx)[index]
         try:
@@ -221,8 +221,20 @@ class Rules(unittest.TestCase):
             fx.cleanup()
 
     def test_every_rule_has_a_fixture_and_every_fixture_its_rule(self):
+        self.check_rules(None)
+
+    def test_every_fixture_its_rule_on_tmpfs(self):
+        # The same fixtures with the tree on tmpfs, whose directories refuse
+        # `lseek(SEEK_END)`: `peek` once answered io.read-failed for a
+        # directory there, and io.is-a-directory on ext4.
+        base = tmpfs()
+        if base is None:
+            self.skipTest("no writable tmpfs at /dev/shm")
+        self.check_rules(base)
+
+    def check_rules(self, base):
         cat = catalogue()
-        fx = Fixture()
+        fx = Fixture(base)
         try:
             all_fixtures = fixtures(fx)
         finally:
@@ -233,7 +245,7 @@ class Rules(unittest.TestCase):
         repaired = 0
         for index, fixture in enumerate(all_fixtures):
             tool, rule = fixture[0], fixture[1]
-            result, errors, repair = self.run_fixture(index)
+            result, errors, repair = self.run_fixture(index, base)
             if not errors:
                 failures.append("%s %s: no error (status %d) %r" % (tool, rule, result.status, result.stdout[:200]))
                 continue
@@ -265,7 +277,7 @@ class Rules(unittest.TestCase):
             declared = {r["rule"] for r in introspect(tool)["rules"]}
             self.assertEqual(declared, per_tool[tool], "%s declares %s; fixtures reach %s" % (
                 tool, sorted(declared - per_tool[tool]), sorted(per_tool[tool] - declared)))
-        print("\nM3: %d fixtures, %d rules, %d retry repairs applied" % (len(all_fixtures), len(reached), repaired))
+        print("\nM3%s: %d fixtures, %d rules, %d retry repairs applied" % (" on tmpfs" if base else "", len(all_fixtures), len(reached), repaired))
 
 
 if __name__ == "__main__":

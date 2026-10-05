@@ -144,11 +144,28 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
-class Fixture:
-    """A scratch directory with the edge-case corpus of §7.1 M5."""
+def tmpfs():
+    """A writable directory on tmpfs, or None. Filesystems differ in what
+    they answer for a directory: ext4 and APFS answer `lseek(SEEK_END)`,
+    tmpfs refuses it with EINVAL, so a gate run only on the runner's /tmp
+    (ext4) misses what a tool does on a machine whose /tmp is tmpfs."""
+    try:
+        mounts = pathlib.Path("/proc/self/mounts").read_text().splitlines()
+    except OSError:
+        return None
+    for line in mounts:
+        fields = line.split()
+        if len(fields) > 2 and fields[1] == "/dev/shm" and fields[2] == "tmpfs" and os.access("/dev/shm", os.W_OK):
+            return "/dev/shm"
+    return None
 
-    def __init__(self):
-        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="toolbox-"))
+
+class Fixture:
+    """A scratch directory with the edge-case corpus of §7.1 M5, in the
+    system's temporary directory or beneath `base`."""
+
+    def __init__(self, base=None):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="toolbox-", dir=base))
         self.root = self.dir / "root"
         self.root.mkdir()
         (self.root / "sub").mkdir()

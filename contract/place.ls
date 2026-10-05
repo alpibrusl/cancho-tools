@@ -40,6 +40,41 @@ fn enotdir() -> [] int {
     return 20;
 }
 
+// The length of an opened file, a directory refused first.
+//
+// `file_size` is `lseek(SEEK_END)`, and what that answers on a directory
+// is the filesystem's: ext4 and APFS answer a number, so the directory used
+// to be found at the first read as `EISDIR`, but tmpfs
+// (`dcache_dir_lseek`) takes `SEEK_SET` and `SEEK_CUR` only and answers
+// `EINVAL`, which `fail.io_rule` names `io.read-failed`. A one-byte `pread`
+// at 0 asks the handle itself: a directory answers `EISDIR` on every
+// filesystem, before any seek, and a file is left as it was (`pread` moves
+// no cursor). The lex-sys pinned in `lex-sys.toml` has no `fstat` on a
+// `File` -- `dir_stat` needs the `Dir` and a name, and does not follow the
+// link a reader without `--root` follows -- so the read is the probe.
+pub fn file_length[&f](file: &!f File) -> [file_read] Done {
+    var errno = 0;
+    region a {
+        let probe = alloc_slice[a](1, byte_of(0));
+        match file_pread(file, 0, probe) {
+            Read::Got(unused) => {
+            }
+            Read::End => {
+            }
+            Read::Failed(reason) => {
+                errno = reason;
+                if errno == 0 {
+                    errno = 5;
+                }
+            }
+        }
+    }
+    if errno != 0 {
+        return Done::Failed(errno);
+    }
+    return file_size(file);
+}
+
 // The last component of a normalised path: what follows its last `/`.
 pub fn leaf[&p](p: &p [byte]) -> [] &p [byte] {
     var cut = len(p);

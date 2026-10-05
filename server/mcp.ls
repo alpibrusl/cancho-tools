@@ -189,7 +189,7 @@ fn send[&h, &i](heap: &!h Heap, io: &!i Io, w: json.Writer) -> [heap, io_write] 
     return status;
 }
 
-fn refuse[&h, &i, &s, &t](heap: &!h Heap, io: &!i Io, src: &s [byte], tape: &t [int], id: int, code: int, message: &static [byte]) -> [heap, io_write] int {
+fn refuse[&h, &i, &s, &t, &m](heap: &!h Heap, io: &!i Io, src: &s [byte], tape: &t [int], id: int, code: int, message: &m [byte]) -> [heap, io_write] int {
     var w = opened(heap, src, tape, id);
     w = json.put_key(heap, w, "error");
     w = json.begin_object(heap, w);
@@ -200,6 +200,37 @@ fn refuse[&h, &i, &s, &t](heap: &!h Heap, io: &!i Io, src: &s [byte], tape: &t [
     w = json.end_object(heap, w);
     w = json.end_object(heap, w);
     return send(heap, io, w);
+}
+
+// `refuse`, with a `data` object saying which rule, which property, and what was
+// expected: the way the tools' own errors do (`rule`, and what to change).
+fn refuse_about[&h, &i, &s, &t, &m, &d](heap: &!h Heap, io: &!i Io, src: &s [byte], tape: &t [int], id: int, code: int, message: &m [byte], data: &d [byte]) -> [heap, io_write] int {
+    var w = opened(heap, src, tape, id);
+    w = json.put_key(heap, w, "error");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "code");
+    w = json.put_int(heap, w, code);
+    w = json.put_key(heap, w, "message");
+    w = json.put_string(heap, w, message);
+    w = json.put_key(heap, w, "data");
+    w = json.put_fragment(heap, w, data);
+    w = json.end_object(heap, w);
+    w = json.end_object(heap, w);
+    return send(heap, io, w);
+}
+
+fn refuse_problem[&h, &i, &s, &t](heap: &!h Heap, io: &!i Io, src: &s [byte], tape: &t [int], id: int, tool: int, p: Problem) -> [heap, io_write] int {
+    let message = explain(heap, src, tape, tool, p);
+    let data = about(heap, src, tape, p);
+    var status = 0;
+    borrow message as &m in {
+        borrow data as &d in {
+            status = refuse_about(heap, io, src, tape, id, 0 - 32602, buffer.bytes(m), buffer.bytes(d));
+        }
+    }
+    buffer.drop(heap, message);
+    buffer.drop(heap, data);
+    return status;
 }
 
 // An error with no request to take an id from: `id` is `null`.
@@ -215,21 +246,301 @@ fn refuse_bare[&h, &i](heap: &!h Heap, io: &!i Io, code: int, message: &static [
 
 // ---- one call ----------------------------------------------------------------
 
-// Why a call's arguments were refused, as JSON-RPC's invalid params.
-fn problem(code: int) -> [] &static [byte] {
+// Why a call's arguments were refused, as JSON-RPC's invalid params: what, which
+// property, what the schema wants, and the node of the value (or key) at fault, so the
+// answer can say what was received. `code`: 0 none, 1 not an object, 2 an unknown
+// property, 3 the wrong type, 4 a NUL byte.
+struct Problem {
+    code: int,
+    name: &static [byte],
+    expected: &static [byte],
+    at: int,
+}
+
+fn fine() -> [] Problem {
+    return Problem { code: 0, name: "", expected: "", at: 0 - 1 };
+}
+
+fn wrong(name: &static [byte], expected: &static [byte], at: int) -> [] Problem {
+    return Problem { code: 3, name: name, expected: expected, at: at };
+}
+
+fn rule_of(code: int) -> [] &static [byte] {
     if code == 1 {
-        return "arguments is not an object";
+        return "mcp.arguments-not-object";
     }
     if code == 2 {
-        return "an argument the tool does not take; the tool's inputSchema lists them";
+        return "mcp.unknown-argument";
     }
     if code == 3 {
-        return "an argument of the wrong type; the tool's inputSchema gives each one's";
+        return "mcp.wrong-type";
     }
-    if code == 4 {
-        return "an argument contains a NUL byte, which would arrive as two";
+    return "mcp.nul-in-argument";
+}
+
+// The tool's property names, `a, b, c`, from the generated tables.
+fn property_names[&h](heap: &!h Heap, out: buffer.Buffer, tool: int) -> [heap] buffer.Buffer {
+    var b = out;
+    var first = true;
+    let flags = tools.flags(tool);
+    var k = 0;
+    while len(flags) > 0 && k < bytes.count_byte(flags, ';') + 1 {
+        if !first {
+            b = buffer.append(heap, b, ", ");
+        }
+        b = buffer.append(heap, b, bytes.field(bytes.field(flags, ';', k + 1), '|', 1));
+        first = false;
+        k = k + 1;
     }
-    return "invalid arguments";
+    let operands = tools.operands(tool);
+    k = 0;
+    while len(operands) > 0 && k < bytes.count_byte(operands, ';') + 1 {
+        if !first {
+            b = buffer.append(heap, b, ", ");
+        }
+        b = buffer.append(heap, b, bytes.field(bytes.field(operands, ';', k + 1), '|', 1));
+        first = false;
+        k = k + 1;
+    }
+    if len(tools.stdin(tool)) > 0 {
+        if !first {
+            b = buffer.append(heap, b, ", ");
+        }
+        b = buffer.append(heap, b, "stdin");
+    }
+    return b;
+}
+
+// The message for a refused call: the property, what the schema wants and what arrived,
+// and for the mistake small models make most (a number or a boolean sent as a string)
+// what to send instead. Written for a caller that will read it once and try again.
+fn explain[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: int, p: Problem) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, 192);
+    if p.code == 1 {
+        return buffer.append(heap, b, "`arguments` must be an object of the tool's properties");
+    }
+    if p.code == 2 {
+        let key = decoded(heap, src, tape, p.at);
+        b = buffer.append(heap, b, "`");
+        borrow key as &kr in {
+            b = buffer.append(heap, b, contents(kr));
+        }
+        unbox_slice(heap, key);
+        b = buffer.append(heap, b, "` is not a property of ");
+        b = buffer.append(heap, b, tools.name(tool));
+        b = buffer.append(heap, b, "; its properties are: ");
+        return property_names(heap, b, tool);
+    }
+    b = buffer.append(heap, b, "`");
+    b = buffer.append(heap, b, p.name);
+    if p.code == 4 {
+        return buffer.append(heap, b, "` contains a NUL byte, which would arrive as two arguments");
+    }
+    b = buffer.append(heap, b, "` must be ");
+    b = buffer.append(heap, b, p.expected);
+    let got = json.kind_name(tape, p.at);
+    b = buffer.append(heap, b, ", not ");
+    b = buffer.append(heap, b, a_or_an(got));
+    return hint(heap, b, p.expected, got);
+}
+
+// What to send instead, for the mistakes a caller makes most.
+fn hint[&h](heap: &!h Heap, b: buffer.Buffer, expected: &static [byte], got: &static [byte]) -> [heap] buffer.Buffer {
+    var out = b;
+    if bytes.equal(got, "string") && bytes.equal(expected, "a non-negative integer") {
+        out = buffer.append(heap, out, "; send a JSON number such as 1, not a string such as \"1\"");
+    }
+    if bytes.equal(got, "string") && bytes.equal(expected, "a boolean") {
+        out = buffer.append(heap, out, "; send true or false, not a string");
+    }
+    if bytes.equal(got, "number") && bytes.equal(expected, "a non-negative integer") {
+        out = buffer.append(heap, out, " (a negative or fractional number is refused)");
+    }
+    return out;
+}
+
+// How a property's value must look: `bool`, `nat`, `text`, or for an operand `one` (a
+// string) or `many` (an array of strings); empty for a key the tool does not take.
+fn kind_of[&s, &t](src: &s [byte], tape: &t [int], tool: int, key: int) -> [] &static [byte] {
+    let flags = tools.flags(tool);
+    var k = 0;
+    while len(flags) > 0 && k < bytes.count_byte(flags, ';') + 1 {
+        let row = bytes.field(flags, ';', k + 1);
+        if json.string_equals(src, tape, key, bytes.field(row, '|', 1)) {
+            return bytes.field(row, '|', 3);
+        }
+        k = k + 1;
+    }
+    let operands = tools.operands(tool);
+    k = 0;
+    while len(operands) > 0 && k < bytes.count_byte(operands, ';') + 1 {
+        let row = bytes.field(operands, ';', k + 1);
+        if json.string_equals(src, tape, key, bytes.field(row, '|', 1)) {
+            if bytes.equal(bytes.field(row, '|', 3), "1") {
+                return "one";
+            }
+            return "many";
+        }
+        k = k + 1;
+    }
+    if len(tools.stdin(tool)) > 0 && json.string_equals(src, tape, key, "stdin") {
+        return "text";
+    }
+    return "";
+}
+
+fn expected_of(kind: &static [byte]) -> [] &static [byte] {
+    if bytes.equal(kind, "bool") {
+        return "a boolean";
+    }
+    if bytes.equal(kind, "nat") {
+        return "a non-negative integer";
+    }
+    if bytes.equal(kind, "many") {
+        return "an array of strings";
+    }
+    return "a string";
+}
+
+// The node at fault for value `v` of `kind`, or -1 when it is as the schema says.
+fn fault_at[&s, &t](src: &s [byte], tape: &t [int], v: int, kind: &static [byte]) -> [] int {
+    if bytes.equal(kind, "bool") {
+        if json.is_bool(tape, v) {
+            return 0 - 1;
+        }
+        return v;
+    }
+    if bytes.equal(kind, "nat") {
+        if json.is_int(tape, v) && json.fits_int(src, tape, v) && json.to_int(src, tape, v) >= 0 {
+            return 0 - 1;
+        }
+        return v;
+    }
+    if bytes.equal(kind, "many") {
+        if !json.is_array(tape, v) {
+            return v;
+        }
+        var n = 0;
+        while n < json.count(tape, v) {
+            let item = json.at(tape, v, n);
+            if !json.is_string(tape, item) {
+                return item;
+            }
+            n = n + 1;
+        }
+        return 0 - 1;
+    }
+    if json.is_string(tape, v) {
+        return 0 - 1;
+    }
+    return v;
+}
+
+// Every property of the wrong type, in one answer: a caller that sent three values
+// as strings is told all three, not the first and then the second. The message, the
+// `data` object, and how many.
+fn faults[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: int, given: int) -> [heap] (buffer.Buffer, buffer.Buffer, int) {
+    var message = buffer.empty(heap, 192);
+    var w = json.writer(heap, 192);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, "mcp.wrong-type");
+    w = json.put_key(heap, w, "problems");
+    w = json.begin_array(heap, w);
+    var found = 0;
+    if given >= 0 && json.is_object(tape, given) {
+        var j = given + 1;
+        var left = json.count(tape, given);
+        while left > 0 {
+            let kind = kind_of(src, tape, tool, j);
+            if len(kind) > 0 {
+                let at = fault_at(src, tape, j + 1, kind);
+                if at >= 0 {
+                    let label = decoded(heap, src, tape, j);
+                    let expected = expected_of(kind);
+                    let got = json.kind_name(tape, at);
+                    if found > 0 {
+                        message = buffer.append(heap, message, "; ");
+                    }
+                    message = buffer.append(heap, message, "`");
+                    w = json.begin_object(heap, w);
+                    w = json.put_key(heap, w, "property");
+                    borrow label as &lr in {
+                        message = buffer.append(heap, message, contents(lr));
+                        w = json.put_string(heap, w, contents(lr));
+                    }
+                    unbox_slice(heap, label);
+                    message = buffer.append(heap, message, "` must be ");
+                    message = buffer.append(heap, message, expected);
+                    if at != j + 1 {
+                        message = buffer.append(heap, message, ", but an item is ");
+                    } else {
+                        message = buffer.append(heap, message, ", not ");
+                    }
+                    message = buffer.append(heap, message, a_or_an(got));
+                    message = hint(heap, message, expected, got);
+                    w = json.put_key(heap, w, "expected");
+                    w = json.put_string(heap, w, expected);
+                    w = json.put_key(heap, w, "got");
+                    w = json.put_string(heap, w, got);
+                    w = json.end_object(heap, w);
+                    found = found + 1;
+                }
+            }
+            j = json.skip(tape, j + 1);
+            left = left - 1;
+        }
+    }
+    w = json.end_array(heap, w);
+    w = json.end_object(heap, w);
+    return (message, json.finish(w), found);
+}
+
+fn a_or_an(kind: &static [byte]) -> [] &static [byte] {
+    if bytes.equal(kind, "array") {
+        return "an array";
+    }
+    if bytes.equal(kind, "object") {
+        return "an object";
+    }
+    if bytes.equal(kind, "null") {
+        return "null";
+    }
+    if bytes.equal(kind, "boolean") {
+        return "a boolean";
+    }
+    if bytes.equal(kind, "number") {
+        return "a number";
+    }
+    return "a string";
+}
+
+// What an agent can branch on, as the tools' own errors give: the rule, the property,
+// what was expected and what arrived.
+fn about[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], p: Problem) -> [heap] buffer.Buffer {
+    var w = json.writer(heap, 128);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "rule");
+    w = json.put_string(heap, w, rule_of(p.code));
+    if p.code == 2 {
+        let key = decoded(heap, src, tape, p.at);
+        w = json.put_key(heap, w, "property");
+        borrow key as &kr in {
+            w = json.put_string(heap, w, contents(kr));
+        }
+        unbox_slice(heap, key);
+    } else if p.code >= 3 {
+        w = json.put_key(heap, w, "property");
+        w = json.put_string(heap, w, p.name);
+    }
+    if p.code == 3 {
+        w = json.put_key(heap, w, "expected");
+        w = json.put_string(heap, w, p.expected);
+        w = json.put_key(heap, w, "got");
+        w = json.put_string(heap, w, json.kind_name(tape, p.at));
+    }
+    w = json.end_object(heap, w);
+    return json.finish(w);
 }
 
 // Is `key` (a string node) one of the tool's properties?
@@ -277,11 +588,11 @@ fn add_text[&h, &s, &t](heap: &!h Heap, entries: process.Argv, prefix: &static [
 }
 
 // The argv for tool `tool` with the call's `arguments` node, in the tables'
-// order whatever order the keys came in: `0`, or a `problem` code.
-fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: int, given: int, root: &static [byte]) -> [heap] (process.Argv, int) {
+// order whatever order the keys came in, and the `Problem` (code 0 for none).
+fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: int, given: int, root: &static [byte]) -> [heap] (process.Argv, Problem) {
     var entries = process.argv(heap, 256);
     if given >= 0 && !json.is_object(tape, given) {
-        return (entries, 1);
+        return (entries, Problem { code: 1, name: "arguments", expected: "an object", at: given });
     }
     // Every key is one the tool takes.
     if given >= 0 {
@@ -289,7 +600,7 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
         var left = json.count(tape, given);
         while left > 0 {
             if !known(src, tape, tool, j) {
-                return (entries, 2);
+                return (entries, Problem { code: 2, name: "", expected: "", at: j });
             }
             j = json.skip(tape, j + 1);
             left = left - 1;
@@ -315,7 +626,7 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
         if v >= 0 {
             if bytes.equal(kind, "bool") {
                 if !json.is_bool(tape, v) {
-                    return (entries, 3);
+                    return (entries, wrong(bytes.field(row, '|', 1), "a boolean", v));
                 }
                 if json.to_bool(tape, v) {
                     let (added, refused) = process.add(heap, entries, flag);
@@ -323,7 +634,7 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
                 }
             } else if bytes.equal(kind, "nat") {
                 if !json.is_int(tape, v) || !json.fits_int(src, tape, v) || json.to_int(src, tape, v) < 0 {
-                    return (entries, 3);
+                    return (entries, wrong(bytes.field(row, '|', 1), "a non-negative integer", v));
                 }
                 var entry = buffer.empty(heap, len(flag) + 24);
                 entry = buffer.append(heap, entry, flag);
@@ -336,7 +647,7 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
                 buffer.drop(heap, entry);
             } else {
                 if !json.is_string(tape, v) {
-                    return (entries, 3);
+                    return (entries, wrong(bytes.field(row, '|', 1), "a string", v));
                 }
                 var prefix = buffer.empty(heap, len(flag) + 1);
                 prefix = buffer.append(heap, prefix, flag);
@@ -354,7 +665,7 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
                 }
                 buffer.drop(heap, prefix);
                 if refused != 0 {
-                    return (entries, 4);
+                    return (entries, Problem { code: 4, name: bytes.field(row, '|', 1), expected: "", at: v });
                 }
             }
         }
@@ -376,27 +687,27 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
         if v >= 0 {
             if bytes.equal(bytes.field(row, '|', 3), "1") {
                 if !json.is_string(tape, v) {
-                    return (entries, 3);
+                    return (entries, wrong(bytes.field(row, '|', 1), "a string", v));
                 }
                 let (added, r) = add_text(heap, entries, "", src, tape, v);
                 entries = added;
                 if r != 0 {
-                    return (entries, r);
+                    return (entries, Problem { code: 4, name: bytes.field(row, '|', 1), expected: "", at: v });
                 }
             } else {
                 if !json.is_array(tape, v) {
-                    return (entries, 3);
+                    return (entries, wrong(bytes.field(row, '|', 1), "an array of strings", v));
                 }
                 var n = 0;
                 while n < json.count(tape, v) {
                     let item = json.at(tape, v, n);
                     if !json.is_string(tape, item) {
-                        return (entries, 3);
+                        return (entries, wrong(bytes.field(row, '|', 1), "an array of strings", item));
                     }
                     let (added, r) = add_text(heap, entries, "", src, tape, item);
                     entries = added;
                     if r != 0 {
-                        return (entries, r);
+                        return (entries, Problem { code: 4, name: bytes.field(row, '|', 1), expected: "", at: item });
                     }
                     n = n + 1;
                 }
@@ -404,7 +715,7 @@ fn argv_for[&h, &s, &t](heap: &!h Heap, src: &s [byte], tape: &t [int], tool: in
         }
         k = k + 1;
     }
-    return (entries, 0);
+    return (entries, fine());
 }
 
 // Is `out` one JSON object, so it can be `structuredContent` as well as text?
@@ -515,10 +826,25 @@ fn call[&h, &x, &c, &i, &s, &t](heap: &!h Heap, exec: &x Exec("/opt/lexsys-tools
     if tool < 0 {
         return refuse(heap, io, src, tape, id, 0 - 32602, "unknown tool; tools/list names the eight");
     }
+    // Type faults first, all of them: the unknown keys and the rest are argv_for's.
+    let (fault_message, fault_data, found) = faults(heap, src, tape, tool, json.get(src, tape, params, "arguments"));
+    var refused_status = 0 - 1;
+    if found > 0 {
+        borrow fault_message as &fm in {
+            borrow fault_data as &fd in {
+                refused_status = refuse_about(heap, io, src, tape, id, 0 - 32602, buffer.bytes(fm), buffer.bytes(fd));
+            }
+        }
+    }
+    buffer.drop(heap, fault_message);
+    buffer.drop(heap, fault_data);
+    if found > 0 {
+        return refused_status;
+    }
     let (entries, why) = argv_for(heap, src, tape, tool, json.get(src, tape, params, "arguments"), config.root);
-    if why != 0 {
+    if why.code != 0 {
         process.drop(heap, entries);
-        return refuse(heap, io, src, tape, id, 0 - 32602, problem(why));
+        return refuse_problem(heap, io, src, tape, id, tool, why);
     }
 
     let given = json.get(src, tape, json.get(src, tape, params, "arguments"), "stdin");
@@ -527,7 +853,7 @@ fn call[&h, &x, &c, &i, &s, &t](heap: &!h Heap, exec: &x Exec("/opt/lexsys-tools
         if !json.is_string(tape, given) {
             process.drop(heap, entries);
             unbox_slice(heap, input);
-            return refuse(heap, io, src, tape, id, 0 - 32602, problem(3));
+            return refuse_problem(heap, io, src, tape, id, tool, wrong("stdin", "a string", given));
         }
         unbox_slice(heap, input);
         input = decoded(heap, src, tape, given);

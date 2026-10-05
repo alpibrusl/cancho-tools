@@ -117,6 +117,38 @@ seek introspect          # flags and roles, exit codes, rules, limits, schema, a
 seek skill               # a SKILL.md an agent can load
 ```
 
+## As an MCP server
+
+`server/mcp.ls` serves the eight tools to an agent runtime over MCP (stdio,
+protocol `2025-06-18`): `tools/list` is generated from each tool's
+`introspect`, and a `tools/call` runs the binary and answers with its output
+byte for byte (and, for the five tools that print one JSON document, as
+`structuredContent` with the tool's schema). The design and what was
+measured are in [`docs/mcp.md`](docs/mcp.md).
+
+```sh
+# After step 2 above: the server, with the tools' directory baked in
+python3 scripts/mcp.py build --bin "$PWD/build" --out build/mcp
+
+# Serve a workspace: every call is confined to it
+build/mcp --root /path/to/workspace [--timeout-ms 30000] [--max-output 16777216]
+```
+
+A client starts it like any stdio server, for example:
+
+```json
+{"mcpServers": {"lexsys-tools": {"command": "/abs/path/to/lexsys-tools/build/mcp",
+                                 "args": ["--root", "/path/to/workspace"]}}}
+```
+
+What it may do is what the compiler derives for it: start the binaries in
+the one directory it was built with, and nothing else -- no file, network or
+foreign-code authority of its own. `--root` is the server's: a model cannot
+pass one, a pattern such as `--root=/` is searched for as text, and the tools
+refuse a second `--root` in any case. The directory is a literal in the
+source (`narrow` takes one), so a server for another directory is built
+with another `--bin`.
+
 ## Using the tools
 
 The examples run in a small project (`src/main.rs`, `package.json`,
@@ -458,8 +490,10 @@ Results are in [`docs/history.md`](docs/history.md).
 ## Status and limits
 
 * **Done:** all eight tools, the contract, the authority gate, the
-  benchmark harness, symlink-safe `--root`, and `list` on lex-sys's directory
-  listing ([lex-sys#222](https://github.com/alpibrusl/lex-sys/issues/222)).
+  benchmark harness, symlink-safe `--root`, `list` on lex-sys's directory
+  listing ([lex-sys#222](https://github.com/alpibrusl/lex-sys/issues/222)),
+  and the MCP server ([#10](https://github.com/alpibrusl/lexsys-tools/issues/10),
+  on lex-sys's `std.process`).
 * **Not yet:** `seek` over a directory (it takes named files; `list` then
   `seek` is the pattern for now). Moving SHA-256 into the lex-sys standard library
   ([#219](https://github.com/alpibrusl/lex-sys/issues/219)) and the lex-os

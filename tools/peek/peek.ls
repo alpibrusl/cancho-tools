@@ -291,7 +291,7 @@ fn read[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     var e = errs;
     var size = 0;
     var errno = 0;
-    match file_size(file) {
+    match place.file_length(file) {
         Done::Ok(n) => {
             size = n;
         }

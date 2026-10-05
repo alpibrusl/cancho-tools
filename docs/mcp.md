@@ -221,3 +221,51 @@ the server. That is the cost of a bound the compiler can see, and lex-sys
   directory answers `io.read-failed` (`lseek(SEEK_END)` is `EINVAL` on a
   tmpfs directory) where `test_rules.py` expects `io.is-a-directory`. It
   fails the same way on `main`, and is reported separately.
+
+## 9. Tried with Claude Code
+
+One task, run once by each route, with Claude Code 2.1.289 headless
+(`claude -p`) on Linux x86_64, the tools and server built at the pinned
+compiler. It is a smoke test of the integration, not the agent-in-the-loop
+evaluation the README does not claim (lex-sys#228).
+
+**The task**, in a five-file project (two Python files holding three `TODO`
+comments, `notes.txt`, `package.json`, `docs/README.md`): list every file,
+find every `TODO` with its line, give the version in `package.json`, and
+append a line to `notes.txt` "making sure you do not overwrite a change
+someone else made since you read it". The prompt names no tool and no flag.
+
+**The routes.**
+
+* *MCP*: the server, given with `--mcp-config` and `--strict-mcp-config`,
+  and Claude Code's own file tools and Bash disallowed, so the server was the
+  only way to touch the files.
+* *Skills*: the eight `SKILL.md` files that `<tool> skill` prints, placed in
+  the project's `.claude/skills/`, the binaries on `PATH`, and Bash allowed
+  for those eight binaries only.
+
+| | MCP | Skills |
+|---|---|---|
+| Found | all 8 tools (`connected`) | all 8 skills |
+| Files, `TODO`s, version | all correct | all correct |
+| The guarded append | `peek`, `hash`, then `replace` with `if-sha256` | `peek`, `hash`, then `write --if-sha256 --stdin` |
+| Turns, cost | 8, $0.08 | 21, $0.21 |
+
+In both routes the model chose a write that is refused if the file changed,
+from the tools' own descriptions: the prompt said what it wanted, not how.
+
+**What it found.**
+
+* **`hash` is a shell builtin.** Through Bash, Claude Code refuses
+  `hash --root . notes.txt` before running it ("evaluates arguments as shell
+  code"); the binary works by its absolute path. On a first skills run, with
+  only bare names allowed, the model stopped before the append and said why,
+  rather than reach for `sha256sum`; the run above allowed the absolute path.
+  Over MCP the name is only an identifier and nothing is in the way. Two
+  remedies are open: rename the binary (`digest`, say) and keep `hash` as
+  the MCP tool's name, or keep it and have its `SKILL.md` say to call it by
+  absolute path.
+* **The skills route costs more turns**: each skill is loaded before use,
+  and a Bash line that chains several commands is held for approval as a
+  whole. Neither applies to MCP, which is the route to prefer for Claude
+  Code; the skills remain for a runtime without MCP.

@@ -32,7 +32,7 @@ pub struct Tool {
     output: &static [byte],
     schema: &static [byte],
     flags: &static [byte],
-    // `name|role|help`, in order.
+    // `name|role|min|max|help`, in order; `max` empty is unbounded.
     operands: &static [byte],
     // The tags this tool can emit.
     rules: &static [byte],
@@ -190,8 +190,20 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
         w = json.put_string(heap, w, item(tool.operands, i, 1));
         w = json.put_key(heap, w, "role");
         w = json.put_string(heap, w, item(tool.operands, i, 2));
+        // How many times it may be given: what the tool's parser accepts,
+        // and what a schema derived from this needs (lexsys-tools#10,
+        // docs/mcp.md §3). `max` empty is unbounded, `null` here.
+        w = json.put_key(heap, w, "min");
+        w = json.put_int(heap, w, cli.parse_nat(item(tool.operands, i, 3)));
+        w = json.put_key(heap, w, "max");
+        let most = item(tool.operands, i, 4);
+        if len(most) == 0 {
+            w = json.put_null(heap, w);
+        } else {
+            w = json.put_int(heap, w, cli.parse_nat(most));
+        }
         w = json.put_key(heap, w, "help");
-        w = json.put_string(heap, w, item(tool.operands, i, 3));
+        w = json.put_string(heap, w, item(tool.operands, i, 5));
         w = json.end_object(heap, w);
         i = i + 1;
     }

@@ -90,6 +90,16 @@ footer { color: var(--muted); font-size: 14px; border-top: 1px solid var(--rule)
 
 # --- Markdown, the subset README.md uses -------------------------------------
 
+
+def how_many(operand):
+    """`introspect`'s operand counts, as a person reads them."""
+    lo, hi = operand["min"], operand["max"]
+    if hi is None:
+        return "%d or more" % lo
+    if lo == hi:
+        return str(lo)
+    return "%d to %d" % (lo, hi)
+
 def inline(text):
     """Escape, then mark up links (whose text may hold code), code spans, bold and italics."""
     parts = re.split(r"(\[[^\]]+\]\([^)\s]+\))", text)
@@ -292,8 +302,8 @@ def tool_page(d):
     b.append("<p>What the row cannot say:</p><ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in d["not_narrowable"]) + "</ul>")
 
     b.append("<h2>Operands</h2>")
-    b.append(table(["Operand", "Role", "Meaning"],
-                   [[code(o["name"]), code(o["role"]), html.escape(o["help"])] for o in d["operands"]]))
+    b.append(table(["Operand", "Role", "How many", "Meaning"],
+                   [[code(o["name"]), code(o["role"]), html.escape(how_many(o)), html.escape(o["help"])] for o in d["operands"]]))
     b.append("<h2>Flags</h2>")
     b.append(table(["Flag", "Kind", "Role", "Default", "Meaning"],
                    [[code(f["name"]) + (" " + code(f["short"]) if f["short"] else ""), code(f["kind"]), code(f["role"]),

@@ -137,6 +137,13 @@ class Parsers(unittest.TestCase):
             self.assertFalse(ab.exposed_in(clean))
             self.assertFalse(ab.exposed_in(pathlib.Path(d) / "missing"))
 
+    def test_a_failure_is_told_apart_by_kind(self):
+        row = lambda ok, calls, answer: {"ok": ok, "calls": calls, "answer": answer}
+        self.assertEqual(ab.failure_kind(row(True, {}, "")), "")
+        self.assertEqual(ab.failure_kind(row(False, {}, '{"name": "x_seek", "parameters": {}}')), "tool call as text")
+        self.assertEqual(ab.failure_kind(row(False, {}, "I would use seek.")), "no tool call")
+        self.assertEqual(ab.failure_kind(row(False, {"bash": 1}, "1.10.2")), "wrong")
+
     def test_answers_are_read_by_form_not_by_prose(self):
         self.assertEqual(tasks.answer_lines("```\n- src/a.py:2\n1. src/b.py:7\n```"), ["src/a.py:2", "src/b.py:7"])
         self.assertEqual(tasks.last_int("It is on line **271,828**."), 271828)

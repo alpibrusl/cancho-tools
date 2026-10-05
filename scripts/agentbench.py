@@ -18,6 +18,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import shutil
 import signal
 import statistics
@@ -267,6 +268,19 @@ def exposed_in(transcript):
         return False
 
 
+def failure_kind(r):
+    """What kind of failure a recorded run is, for the report: `tool call as text`
+    when the model wrote a call as JSON in its answer and made none, which is
+    the model's way of not using the tool-calling protocol (llama3.1 does this
+    through ollama), and not a wrong answer; `no tool call` when it answered
+    without calling anything; else `wrong`."""
+    if r["ok"]:
+        return ""
+    if not r.get("calls"):
+        return "tool call as text" if re.match(r"\s*\{\s*\"name\"", r.get("answer", "")) else "no tool call"
+    return "wrong"
+
+
 def key(r):
     return (r["agent"], r["model"], r["arm"], r["task"], r["rep"])
 
@@ -355,10 +369,19 @@ def cmd_report(a):
             print("\nHarness problems, not scored (§7): %d" % len(harness))
             for r in harness:
                 print("  %s %s rep %d: %s" % (r["arm"], r["task"], r["rep"], r["harness"][:140]))
+        kinds = {}
+        for r in mine:
+            if not r["ok"] and not r["harness"]:
+                kinds.setdefault((r["arm"], failure_kind(r)), 0)
+                kinds[(r["arm"], failure_kind(r))] += 1
+        if kinds:
+            print("\nFailures by kind (a model that wrote a call as text, or made none, did not get as far as a wrong answer):")
+            for (arm, kind), n in sorted(kinds.items()):
+                print("  %-8s %-18s %d" % (arm, kind, n))
         print("\nFailures:")
         for r in mine:
             if not r["ok"] and not r["harness"]:
-                print("  %-8s %-18s rep %d: %s" % (r["arm"], r["task"], r["rep"], r["why"][:150]))
+                print("  %-8s %-18s rep %d [%s]: %s" % (r["arm"], r["task"], r["rep"], failure_kind(r), r["why"][:130]))
 
 
 def main():

@@ -453,7 +453,12 @@ def cmd_run(a):
     if a.pilot and a.tasks:
         chosen = [t for t in chosen if t.id in a.tasks.split(",")]
     arms = a.arms.split(",")
-    plan = [(arm, t, rep) for rep in range(a.reps) for t in chosen for arm in arms
+    # Arm-major: a local model keeps its prompt cache for as long as the prefix (the system
+    # prompt and the arm's tool definitions) is the same, and on a CPU a cold prefix of a few
+    # thousand tokens costs minutes (measured: 3B model, 4,216 tokens, 180 s cold, 1.8 s warm).
+    # Interleaving arms, as the order once was, paid that on every switch. Seconds are not
+    # compared between runs, so the order costs nothing.
+    plan = [(arm, t, rep) for arm in arms for rep in range(a.reps) for t in chosen
             if (a.agent, a.model, arm, t.id, rep) not in done]
     print("%d runs to do (%d recorded)" % (len(plan), len(done)), flush=True)
     for n, (arm, t, rep) in enumerate(plan, 1):

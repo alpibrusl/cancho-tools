@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import agentbench_tasks as tasks  # noqa: E402
@@ -230,22 +231,148 @@ def opencode_parse(out):
     return r
 
 
+@dataclass
+class Identity:
+    """An unprivileged account the agent runs as (docs/agent-bench.md §11.4):
+    it owns the run directory while the agent runs, sees only an explicit
+    environment, and has no `sudo`, no `docker` and no way into the operator's home."""
+    user: str
+    agent_bin: str = ""  # a directory the identity can read, holding the agent's executable
+
+
+IDENTITY = None  # set by `run --run-as`; None runs the agent as the operator (the pilots of §10)
+
+
+def sudo(*args):
+    return subprocess.run(["sudo", "-n", *args], capture_output=True, text=True)
+
+
+def benchmark_run_dir(run_dir):
+    """The one kind of directory this module will `chown`: a run directory made by
+    `new_workspace`, directly in the temporary directory."""
+    if os.path.islink(run_dir):
+        return False  # a link to a run directory is not one: `resolve` would follow it
+    d, tmp = pathlib.Path(run_dir).resolve(), pathlib.Path(tempfile.gettempdir()).resolve()
+    return d.parent == tmp and d.name.startswith("agentbench-")
+
+
+def hand_over(run_dir, user):
+    """The run directory belongs to the identity for the length of one run. `-h`: a
+    link is changed and never followed, so a link in the workspace cannot move the
+    chown outside it."""
+    if not benchmark_run_dir(run_dir):
+        raise RuntimeError("refusing to change the owner of %s: not a benchmark run directory" % run_dir)
+    os.chmod(run_dir, 0o755)
+    (pathlib.Path(run_dir) / "home").mkdir(exist_ok=True)
+    r = sudo("chown", "-R", "-h", user, str(run_dir))
+    if r.returncode:
+        raise RuntimeError("could not give %s to %s: %s" % (run_dir, user, r.stderr.strip()))
+
+
+def take_back(run_dir):
+    if benchmark_run_dir(run_dir):
+        sudo("chown", "-R", "-h", "%d:%d" % (os.getuid(), os.getgid()), str(run_dir))
+
+
+def identity_path(path):
+    """The operator's PATH without anything under the operator's home, then the system's."""
+    home = os.path.expanduser("~")
+    dirs = [d for d in path.split(os.pathsep) if d and not d.startswith(home)]
+    return os.pathsep.join(dict.fromkeys(dirs + ["/usr/local/bin", "/usr/bin", "/bin"]))
+
+
+def as_identity(cmd, env, cwd, identity):
+    """`cmd` run as the identity with an explicit environment and nothing else of the
+    operator's: `PATH`, a `HOME` inside the run directory, `LANG`, `PWD`, `XDG_*`."""
+    keep = {"PATH": identity_path(env.get("PATH", "")), "HOME": str(pathlib.Path(cwd).parent / "home"),
+            "LANG": env.get("LANG", "C.UTF-8"), "PWD": str(cwd)}
+    keep.update({k: v for k, v in env.items() if k.startswith("XDG_")})
+    exe = cmd[0]
+    if identity.agent_bin and "/" not in exe:
+        exe = str(pathlib.Path(identity.agent_bin) / exe)
+    return ["sudo", "-n", "-u", identity.user, "env", "-i", *["%s=%s" % kv for kv in sorted(keep.items())], exe, *cmd[1:]]
+
+
+# What each probe tries as the identity, and what it means if it works.
+ESCAPES = [
+    ("read a file only the operator can read", 'cat "$CANARY" >/dev/null 2>&1'),
+    ("list the operator's home", 'ls "$OPHOME" >/dev/null 2>&1'),
+    ("write into the operator's home", 'touch "$OPHOME/.agentbench-escape" 2>/dev/null && rm -f "$OPHOME/.agentbench-escape"'),
+    ("use docker", "docker ps >/dev/null 2>&1"),
+    ("become root with sudo", "sudo -n true >/dev/null 2>&1"),
+]
+
+
+def preflight(prefix=()):
+    """§11.4: run each escape as the identity (`prefix` is the command that becomes it;
+    none means the operator). Answers the escapes that worked: empty means the isolation
+    holds. Run with no prefix it must find some, or it could not tell (§4)."""
+    canary_dir = pathlib.Path(tempfile.mkdtemp(prefix="agentbench-preflight-"))
+    try:
+        os.chmod(canary_dir, 0o700)
+        canary = canary_dir / "canary"
+        canary.write_text("only the operator reads this\n")
+        env = {"PATH": identity_path(os.environ.get("PATH", "")), "OPHOME": os.path.expanduser("~"), "CANARY": str(canary)}
+        worked = []
+        for what, script in ESCAPES:
+            r = subprocess.run([*prefix, "env", "-i", *["%s=%s" % kv for kv in env.items()], "sh", "-c", script],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                worked.append(what)
+        return worked
+    finally:
+        shutil.rmtree(canary_dir, ignore_errors=True)
+
+
+def check_identity(identity):
+    """Everything that must be true before a run as the identity: it exists, nothing else is
+    running as it (so the clean-up of a timed-out run kills only ours), it can run the agent
+    and the tools, and the preflight finds no escape. Answers a list of problems."""
+    problems = []
+    who = sudo("-u", identity.user, "id", "-u")
+    if who.returncode:
+        return ["cannot run as %s with sudo -n: %s" % (identity.user, who.stderr.strip()[:120])]
+    others = subprocess.run(["ps", "-u", identity.user, "-o", "pid="], capture_output=True, text=True).stdout.split()
+    if others:
+        problems.append("%s already runs %d process(es); the clean-up after a timeout would kill them" % (identity.user, len(others)))
+    for exe in [str(bin_dir() / "seek")] + ([str(pathlib.Path(identity.agent_bin) / "opencode")] if identity.agent_bin else []):
+        if sudo("-u", identity.user, "test", "-x", exe).returncode:
+            problems.append("%s cannot run %s (put it where %s can read it)" % (identity.user, exe, identity.user))
+    problems += ["escape works: " + w for w in preflight(["sudo", "-n", "-u", identity.user])]
+    return problems
+
+
 def spawn(cmd, cwd, env, timeout, log):
     """Run `cmd`; on a timeout, kill its whole process group. Answers
-    `(exit code or 'timeout', stdout, stderr)`; both streams go to `log`."""
+    `(exit code or 'timeout', stdout, stderr)`; both streams go to `log`. As the
+    identity, if one is set (§11.4)."""
     # `cwd=` does not change `$PWD`, and an agent that trusts `$PWD` works in the
     # directory the benchmark was started from -- the repository, not the
     # workspace. Found when the first opencode run's session directory was the repo.
     env = {**env, "PWD": str(cwd)}
-    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                         text=True, start_new_session=True)
+    run_dir = pathlib.Path(cwd).parent
+    if IDENTITY:
+        hand_over(run_dir, IDENTITY.user)
+        cmd = as_identity(cmd, env, cwd, IDENTITY)
+        env = {"PATH": os.environ.get("PATH", "")}  # only what `sudo` needs; the agent's own is the explicit list
     try:
-        out, err = p.communicate(timeout=timeout)
-        code = p.returncode
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        out, err = p.communicate()
-        code = "timeout"
+        p = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, start_new_session=True)
+        try:
+            out, err = p.communicate(timeout=timeout)
+            code = p.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except PermissionError:
+                pass  # `sudo` is root's: the identity's processes are ended below
+            if IDENTITY:
+                sudo("pkill", "-KILL", "-u", IDENTITY.user)
+            out, err = p.communicate()
+            code = "timeout"
+    finally:
+        if IDENTITY:
+            take_back(run_dir)
     pathlib.Path(log).write_text(out or "")
     pathlib.Path(str(log) + ".err").write_text(err or "")
     return code, out or "", err or ""
@@ -311,6 +438,13 @@ def run_one(agent, model, arm, task, rep, out_dir, timeout):
 
 
 def cmd_run(a):
+    global IDENTITY
+    if a.run_as:
+        IDENTITY = Identity(a.run_as, a.agent_bin)
+        problems = check_identity(IDENTITY)
+        if problems:
+            sys.exit("the isolation does not hold, so nothing was run:\n  " + "\n  ".join(problems))
+        print("running as %s: the preflight found no escape" % a.run_as, flush=True)
     out_dir = pathlib.Path(a.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     results = out_dir / "results.jsonl"
@@ -397,6 +531,8 @@ def main():
     r.add_argument("--reps", type=int, default=1)
     r.add_argument("--timeout", type=int, default=600)
     r.add_argument("--out", default="bench-out")
+    r.add_argument("--run-as", default="", help="run the agent as this unprivileged account (docs/agent-bench.md §11.4)")
+    r.add_argument("--agent-bin", default="", help="with --run-as: a directory that account can read, holding the agent")
     p = sub.add_parser("report")
     p.add_argument("results")
     a = ap.parse_args()

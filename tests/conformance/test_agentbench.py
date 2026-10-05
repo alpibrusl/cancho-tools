@@ -151,6 +151,90 @@ class Parsers(unittest.TestCase):
         self.assertEqual(tasks.first_word(""), "")
 
 
+class Isolation(unittest.TestCase):
+    """docs/agent-bench.md §11.4: the identity an agent runs as. What needs a real
+    second account is checked where there is one (`run --run-as` runs the preflight
+    before anything else); what does not is checked here."""
+
+    def test_the_preflight_can_fail(self):
+        # Run as the operator there is no isolation, so it must say so: a check
+        # that cannot fail proves nothing (§4).
+        worked = ab.preflight([])
+        self.assertIn("read a file only the operator can read", worked)
+        self.assertIn("list the operator's home", worked)
+        self.assertIn("write into the operator's home", worked)
+
+    def test_the_preflight_leaves_nothing_behind(self):
+        import glob
+        import tempfile
+        before = set(glob.glob(tempfile.gettempdir() + "/agentbench-preflight-*"))
+        ab.preflight([])
+        self.assertEqual(set(glob.glob(tempfile.gettempdir() + "/agentbench-preflight-*")), before)
+        self.assertFalse(pathlib.Path.home().joinpath(".agentbench-escape").exists())
+
+    def test_the_agent_gets_an_explicit_environment_and_nothing_of_the_operators(self):
+        home = str(pathlib.Path.home())
+        env = {"PATH": "/opt/x:%s/bin:/usr/bin" % home, "ANTHROPIC_API_KEY": "secret", "HOME": home, "LANG": "en_GB.UTF-8",
+               "XDG_DATA_HOME": "/r/xdg/data", "SSH_AUTH_SOCK": "/s", "FAKE_TOKEN": "t"}
+        cmd = ab.as_identity(["opencode", "run", "x"], env, pathlib.Path("/r/ws"), ab.Identity("nobody", "/srv/agent"))
+        self.assertEqual(cmd[:5], ["sudo", "-n", "-u", "nobody", "env"])
+        self.assertEqual(cmd[5], "-i")
+        given = dict(a.split("=", 1) for a in cmd[6:cmd.index("/srv/agent/opencode")])
+        self.assertEqual(sorted(given), ["HOME", "LANG", "PATH", "PWD", "XDG_DATA_HOME"])
+        self.assertEqual((given["HOME"], given["PWD"], given["LANG"]), ("/r/home", "/r/ws", "en_GB.UTF-8"))
+        self.assertNotIn(home, given["PATH"])
+        self.assertTrue(given["PATH"].startswith("/opt/x"))
+        self.assertEqual(cmd[-2:], ["run", "x"])
+        self.assertNotIn("secret", " ".join(cmd))
+
+    def test_only_a_benchmark_run_directory_is_ever_chowned(self):
+        import tempfile
+        for bad in ["/", str(pathlib.Path.home()), "/etc", tempfile.gettempdir(), tempfile.gettempdir() + "/other",
+                    tempfile.gettempdir() + "/agentbench-x/ws"]:
+            self.assertFalse(ab.benchmark_run_dir(bad), bad)
+            with self.assertRaises(RuntimeError):
+                ab.hand_over(bad, "nobody")
+        run_dir, ws, _ = ab.new_workspace(tasks.BY_ID["r1-version"])
+        try:
+            self.assertTrue(ab.benchmark_run_dir(run_dir))
+            # A link inside a run directory does not make its target one.
+            outside = pathlib.Path(tempfile.mkdtemp(prefix="agentbench-"))
+            (ws / "escape").symlink_to(outside)
+            self.assertFalse(ab.benchmark_run_dir(ws / "escape"))
+            outside.rmdir()
+        finally:
+            import shutil
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+    def test_a_timeout_ends_the_identitys_processes_and_gives_the_directory_back(self):
+        import tempfile
+        calls = []
+
+        class Fake:
+            pid = 99999
+
+            def communicate(self, timeout=None):
+                if timeout:
+                    raise ab.subprocess.TimeoutExpired("x", timeout)
+                return "", ""
+
+        run_dir, ws, _ = ab.new_workspace(tasks.BY_ID["r1-version"])
+        try:
+            with mock.patch.object(ab, "IDENTITY", ab.Identity("nobody")), \
+                    mock.patch.object(ab, "sudo", side_effect=lambda *a: calls.append(a) or mock.Mock(returncode=0, stderr="")), \
+                    mock.patch.object(ab.subprocess, "Popen", return_value=Fake()), \
+                    mock.patch.object(ab.os, "killpg", side_effect=PermissionError):
+                code, _, _ = ab.spawn(["agent"], ws, {"PATH": "/usr/bin"}, 1, pathlib.Path(run_dir) / "log")
+            self.assertEqual(code, "timeout")
+            self.assertEqual([c[0] for c in calls], ["chown", "pkill", "chown"])
+            self.assertEqual(calls[0][1:3], ("-R", "-h"))
+            self.assertEqual(calls[1], ("pkill", "-KILL", "-u", "nobody"))
+            self.assertEqual(calls[2][3], "%d:%d" % (__import__("os").getuid(), __import__("os").getgid()))
+        finally:
+            import shutil
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+
 class Arms(unittest.TestCase):
     def claude_command(self, arm):
         t = tasks.BY_ID["r1-version"]

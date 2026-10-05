@@ -2,9 +2,26 @@
 
 > **Status: designed, nothing built.** `run` and `move` go in this repository,
 > which makes ten tools, the ceiling in `tools.toml` (D1), so nothing in the
-> ceiling changes. `table` goes in a repository of its own (§5). Every claim
+> ceiling changes. `table` goes in a repository of its own (§5). **§0 reconciles all
+> three with D15**, which the first version of this document missed. Every claim
 > below is either measured, with where, or marked **open**, with what would
 > settle it.
+
+## 0. What D15 already decided, and what this does to it
+
+cancho `docs/agent-toolbox.md` D15 is the project's recorded verdict on the tool
+set, and **this document was first written without reading it**. It rules on all
+three:
+
+| D15 says | this design | resolution |
+|---|---|---|
+| **"No tool deletes."** A delete is lex-os's `irreversible-consequential` class, which in a no-human system "must be absent from the grant entirely". | `move --remove` and `--purge` | **`--purge` is dropped.** `--remove` is a rename to a tombstone: the content is kept and it is undone by renaming back, so it is reversible and not the class D15 keeps out. Tombstones accumulate; clearing them is a person's job. This is an interpretation of D15's reason, and the maintainer can overrule it. |
+| "**No process spawning** ... the language has no `exec` builtin, so `find -exec` and `xargs` are not a thing the toolbox can be tempted into." | `run` | **The premise has changed, the principle has not been revisited.** The language has `Exec` since cancho slice 1. `run` is allowed to exist only as a tool that **declares** `irreversible-consequential` honestly, so a grant that must not hold it (a no-human supervisor) refuses it by its report, as D15 intends for that class. It is an opt-in tool, not part of the default set an agent is handed (§3). |
+| `cut`/`sort`/`uniq` "**not worth it** ... agents transform text in their own language. `tally` is the one aggregate with a real gain." | `table` | **A reversal, and the weakest of the three.** The benchmark's `bash` transcripts show `cut` 8, `awk` 9, `tr` 5, but they come from tasks written around the tools. `table` is built only if an independent asker appears (real sessions, the adversarial set); until then this section stands as the argument, and the repository is not created. |
+| `diff` deferred; regex `seek` declined (L8, "`std` — large"). | neither is proposed | unchanged. |
+
+The amendments to D15 itself belong in cancho `docs/agent-toolbox.md`, in place,
+with the PR that builds each tool; they are listed in §6.
 
 ## 1. Why these three
 
@@ -83,10 +100,14 @@ run [--root DIR] [--timeout-ms N] [--max-output N] [--stdin | --stdin-file PATH]
   output) and nothing the child then does. The child has its user's whole
   authority. So the guarantee list is short on purpose: `bounded_memory` and
   nothing about determinism, idempotence or reversibility (`reversibility:
-  irreversible`), and `introspect` says so. Containment is the deployment's
+  irreversible-consequential`, D15's class, §0), and `introspect` says so. Containment is the deployment's
   (the identity and preflight of `docs/agent-bench.md` §11.4), and an agent runtime
   that holds `run` has stopped holding the "no tool can execute" property: the
   benchmark must report an arm **with** `run` apart from one without.
+* **Opt-in, not in the default set.** Because it declares the class D15 keeps out of a
+  no-human grant, `run` is built and shipped as a tool a deployment chooses to
+  install and the MCP server chooses to list (a build flag of `scripts/mcp.py`), not
+  one every agent is handed; the eight others are unchanged.
 * **Authority** (to be derived and held by a test, as the server's is): `exec("<dir>")`,
   `clock`, `poll`, `child_signal`, `pipe_read`, `pipe_write`, and no `fs_*`.
 * **Open:** what a `--stdin-file` may name (a path beneath `--root`, opened with
@@ -99,7 +120,6 @@ run [--root DIR] [--timeout-ms N] [--max-output N] [--stdin | --stdin-file PATH]
 ```
 move [--root DIR] [--if-sha256 HEX] [--dry-run] PATH NEWNAME          # rename in place
 move [--root DIR]  --if-sha256 HEX  [--dry-run] --remove PATH         # tombstone, reversible
-move [--root DIR]  --if-sha256 HEX  [--dry-run] --purge  PATH         # delete a tombstone for good
 ```
 
 * **A rename** moves `PATH` to `NEWNAME`, one component in the **same directory**
@@ -111,9 +131,10 @@ move [--root DIR]  --if-sha256 HEX  [--dry-run] --purge  PATH         # delete a
   `--if-sha256`: a file is never removed on a guess. It is undone by renaming the
   tombstone back. This is the consequence of §2: there is no trash directory,
   because that is a cross-directory move.
-* **A purge deletes only a tombstone** (`precondition.not-a-tombstone` for anything
-  else), with its hash. So a live file cannot be deleted for good in one call, and
-  the first step is always undoable.
+* **There is no purge.** A tool that deletes for good is D15's `irreversible-consequential`
+  (§0), so the tombstone is the end of what `move` does, and **a remove is always
+  undoable**: `move .name.removed-… name`. The cost is that tombstones stay until a
+  person clears them.
 * **Mechanics** are `write`'s: every path opens beneath `--root` following no link
   (`toolbox.place`), the work is done by handle (`dir_rename`, `dir_remove`), under
   the `<path>.lexsys-lock` sidecar, and `--dry-run` reports what would happen with
@@ -121,7 +142,11 @@ move [--root DIR]  --if-sha256 HEX  [--dry-run] --purge  PATH         # delete a
 * **Authority** is `write`'s: `dir_read`, `dir_write`, `fs_read("")`, `heap`, the
   console and `args`; no `fs_write`, no network, no clock.
 * **Guarantees:** `deterministic`, `atomic` (one `renameat`), `requires_precondition`
-  (a remove or purge without `--if-sha256` is refused), `dry_run`, `bounded_memory`.
+  (a remove without `--if-sha256` is refused), `dry_run`, `bounded_memory`.
+  **Reversibility: `irreversible-bounded`**, `write`'s class, and never
+  `irreversible-consequential`. **Open:** a rename is undone by renaming back, which could
+  earn `reversible-cheap`; the classes are lex-os's and this repository does not own
+  their reading, so the conservative one is used until the maintainers say otherwise.
   **`idempotent`** only as `write` is: a retried rename whose destination already
   holds the file's hash answers `changed: false`.
 * **Gates, in the repository's own terms** (M3, M7, M8): every rule has a fixture;
@@ -130,8 +155,7 @@ move [--root DIR]  --if-sha256 HEX  [--dry-run] --purge  PATH         # delete a
   path and a name with `/` each a tag, never a trap; and the **open** question of §2
   measured: a destination created between the look and the rename by a process that
   does not take the lock.
-* **Rules (new):** `precondition.exists`, `precondition.not-a-tombstone`,
-  `path.name-has-separator`; the rest are the shared `args.*`, `path.*` and `io.*`.
+* **Rules (new):** `precondition.exists`, `path.name-has-separator`; the rest are the shared `args.*`, `path.*` and `io.*`.
 
 ## 5. `table`: a table of records, in its own repository
 
@@ -178,6 +202,11 @@ covers is the declarative core.
 2. **`move`** here, with no compiler change: the first to be built.
 3. **`run`** here, once (1) is merged.
 4. **The `contract/` spike**, then the `table` repository.
+
+The D15 amendments (§0) go in cancho `docs/agent-toolbox.md` with the PR that builds
+each tool: "no tool deletes" gains "a tombstone is a rename"; "no process spawning"
+gains `run` as an opt-in tool of the `irreversible-consequential` class; the
+`cut`/`sort`/`uniq` verdict is amended only if `table` is built.
 
 Each is built the way these tools are: the design above, then conformance (M1 to M9
 as they apply), mutants shown killed, `introspect` and the MCP definition generated,

@@ -4,7 +4,7 @@ is in the tool's declared table, and introspect describes the tool."""
 import json
 import unittest
 
-from harness import TOOLS, Fixture, introspect, run, validate
+from harness import TOOLS, Fixture, introspect, run, sha256, validate
 
 
 def corpus(fx):
@@ -40,10 +40,14 @@ def corpus(fx):
                  ["--root", r, "sub", "plain.txt", "missing"], ["--root", r, "link.txt"], ["--root", r, "--depth", "0"]]:
         out.append(("list", args, b""))
     for args in [["--root", r, "--dry-run", "--create", "--stdin", "new.txt"], ["--root", r, "--stdin", "plain.txt"], ["--root", r, "--create", "--stdin", "plain.txt"],
-                 ["--root", r, "--if-sha256", "0" * 64, "--stdin", "plain.txt"], ["--root", r, "--create", "--if-sha256", "0" * 64, "--stdin", "x"]]:
+                 ["--root", r, "--if-sha256", "0" * 64, "--stdin", "plain.txt"], ["--root", r, "--create", "--if-sha256", "0" * 64, "--stdin", "x"],
+                 ["--root", r, "--dry-run", "--max-diff-lines", "1", "--if-sha256", sha256(fx.path("plain.txt").read_bytes()), "--stdin", "plain.txt"],
+                 ["--root", r, "--dry-run", "--max-bytes", "20", "--if-sha256", sha256(fx.path("plain.txt").read_bytes()), "--stdin", "plain.txt"],
+                 ["--root", r, "--dry-run", "--if-sha256", sha256(fx.path("latin1.txt").read_bytes()), "--stdin", "latin1.txt"]]:
         out.append(("write", args, b"new content\n"))
     for args in [["--root", r, "--old", "gamma", "--new", "GAMMA", "--dry-run", "plain.txt"], ["--root", r, "--old", "a", "--new", "b", "plain.txt"],
-                 ["--root", r, "--old", "zzz", "--new", "b", "plain.txt"], ["--root", r, "--new", "b", "plain.txt"]]:
+                 ["--root", r, "--old", "zzz", "--new", "b", "plain.txt"], ["--root", r, "--new", "b", "plain.txt"],
+                 ["--root", r, "--old", "gamma", "--new", "G", "--dry-run", "latin1.txt"], ["--root", r, "--old", "a", "--new", "A", "--expect", "6", "--max-diff-lines", "0", "--dry-run", "plain.txt"]]:
         out.append(("replace", args, b""))
     return out
 

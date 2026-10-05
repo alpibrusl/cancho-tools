@@ -130,6 +130,17 @@ def stream(tool, records, end_counts):
 
 TB = {"$ref": "#/$defs/text_or_bytes"}
 
+# `toolbox.diff`: at most one hunk, the lines between the common leading and
+# trailing lines. `write` answers null when the old file was past --max-bytes.
+HUNK = obj({
+    "old_start": {"type": "integer", "minimum": 1}, "new_start": {"type": "integer", "minimum": 1},
+    "removed_count": NAT, "added_count": NAT,
+    "removed": {"type": "array", "items": TB}, "added": {"type": "array", "items": TB},
+})
+DIFF = {"type": "array", "items": HUNK, "maxItems": 1}
+DIFFS = {"diff": DIFF, "diff_truncated": {"type": "boolean"}}
+WRITE_DIFFS = {"diff": {"oneOf": [{"type": "null"}, DIFF]}, "diff_truncated": {"type": "boolean"}}
+
 SCHEMAS = {
     "seek": stream("seek", {
         "match": obj({"type": {"const": "match"}, "path": TB, "line": NAT, "offset": NAT, "text": TB}),
@@ -157,21 +168,25 @@ SCHEMAS = {
     "write": document("write", obj({
         "path": TB, "changed": {"type": "boolean"}, "created": {"type": "boolean"}, "bytes": NAT,
         "before_sha256": {"oneOf": [{"type": "null"}, HEX64]}, "after_sha256": HEX64,
+        **WRITE_DIFFS,
     }), {
         "dry_run": {"const": True},
         "planned_actions": {"type": "array", "items": obj({
             "op": {"enum": ["create", "replace"]}, "path": TB,
             "before_sha256": {"oneOf": [{"type": "null"}, HEX64]}, "after_sha256": HEX64, "bytes": NAT,
+            **WRITE_DIFFS,
         })},
     }),
     "replace": document("replace", obj({
         "path": TB, "changed": {"type": "boolean"}, "replacements": NAT, "bytes": NAT,
         "before_sha256": HEX64, "after_sha256": HEX64,
+        **DIFFS,
     }), {
         "dry_run": {"const": True},
         "planned_actions": {"type": "array", "items": obj({
             "op": {"const": "replace"}, "path": TB, "replacements": NAT,
             "before_sha256": HEX64, "after_sha256": HEX64, "bytes": NAT,
+            **DIFFS,
         })},
     }),
     "peek": document("peek", {

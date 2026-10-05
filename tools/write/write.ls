@@ -4,8 +4,8 @@ edition 6;
 // has said what it believes is there.
 //
 //     write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX]
-//           [--dry-run] [--max-bytes N] (--stdin | --content-file PATH)
-//           [--format json|text] PATH
+//           [--dry-run] [--max-bytes N] [--max-diff-lines N]
+//           (--stdin | --content-file PATH) [--format json|text] PATH
 //
 // lex-sys `docs/agent-toolbox.md` D10 and D15 row 2: the one place no
 // incumbent has an equivalent -- `sed -i`, `tee` and `>` are all blind.
@@ -27,6 +27,11 @@ edition 6;
 //   this code and of `tests/conformance/test_mutation.py` (strace), not of
 //   the type system: the row is the program's, not the invocation's
 //   (§2.4), so a dry run reports `dir_write` like a real one.
+// * **A diff.** The answer carries `diff`, the lines that change
+//   (`toolbox.diff`), and with `--dry-run` so does `planned_actions`, so an
+//   agent sees what it is about to replace. The old content is held to
+//   compute it, up to `--max-bytes`; past that it is hashed as a stream as
+//   before and `diff` is null. `--max-diff-lines` bounds the lines shown.
 //
 // No tool deletes (D15). The only removal here is of this tool's own
 // temporary, after a failed write.
@@ -38,6 +43,7 @@ import toolbox.atomic;
 import toolbox.built;
 import toolbox.cli;
 import toolbox.describe;
+import toolbox.diff;
 import toolbox.fail;
 import toolbox.out;
 import toolbox.path;
@@ -45,11 +51,11 @@ import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve PATH and --content-file relative to this directory and refuse paths outside it;create||bool|guard||the path must not exist yet (if it holds exactly the new content, nothing is written and changed is false);if-sha256||hex64|guard||the file's current content must hash to this SHA-256;content-sha256||hex64|none||the new content must hash to this SHA-256, checked before anything is written;dry-run||bool|guard||check everything and report planned_actions, exit 9, write nothing;stdin||bool|none||read the new content from standard input;content-file||path|path-read||read the new content from this file;max-bytes||nat|none|67108864|the largest new content accepted (ceiling 1073741824);format||choice:json/text|none|json|json for a program, text for a person";
+    return "root||path|root||resolve PATH and --content-file relative to this directory and refuse paths outside it;create||bool|guard||the path must not exist yet (if it holds exactly the new content, nothing is written and changed is false);if-sha256||hex64|guard||the file's current content must hash to this SHA-256;content-sha256||hex64|none||the new content must hash to this SHA-256, checked before anything is written;dry-run||bool|guard||check everything and report planned_actions, exit 9, write nothing;stdin||bool|none||read the new content from standard input;content-file||path|path-read||read the new content from this file;max-bytes||nat|none|67108864|the largest new content accepted, and the largest old content diffed (ceiling 1073741824);max-diff-lines||nat|none|200|the most changed lines the diff shows (ceiling 100000);format||choice:json/text|none|json|json for a program, text for a person";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "write", version: "0.1.0", summary: "Replace a file atomically, only if it holds what the caller says it holds (--if-sha256) or does not exist (--create); idempotent, locked, with --dry-run.", usage: "write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX] [--dry-run] [--max-bytes N] (--stdin | --content-file PATH) [--format json|text] PATH", output: "document", schema: "write.v1", flags: flag_table(), operands: "PATH|path-write|the file to create or replace", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.required;precondition.hash-mismatch;precondition.content-mismatch;conflict.exists;conflict.locked", limits: "max-bytes|67108864|1073741824", reversibility: "irreversible-bounded", stdin: "with --stdin", guarantees: "deterministic;idempotent;atomic;requires_precondition;dry_run" };
+    return describe.Tool { name: "write", version: "0.1.0", summary: "Replace a file atomically, only if it holds what the caller says it holds (--if-sha256) or does not exist (--create); idempotent, locked, with --dry-run.", usage: "write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX] [--dry-run] [--max-bytes N] [--max-diff-lines N] (--stdin | --content-file PATH) [--format json|text] PATH", output: "document", schema: "write.v1", flags: flag_table(), operands: "PATH|path-write|the file to create or replace", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.required;precondition.hash-mismatch;precondition.content-mismatch;conflict.exists;conflict.locked", limits: "max-bytes|67108864|1073741824;max-diff-lines|200|100000", reversibility: "irreversible-bounded", stdin: "with --stdin", guarantees: "deterministic;idempotent;atomic;requires_precondition;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -58,6 +64,10 @@ fn built() -> [] describe.Built {
 
 fn ceiling() -> [] int {
     return 1073741824;
+}
+
+fn diff_ceiling() -> [] int {
+    return 100000;
 }
 
 fn flag_problem[&h](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], flags: &static [byte]) -> [heap] fail.Errors {
@@ -75,9 +85,10 @@ struct Outcome {
     created: bool,
     planned: bool,
     bytes: int,
+    diff_truncated: bool,
 }
 
-fn data[&h, &p, &b, &a](heap: &!h Heap, shown: &p [byte], o: Outcome, before: &b [byte], after: &a [byte]) -> [heap] buffer.Buffer {
+fn data[&h, &p, &b, &a, &d](heap: &!h Heap, shown: &p [byte], o: Outcome, before: &b [byte], after: &a [byte], changes: &d [byte]) -> [heap] buffer.Buffer {
     var w = json.writer(heap, 256);
     w = json.begin_object(heap, w);
     w = json.put_key(heap, w, "path");
@@ -96,11 +107,15 @@ fn data[&h, &p, &b, &a](heap: &!h Heap, shown: &p [byte], o: Outcome, before: &b
     }
     w = json.put_key(heap, w, "after_sha256");
     w = json.put_string(heap, w, after);
+    w = json.put_key(heap, w, "diff");
+    w = json.put_fragment(heap, w, changes);
+    w = json.put_key(heap, w, "diff_truncated");
+    w = json.put_bool(heap, w, o.diff_truncated);
     w = json.end_object(heap, w);
     return json.finish(w);
 }
 
-fn planned[&h, &p, &b, &a](heap: &!h Heap, shown: &p [byte], o: Outcome, before: &b [byte], after: &a [byte]) -> [heap] buffer.Buffer {
+fn planned[&h, &p, &b, &a, &d](heap: &!h Heap, shown: &p [byte], o: Outcome, before: &b [byte], after: &a [byte], changes: &d [byte]) -> [heap] buffer.Buffer {
     var w = json.writer(heap, 256);
     w = json.begin_object(heap, w);
     w = json.put_key(heap, w, "dry_run");
@@ -127,6 +142,10 @@ fn planned[&h, &p, &b, &a](heap: &!h Heap, shown: &p [byte], o: Outcome, before:
         w = json.put_string(heap, w, after);
         w = json.put_key(heap, w, "bytes");
         w = json.put_int(heap, w, o.bytes);
+        w = json.put_key(heap, w, "diff");
+        w = json.put_fragment(heap, w, changes);
+        w = json.put_key(heap, w, "diff_truncated");
+        w = json.put_bool(heap, w, o.diff_truncated);
         w = json.end_object(heap, w);
     }
     w = json.end_array(heap, w);
@@ -146,11 +165,29 @@ fn planned[&h, &p, &b, &a](heap: &!h Heap, shown: &p [byte], o: Outcome, before:
 
 // The precondition, checked against the file as it is now, and the write.
 // Called with the lock held, or for a dry run without one.
-fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer, buffer.Buffer) {
     let table = flag_table();
     var e = errs;
-    var o = Outcome { changed: false, created: false, planned: false, bytes: len(content) };
-    let (before, errno, size) = atomic.hash_file(heap, dir_open_read(dir, name));
+    var o = Outcome { changed: false, created: false, planned: false, bytes: len(content), diff_truncated: false };
+    // The old content, held for the diff; past --max-bytes, hashed as a
+    // stream instead (see the header).
+    let (current, read_errno, too_big) = atomic.read_all(heap, dir_open_read(dir, name), cli.nat(args, parsed, table, "max-bytes"), buffer.empty(heap, 4096));
+    var before = buffer.empty(heap, 64);
+    var errno = read_errno;
+    var held = 0;
+    if too_big {
+        buffer.drop(heap, before);
+        let (streamed, stream_errno, stream_size) = atomic.hash_file(heap, dir_open_read(dir, name));
+        before = streamed;
+        errno = stream_errno;
+        held = stream_size;
+    } else if read_errno == 0 {
+        borrow current as &k in {
+            buffer.drop(heap, before);
+            before = atomic.sha256_hex(heap, buffer.bytes(k));
+            held = buffer.size(k);
+        }
+    }
     let dry = cli.has(parsed, table, "dry-run");
     let creating = cli.has(parsed, table, "create");
     var go = false;
@@ -159,7 +196,7 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
         if errno == 2 {
             if creating {
                 go = true;
-                o = Outcome { changed: false, created: true, planned: false, bytes: len(content) };
+                o = Outcome { changed: false, created: true, planned: false, bytes: len(content), diff_truncated: false };
             } else {
                 var w = fail.open(heap, "io.not-found", "no such file, and --if-sha256 says one was expected", "use --create to write a new file");
                 w = fail.no_repair(heap, w);
@@ -194,14 +231,31 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
             w = json.put_key(heap, w, "actual_sha256");
             w = json.put_string(heap, w, have);
             w = json.put_key(heap, w, "size");
-            w = json.put_int(heap, w, size);
+            w = json.put_int(heap, w, held);
             e = fail.add(heap, e, w);
         } else {
             go = true;
         }
     }
+    var changes = buffer.empty(heap, 4);
+    if go && too_big {
+        changes = buffer.append(heap, changes, "null");
+        o = Outcome { changed: false, created: o.created, planned: false, bytes: len(content), diff_truncated: true };
+    } else if go {
+        buffer.drop(heap, changes);
+        var cut = false;
+        borrow current as &k in {
+            let (lines, truncated) = diff.hunks(heap, buffer.bytes(k), content, cli.nat(args, parsed, table, "max-diff-lines"));
+            changes = lines;
+            cut = truncated;
+        }
+        o = Outcome { changed: false, created: o.created, planned: false, bytes: len(content), diff_truncated: cut };
+    } else {
+        changes = buffer.append(heap, changes, "[]");
+    }
+    buffer.drop(heap, current);
     if go && dry {
-        o = Outcome { changed: false, created: o.created, planned: true, bytes: len(content) };
+        o = Outcome { changed: false, created: o.created, planned: true, bytes: len(content), diff_truncated: o.diff_truncated };
     } else if go {
         let temp = atomic.temp_path(heap, name, after);
         var failed = 0;
@@ -237,20 +291,21 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
             }
         } else {
             atomic.sync_parent(dir);
-            o = Outcome { changed: true, created: o.created, planned: false, bytes: len(content) };
+            o = Outcome { changed: true, created: o.created, planned: false, bytes: len(content), diff_truncated: o.diff_truncated };
         }
     }
-    return (e, o, before);
+    return (e, o, before, changes);
 }
 
 // Take the lock and apply, or apply without one for a dry run.
-fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer, buffer.Buffer) {
     if cli.has(parsed, flag_table(), "dry-run") {
         return apply(heap, args, parsed, dir, name, shown, content, after, errs);
     }
     var e = errs;
-    var o = Outcome { changed: false, created: false, planned: false, bytes: len(content) };
+    var o = Outcome { changed: false, created: false, planned: false, bytes: len(content), diff_truncated: false };
     var before = buffer.empty(heap, 1);
+    var changes = buffer.empty(heap, 1);
     match atomic.acquire(heap, dir, name) {
         Opened::Failed(reason) => {
             if atomic.would_block(reason) {
@@ -266,45 +321,50 @@ fn locked[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p 
         }
         Opened::Ok(lock) => {
             buffer.drop(heap, before);
-            let (applied, outcome, had) = apply(heap, args, parsed, dir, name, shown, content, after, e);
+            buffer.drop(heap, changes);
+            let (applied, outcome, had, lines) = apply(heap, args, parsed, dir, name, shown, content, after, e);
             e = applied;
             o = outcome;
             before = had;
+            changes = lines;
             // Closing the descriptor releases the lock.
             file_close(lock);
         }
     }
-    return (e, o, before);
+    return (e, o, before, changes);
 }
 
 // Open the directory that holds the file -- beneath --root when one is
 // given (`toolbox.place`) -- and take the lock and apply beneath it, so no
 // step follows a link in the file's own name.
-fn beneath[&h, &g, &p, &f, &r, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), root: &r [byte], full: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+fn beneath[&h, &g, &p, &f, &r, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), root: &r [byte], full: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer, buffer.Buffer) {
     var e = errs;
     let name = place.leaf(full);
     if place.is_directory_name(name) {
         e = fail.io_error(heap, e, 21, false, shown);
-        return (e, Outcome { changed: false, created: false, planned: false, bytes: len(content) }, buffer.empty(heap, 1));
+        return (e, Outcome { changed: false, created: false, planned: false, bytes: len(content), diff_truncated: false }, buffer.empty(heap, 1), buffer.empty(heap, 1));
     }
     match place.parent(fs, root, shown, full) {
         DirOpened::Failed(reason) => {
             e = fail.io_error(heap, e, reason, false, shown);
-            return (e, Outcome { changed: false, created: false, planned: false, bytes: len(content) }, buffer.empty(heap, 1));
+            return (e, Outcome { changed: false, created: false, planned: false, bytes: len(content), diff_truncated: false }, buffer.empty(heap, 1), buffer.empty(heap, 1));
         }
         DirOpened::Ok(opened) => {
             var dir = opened;
-            var o = Outcome { changed: false, created: false, planned: false, bytes: len(content) };
+            var o = Outcome { changed: false, created: false, planned: false, bytes: len(content), diff_truncated: false };
             var before = buffer.empty(heap, 1);
+            var changes = buffer.empty(heap, 1);
             borrow dir as &d in {
                 buffer.drop(heap, before);
-                let (applied, outcome, had) = locked(heap, args, parsed, d, name, shown, content, after, e);
+                buffer.drop(heap, changes);
+                let (applied, outcome, had, lines) = locked(heap, args, parsed, d, name, shown, content, after, e);
                 e = applied;
                 o = outcome;
                 before = had;
+                changes = lines;
             }
             dir_close(dir);
-            return (e, o, before);
+            return (e, o, before, changes);
         }
     }
 }
@@ -336,6 +396,9 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     if most > ceiling() {
         e = flag_problem(heap, e, "args.bad-value", "--max-bytes is above the ceiling", "1073741824 is the most this tool holds", "--max-bytes");
     }
+    if cli.nat(args, parsed, table, "max-diff-lines") > diff_ceiling() {
+        e = flag_problem(heap, e, "args.bad-value", "--max-diff-lines is above the ceiling", "100000 is the most this tool shows", "--max-diff-lines");
+    }
     let (root, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
     e = after_root;
     if cli.operand_count(parsed) == 0 {
@@ -344,10 +407,11 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         e = flag_problem(heap, e, "args.too-many-operands", "write takes one PATH", "write one file per call", "PATH");
     }
 
-    var o = Outcome { changed: false, created: false, planned: false, bytes: 0 };
+    var o = Outcome { changed: false, created: false, planned: false, bytes: 0, diff_truncated: false };
     var shown_copy = buffer.empty(heap, 64);
     var before = buffer.empty(heap, 1);
     var after = buffer.empty(heap, 1);
+    var changes = buffer.empty(heap, 1);
     var refused = false;
     borrow e as &er in {
         refused = fail.count(er) > 0;
@@ -389,7 +453,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
             borrow content as &c in {
                 buffer.drop(heap, after);
                 after = atomic.sha256_hex(heap, buffer.bytes(c));
-                o = Outcome { changed: false, created: false, planned: false, bytes: buffer.size(c) };
+                o = Outcome { changed: false, created: false, planned: false, bytes: buffer.size(c), diff_truncated: false };
             }
             if source_ok && cli.has(parsed, table, "content-sha256") {
                 borrow after as &a in {
@@ -411,11 +475,13 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 if path.ok(tp) && source_ok {
                     borrow content as &c in {
                         borrow after as &a in {
-                            let (applied, outcome, had) = beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), buffer.bytes(c), buffer.bytes(a), e);
+                            let (applied, outcome, had, lines) = beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), buffer.bytes(c), buffer.bytes(a), e);
                             e = applied;
                             o = outcome;
                             buffer.drop(heap, before);
                             before = had;
+                            buffer.drop(heap, changes);
+                            changes = lines;
                         }
                     }
                 }
@@ -431,41 +497,43 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         borrow shown_copy as &sc in {
             borrow before as &b in {
                 borrow after as &a in {
-                    var payload = buffer.empty(heap, 1);
-                    var extra = buffer.empty(heap, 1);
-                    var line = buffer.empty(heap, 64);
-                    if fail.count(er) == 0 {
-                        buffer.drop(heap, payload);
-                        payload = data(heap, buffer.bytes(sc), o, buffer.bytes(b), buffer.bytes(a));
+                    borrow changes as &ch in {
+                        var payload = buffer.empty(heap, 1);
+                        var extra = buffer.empty(heap, 1);
+                        var line = buffer.empty(heap, 64);
+                        if fail.count(er) == 0 {
+                            buffer.drop(heap, payload);
+                            payload = data(heap, buffer.bytes(sc), o, buffer.bytes(b), buffer.bytes(a), buffer.bytes(ch));
+                            if cli.has(parsed, table, "dry-run") {
+                                buffer.drop(heap, extra);
+                                extra = planned(heap, buffer.bytes(sc), o, buffer.bytes(b), buffer.bytes(a), buffer.bytes(ch));
+                                line = buffer.append(heap, line, "dry run: ");
+                            }
+                            if o.changed {
+                                line = buffer.append(heap, line, "wrote ");
+                            } else if o.planned {
+                                line = buffer.append(heap, line, "would write ");
+                            } else {
+                                line = buffer.append(heap, line, "unchanged ");
+                            }
+                            line = buffer.append(heap, line, buffer.bytes(sc));
+                            line = buffer.append(heap, line, "\n");
+                        }
+                        var success = 0;
                         if cli.has(parsed, table, "dry-run") {
-                            buffer.drop(heap, extra);
-                            extra = planned(heap, buffer.bytes(sc), o, buffer.bytes(b), buffer.bytes(a));
-                            line = buffer.append(heap, line, "dry run: ");
+                            success = 9;
                         }
-                        if o.changed {
-                            line = buffer.append(heap, line, "wrote ");
-                        } else if o.planned {
-                            line = buffer.append(heap, line, "would write ");
-                        } else {
-                            line = buffer.append(heap, line, "unchanged ");
-                        }
-                        line = buffer.append(heap, line, buffer.bytes(sc));
-                        line = buffer.append(heap, line, "\n");
-                    }
-                    var success = 0;
-                    if cli.has(parsed, table, "dry-run") {
-                        success = 9;
-                    }
-                    borrow payload as &d in {
-                        borrow extra as &x in {
-                            borrow line as &l in {
-                                status = out.respond(heap, io, "write", "write.v1", "0.1.0", buffer.bytes(d), buffer.bytes(x), er, text_mode, buffer.bytes(l), success);
+                        borrow payload as &d in {
+                            borrow extra as &x in {
+                                borrow line as &l in {
+                                    status = out.respond(heap, io, "write", "write.v1", "0.1.0", buffer.bytes(d), buffer.bytes(x), er, text_mode, buffer.bytes(l), success);
+                                }
                             }
                         }
+                        buffer.drop(heap, payload);
+                        buffer.drop(heap, extra);
+                        buffer.drop(heap, line);
                     }
-                    buffer.drop(heap, payload);
-                    buffer.drop(heap, extra);
-                    buffer.drop(heap, line);
                 }
             }
         }
@@ -473,6 +541,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     buffer.drop(heap, shown_copy);
     buffer.drop(heap, before);
     buffer.drop(heap, after);
+    buffer.drop(heap, changes);
     fail.drop(heap, e);
     return status;
 }

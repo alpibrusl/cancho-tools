@@ -160,6 +160,8 @@ def fixtures(fx):
     add("write", "limit.input-too-large", ["--max-bytes", "3", "--create", "--stdin", "fresh.txt"])
     add("replace", "limit.input-too-large", ["--max-bytes", "3", "--old", "a", "--new", "b", "plain.txt"])
     add("jsonq", "limit.input-too-large", ["--max-bytes", "3", "doc.json"])
+    add("write", "args.bad-value", ["--max-diff-lines", "100001", "--create", "--stdin", "fresh.txt"])
+    add("replace", "args.bad-value", ["--max-diff-lines", "100001", "--old", "alpha", "--new", "b", "plain.txt"])
     add("tally", "limit.too-many-keys", ["--max-keys", "1", "words.txt"])
 
     # Preconditions and conflicts.

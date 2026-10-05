@@ -1,10 +1,12 @@
 # An MCP server for the tools (#10): the design
 
-> **Status: designed, not built.** It needs lex-sys edition 7 with
-> `std.process` (lex-sys `docs/processes.md` §7.1, lex-sys#276), and
-> `lex-sys.toml`'s pin moves to the commit that merges it. Every claim
-> below was measured on lex-sys `processes-slice3-std-process` (`f4b45bb`),
-> macOS 26.2 arm64, unless it says otherwise.
+> **Status: built** (`server/mcp.ls`, `scripts/mcp.py`,
+> `tests/conformance/test_mcp.py`), on lex-sys edition 7 with
+> `std.process` (lex-sys `docs/processes.md` §7.1, lex-sys#276).
+> `lex-sys.toml`'s pin moves to the commit that merges #276; until then CI's
+> compiler cannot build the server. Every claim below was measured on lex-sys
+> `processes-slice3-std-process` (`f4b45bb`), on macOS 26.2 arm64 and Linux
+> 7.0 x86_64, unless it says otherwise. §8 is what building it found.
 
 An agent runtime adopts tools most easily over MCP (#10). Every tool here
 already describes itself (`introspect`, the schemas), so the server derives
@@ -62,8 +64,11 @@ result with `isError`, and a protocol failure is a JSON-RPC error.
   tool's `<tool>.v1` schema. The spec's "MUST conform" is met by M1, which
   validates every output against its schema. `seek`, `list` and `hash`
   print a `stream` (NDJSON), which is not one object, so they have text only.
-* `isError`: true when the exit code is not 0. The tool's own `error`
-  record, with its rule and repair, is in the text.
+* `isError`: ~~true when the exit code is not 0~~ true when the exit code
+  is neither 0 nor 9. **Corrected:** a completed `--dry-run` exits 9
+  (`DRY_RUN`) with `"ok": true` (measured with `write --create --dry-run`),
+  and is an answer, not a failure. The tool's own `error` record, with its
+  rule and repair, is in the text.
 * `_meta`: `{"exit_code": n}`, because #10 asks for the exit code and the
   JSON alone does not carry it.
 * When the server ends the child itself (`capture` answered `TimedOut`,
@@ -131,10 +136,13 @@ with its `Writer`, which escapes the tool's output into the `text` string.
 
 The server holds `Exec` narrowed to the directory of the eight binaries,
 and no `Fs` or `Net`. It reads nothing itself; the tools read, under
-`--root`. The row it should derive is `args`, `clock`, `err_write`,
-`exec("<bin>")`, `heap`, `io_read`, `io_write` and `poll`. That is a
-claim to measure when it is built (`lex-sys authority`), and to hold as a
-ceiling in `tools.toml`'s style.
+`--root`. ~~The row it should derive is `args`, `clock`, `err_write`,
+`exec("<bin>")`, `heap`, `io_read`, `io_write` and `poll`.~~ **Measured**
+(`lex-sys authority`): bounded, and `args`, `child_signal`, `clock`,
+`err_write`, `exec("/opt/lexsys-tools/bin")`, `heap`, `io_read`,
+`io_write`, `pipe_read`, `pipe_write` and `poll`. The three the design left
+out are what it does with the children and channels it owns, so they reach
+nothing beyond them. `test_mcp.py` holds the row to exactly this set.
 
 **The bound is baked in at build time.** `narrow` takes a literal ("`narrow`
 takes a literal, so the refinement can be checked where it is written",
@@ -177,3 +185,39 @@ the server. That is the cost of a bound the compiler can see, and lex-sys
 * HTTP transport: stdio is what a local agent runtime starts.
 * Concurrency: one call at a time. Two calls racing on one file is what
   `write`'s guards are for, and they hold across processes (M7).
+
+## 8. What building it found
+
+* **A newline inside a response.** A tool ends its document with `\n`, and
+  `std.json`'s `put_fragment` splices what it is given, so the first
+  `structuredContent` ended the client's line partway through the response.
+  The fragment now stops before trailing whitespace, and every test reads the
+  answers one line at a time.
+* **`put_fragment` traps on anything that is not one value.** Tool output is
+  parsed first, and only one object becomes `structuredContent`; anything
+  else is text only. Three hundred seeded hostile requests (bytes, deep
+  nesting, wrong types, NULs, unknown tools and keys) are each answered,
+  with no trap, and the server answers the `ping` after them.
+* **A local binding hides a qualified call.** `tools.name(k)` with a local
+  `name` in scope, and `process.list(l)` with a local `list`, are refused as
+  "a local binding, not a function". It is lex-sys's (found while building
+  `std.process`), and the server names its locals otherwise.
+* **The project pin.** `lex-sys build` refuses a compiler other than the one
+  `lex-sys.toml` names, which is right. The tests here ran with
+  `--ignore-compiler-rev` on #276's compiler; the pin moves when #276 merges.
+* **Mutants.** Nine, one choice each undone: no flush, no `--` fence,
+  any key accepted, `isError` on any non-zero exit, the fragment not
+  trimmed, no `--root`, structured content for streams, a boolean's type
+  unchecked, a NUL in a flag's value let through. The first run killed 7.
+  *No flush* was killed only by a test added for it: every other test sends
+  all its requests and closes the input, and the server's buffer is flushed
+  at exit, so only a client that waits for each answer with the input still
+  open sees an answer that never comes. The two survivors were tests that did
+  not look: the NUL was only ever in an operand, not a flag's value; and a
+  stream that is one line (`list` of an empty directory prints only `end`)
+  is one JSON object, so only the `document` check keeps it text. With those
+  cases, **9 of 9 are killed**.
+* **Not the server's:** on a Linux whose `/tmp` is tmpfs, `peek` on a
+  directory answers `io.read-failed` (`lseek(SEEK_END)` is `EINVAL` on a
+  tmpfs directory) where `test_rules.py` expects `io.is-a-directory`. It
+  fails the same way on `main`, and is reported separately.

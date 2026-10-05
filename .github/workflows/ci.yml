@@ -48,7 +48,7 @@ jobs:
 
       - name: Formatting
         working-directory: tools
-        run: lex-sys fmt --check contract tools tests generated
+        run: lex-sys fmt --check contract tools tests generated server
 
       - name: Build every tool
         working-directory: tools
@@ -69,6 +69,10 @@ jobs:
       - name: Two agents, one file -- the lost update and its refusal, and README.md is current
         working-directory: tools
         run: python3 scripts/demo_race.py --check
+
+      - name: The MCP server's tool definitions are generated from introspect (docs/mcp.md)
+        working-directory: tools
+        run: python3 scripts/mcp.py --check
 
       - name: The Pages site generates from these binaries
         working-directory: tools

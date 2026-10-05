@@ -2,11 +2,10 @@
 
 > **Status: built** (`server/mcp.ls`, `scripts/mcp.py`,
 > `tests/conformance/test_mcp.py`), on lex-sys edition 7 with
-> `std.process` (lex-sys `docs/processes.md` §7.1, lex-sys#276).
-> `lex-sys.toml`'s pin moves to the commit that merges #276; until then CI's
-> compiler cannot build the server. Every claim below was measured on lex-sys
-> `processes-slice3-std-process` (`f4b45bb`), on macOS 26.2 arm64 and Linux
-> 7.0 x86_64, unless it says otherwise. §8 is what building it found.
+> `std.process` (lex-sys `docs/processes.md` §7.1, merged as lex-sys#276,
+> `fe32ac2`, which `lex-sys.toml` pins). Every claim below was measured on
+> macOS 26.2 arm64 and Linux 7.0 x86_64, unless it says otherwise. §8 is what
+> building it found.
 
 An agent runtime adopts tools most easily over MCP (#10). Every tool here
 already describes itself (`introspect`, the schemas), so the server derives
@@ -203,8 +202,9 @@ the server. That is the cost of a bound the compiler can see, and lex-sys
   "a local binding, not a function". It is lex-sys's (found while building
   `std.process`), and the server names its locals otherwise.
 * **The project pin.** `lex-sys build` refuses a compiler other than the one
-  `lex-sys.toml` names, which is right. The tests here ran with
-  `--ignore-compiler-rev` on #276's compiler; the pin moves when #276 merges.
+  `lex-sys.toml` names, which is right. The pin moved to `fe32ac2` (#276
+  merged): the eight tools' authorities and the generated definitions are
+  unchanged under it, and only the embedded compiler revision moved.
 * **Mutants.** Nine, one choice each undone: no flush, no `--` fence,
   any key accepted, `isError` on any non-zero exit, the fragment not
   trimmed, no `--root`, structured content for streams, a boolean's type

@@ -110,12 +110,20 @@ class Parsers(unittest.TestCase):
         self.assertEqual((r["answer"], r["turns"], r["calls"]), ("1.2.3", 2, {"cancho-tools_jsonq": 1}))
         self.assertEqual(r["tokens_out"], 62 + 21)
 
-    def test_an_answer_is_what_follows_the_last_call(self):
-        events = [{"type": "text", "part": {"text": "let me look"}},
-                  {"type": "tool_use", "part": {"tool": "bash", "state": {"status": "error"}}},
-                  {"type": "text", "part": {"text": "42"}}]
-        r = ab.opencode_parse("\n".join(json.dumps(e) for e in events))
-        self.assertEqual((r["answer"], r["tool_errors"]), ("42", 1))
+    def test_an_answer_is_the_text_of_the_final_step(self):
+        # opencode delivers a step's narration after its tool call, so "the text
+        # after the last call" took "I'll check..." for the start of the answer
+        # (a correct CONFLICT was scored as a failure on it).
+        steps = [{"type": "step_start", "part": {}},
+                 {"type": "tool_use", "part": {"tool": "bash", "state": {"status": "error"}}},
+                 {"type": "text", "part": {"text": "I'll check the file"}},
+                 {"type": "step_finish", "part": {"tokens": {}}},
+                 {"type": "step_start", "part": {}},
+                 {"type": "text", "part": {"text": "CONFLICT"}},
+                 {"type": "text", "part": {"text": "it changed"}},
+                 {"type": "step_finish", "part": {"tokens": {}}}]
+        r = ab.opencode_parse("\n".join(json.dumps(e) for e in steps))
+        self.assertEqual((r["answer"], r["tool_errors"], r["turns"]), ("CONFLICT\nit changed", 1, 2))
 
     def test_answers_are_read_by_form_not_by_prose(self):
         self.assertEqual(tasks.answer_lines("```\n- src/a.py:2\n1. src/b.py:7\n```"), ["src/a.py:2", "src/b.py:7"])

@@ -209,13 +209,14 @@ def opencode_parse(out):
         except ValueError:
             continue
         p = d.get("part") or {}
-        if d.get("type") == "text":
+        if d.get("type") == "step_start":
+            texts = []  # the answer is the text of the final step: narration before a call is not it
+        elif d.get("type") == "text":
             texts.append(p.get("text", ""))
         elif d.get("type") == "tool_use":
             r["calls"][p.get("tool", "?")] = r["calls"].get(p.get("tool", "?"), 0) + 1
             if (p.get("state") or {}).get("status") == "error":
                 r["tool_errors"] += 1
-            texts = []  # the answer is what comes after the last call
         elif d.get("type") == "step_finish":
             t = p.get("tokens") or {}
             r["turns"] += 1

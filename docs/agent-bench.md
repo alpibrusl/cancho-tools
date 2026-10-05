@@ -160,6 +160,13 @@ reported per agent in §10; the local model costs time and nothing else.
   excluded from a snapshot (a test installs every arm's setup and requires no
   change; it fails without the fix), and the two results affected were discarded.
   The read tasks, which check only the answer, were not.
+* **The answer is the final step's text.** opencode delivers a step's narration
+  after its tool call, so taking "the text after the last call" made a correct
+  `CONFLICT` (file left alone, the changed hash named) fail on a leading "I'll
+  check...". The parser now takes the final step's text, with a test that fails
+  without it, and the one result affected was rerun. A different failure in the
+  same pilot stays: the `skills` arm's `TODO` listing began with an intro line,
+  in the final step, in the agent's own words.
 * **The arms' limits hold.** In the `skills` arm, a plain `grep` is refused by the
   permission rule, and the model loaded the skill and then called the tool.
 * **The tools' definitions are a per-turn cost, measured:** the first call's input

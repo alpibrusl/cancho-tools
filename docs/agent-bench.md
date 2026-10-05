@@ -139,6 +139,12 @@ reported per agent in §10; the local model costs time and nothing else.
   cure. Tasks are frozen before a run and not edited after seeing results.
 * The arms differ in system-prompt text the harness adds for tools; that is
   part of the cost the arm has, and is not removed.
+* **A small model's behaviour depends on the harness's prompt as much as on the
+  model** (§12.1: the same model calls a tool 3 of 3 times with a short agent prompt
+  and 0 of 10 under opencode's own). A result is "this model, in this harness, with
+  this toolset"; it says nothing about the model in another harness. The roster is
+  filtered by whether a model uses tools **under the harness being run** at all, and
+  a model that does not is reported as that, not as a failure of the tools.
 * A local model on macOS and a hosted one on Linux differ in everything but the
   arms. Compare arms within a row, never rows across agents.
 
@@ -383,4 +389,41 @@ failure kinds), not as a wrong answer, and does not stay in the roster.
 for reasons that have nothing to do with a model (seen in the `qwen3.5:9b` run, `sed -i` refusing GNU syntax; to be recorded in §10). So the small
 models run on Linux, on a CPU server, pinned to cores that leave its other work
 alone; seconds are then not comparable with the Mac's and are not reported.
+
+### 12.1 Does a model use tools at all under this harness? (measured)
+
+Choosing models by BFCL and Ollama's `tools` flag was not enough: a direct test
+showed `granite4.1:3b` and `llama3.1:8b` call tools reliably, yet in the harness
+`granite4.1:3b` never did and `llama3.1:8b` often wrote its call as text. The
+suspects were checked one at a time, with the same models on the Mac's Ollama:
+
+| suspect | how it was tested | result |
+|---|---|---|
+| streaming (opencode streams, the first probe did not) | the same tools and prompt, streamed and not | **identical** for every model |
+| a truncated context | the context window is 262,144 on this server; prompts are 3 to 7k tokens | **ruled out** |
+| temperature (opencode sets none) | the captured request at the default, 0 and 0.2 | **no change** (0 of 10 each) |
+| the tool definitions | 1 tool, the 8 MCP tools | no change by themselves |
+| **the system prompt** | the captured request, replayed | **0 of 10** under opencode's 8,917 characters; **3 of 3** under a short agent prompt |
+
+The request was captured, not guessed: a logging proxy between opencode and the
+server (`Capture` in `scripts/agentbench.py`, tested against a stub upstream) shows
+opencode sends a 8,917-character system prompt, the `bash` tool, `tool_choice: auto`,
+`max_tokens` 32,000, streaming and no temperature. `agentbench.py fit` captures it
+and replays it against each model, so the filter is reproducible. Under it
+(first turn, the `bash` arm, one-line task):
+
+| model | calls the tool | note |
+|---|---|---|
+| `granite4.1:8b` | 6/6 | |
+| `llama3.1:8b` | 5/6 | |
+| `qwen3.5:4b` | 4/6 | |
+| `qwen3.5:9b` | 3/6 | half the first turns answer without looking |
+| `granite4.1:3b` | 0/6 | answers a made-up version |
+| `ministral-3:3b` | 0/6 | and 2 server errors of 6 |
+| `qwen3:8b` | 0/6 | an empty reply |
+
+The three models at 0 do not go into the pilots under opencode. That says they do
+not suit **this** harness, not that they cannot call tools; a minimal agent loop
+with a short prompt (not built) would tell the two apart, and is what a result about
+"small models" needs before it is stated.
 

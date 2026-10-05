@@ -235,6 +235,49 @@ class Isolation(unittest.TestCase):
             shutil.rmtree(run_dir, ignore_errors=True)
 
 
+class Fit(unittest.TestCase):
+    """The harness-fit filter (§12): what a model is shown is what the harness really sends."""
+
+    def test_the_proxy_forwards_unchanged_and_keeps_what_was_sent(self):
+        import http.server
+        import threading
+        import urllib.request
+
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def do_POST(h):
+                body = h.rfile.read(int(h.headers["Content-Length"]))
+                data = json.dumps({"echo": json.loads(body), "path": h.path}).encode()
+                h.send_response(200)
+                h.send_header("Content-Length", str(len(data)))
+                h.end_headers()
+                h.wfile.write(data)
+
+            def log_message(h, *a):
+                pass
+
+        up = http.server.HTTPServer(("127.0.0.1", 0), Upstream)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        capture = ab.Capture("http://127.0.0.1:%d" % up.server_address[1])
+        try:
+            sent = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "tools": [{"function": {"name": "bash"}}]}
+            reply = json.load(urllib.request.urlopen(urllib.request.Request(
+                "http://127.0.0.1:%d/v1/chat/completions" % capture.port, json.dumps(sent).encode(), {"Content-Type": "application/json"})))
+            self.assertEqual(reply, {"echo": sent, "path": "/v1/chat/completions"})
+            self.assertEqual(capture.requests_with_tools(), [sent])
+            capture.bodies.append(json.dumps({"messages": [], "tools": []}))  # a title request: no tools
+            self.assertEqual(len(capture.requests_with_tools()), 1)
+        finally:
+            capture.close()
+            up.shutdown()
+
+    def test_a_reply_is_a_call_a_text_answer_or_an_error(self):
+        call = {"choices": [{"message": {"tool_calls": [{"function": {"name": "bash", "arguments": "{}"}}]}}]}
+        other = {"choices": [{"message": {"tool_calls": [{"function": {"name": "rm", "arguments": "{}"}}]}}]}
+        text = {"choices": [{"message": {"content": "v1.0.0"}}]}
+        self.assertEqual([ab.classify_reply(r) for r in (call, other, text, {}, None, {"error": "x"})],
+                         ["call", "none", "none", "error", "error", "error"])
+
+
 class Arms(unittest.TestCase):
     def claude_command(self, arm):
         t = tasks.BY_ID["r1-version"]

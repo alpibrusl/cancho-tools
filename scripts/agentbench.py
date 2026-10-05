@@ -408,6 +408,124 @@ def failure_kind(r):
     return "wrong"
 
 
+# ---- the harness-fit filter (docs/agent-bench.md §12) -------------------------------------
+
+
+class Capture:
+    """A logging proxy between opencode and the model server: it forwards every request
+    unchanged and keeps the bodies, so the request the harness really sends can be read
+    and replayed. (Found needed when a model that calls tools reliably in a direct test
+    never did under opencode: the difference was in what opencode sends.)"""
+
+    def __init__(self, upstream):
+        import http.server
+        import socketserver
+        import threading
+        import urllib.request
+        self.bodies = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(h):
+                body = h.rfile.read(int(h.headers.get("Content-Length", 0)))
+                outer.bodies.append(body.decode())
+                reply = urllib.request.urlopen(urllib.request.Request(upstream + h.path, body, {"Content-Type": "application/json"}), timeout=900)
+                h.send_response(reply.status)
+                for k, v in reply.getheaders():
+                    if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                        h.send_header(k, v)
+                h.send_header("Connection", "close")
+                h.end_headers()
+                while chunk := reply.read(1024):
+                    h.wfile.write(chunk)
+                    h.wfile.flush()
+
+            def do_GET(h):
+                data = urllib.request.urlopen(upstream + h.path, timeout=60).read()
+                h.send_response(200)
+                h.send_header("Content-Type", "application/json")
+                h.send_header("Content-Length", str(len(data)))
+                h.end_headers()
+                h.wfile.write(data)
+
+            def log_message(h, *args):
+                pass
+
+        class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+
+        self.server = Server(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def requests_with_tools(self):
+        out = []
+        for b in self.bodies:
+            try:
+                d = json.loads(b)
+            except ValueError:
+                continue
+            if d.get("tools"):
+                out.append(d)
+        return out
+
+    def close(self):
+        self.server.shutdown()
+
+
+def classify_reply(reply, tool="bash"):
+    """`call` if the reply calls `tool`, `none` if it answers in text, `error` if the server
+    refused or the reply is not a chat completion."""
+    try:
+        message = reply["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return "error"
+    calls = message.get("tool_calls") or []
+    return "call" if calls and calls[0]["function"]["name"] == tool else "none"
+
+
+def replay(request, model, base, times):
+    """Send `request` to `model` `times` times without streaming; answers the list of `classify_reply` kinds."""
+    import urllib.error
+    import urllib.request
+    body = {**request, "model": model, "stream": False}
+    body.pop("stream_options", None)
+    kinds = []
+    for _ in range(times):
+        try:
+            reply = json.load(urllib.request.urlopen(urllib.request.Request(
+                base + "/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"}), timeout=900))
+            kinds.append(classify_reply(reply))
+        except (urllib.error.URLError, ValueError, OSError):
+            kinds.append("error")
+    return kinds
+
+
+def cmd_fit(a):
+    """Does each model call a tool at all under opencode's real request? One run captures
+    the request (the bash arm, a one-line task); each model then gets it `--times` times."""
+    base = os.environ.get("OLLAMA_URL", "http://localhost:11434/v1")
+    upstream = base[:-len("/v1")] if base.endswith("/v1") else base
+    capture = Capture(upstream)
+    try:
+        os.environ["OLLAMA_URL"] = "http://127.0.0.1:%d/v1" % capture.port
+        run_one("opencode", a.capture_model, "bash", tasks.BY_ID["r1-version"], 0, pathlib.Path(tempfile.mkdtemp(prefix="fit-")), 600)
+    finally:
+        os.environ["OLLAMA_URL"] = base
+        capture.close()
+    seen = capture.requests_with_tools()
+    if not seen:
+        sys.exit("no request carrying tools was captured: the capture model never reached the harness's tool turn")
+    request = seen[0]
+    system = sum(len(m["content"]) for m in request["messages"] if m["role"] == "system" and isinstance(m["content"], str))
+    print("captured: %d tool(s) %s, %d characters of system prompt, max_tokens %s, tool_choice %s, stream %s"
+          % (len(request["tools"]), [t["function"]["name"] for t in request["tools"]], system, request.get("max_tokens"),
+             request.get("tool_choice"), request.get("stream")))
+    for model in a.models.split(","):
+        kinds = replay(request, model, base, a.times)
+        print("%-18s calls the tool %d/%d  (none %d, error %d)" % (model, kinds.count("call"), a.times, kinds.count("none"), kinds.count("error")), flush=True)
+
+
 def key(r):
     return (r["agent"], r["model"], r["arm"], r["task"], r["rep"])
 
@@ -538,12 +656,19 @@ def main():
     r.add_argument("--out", default="bench-out")
     r.add_argument("--run-as", default="", help="run the agent as this unprivileged account (docs/agent-bench.md §11.4)")
     r.add_argument("--agent-bin", default="", help="with --run-as: a directory that account can read, holding the agent")
+    ft = sub.add_parser("fit", help="§12: does each model call a tool at all under opencode's real request?")
+    ft.add_argument("--models", required=True, help="comma-separated, without the provider prefix")
+    ft.add_argument("--capture-model", default="ollama/qwen3.5:9b")
+    ft.add_argument("--times", type=int, default=6)
     f = sub.add_parser("preflight", help="§11.4: check the isolation of an identity, and run nothing")
     f.add_argument("--run-as", required=True)
     f.add_argument("--agent-bin", default="")
     p = sub.add_parser("report")
     p.add_argument("results")
     a = ap.parse_args()
+    if a.cmd == "fit":
+        cmd_fit(a)
+        return
     if a.cmd == "preflight":
         problems = check_identity(Identity(a.run_as, a.agent_bin))
         print("\n".join(problems) or "the preflight found no escape: as %s it cannot read an operator-only file, list or write "

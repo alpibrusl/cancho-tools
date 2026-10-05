@@ -94,11 +94,13 @@ from a fresh derivation, as `manifest.py --check` does for authority.
 **`introspect` has to say one thing it does not yet.** Whether an operand
 is required is only in the `usage` prose: `jsonq`'s `FILE` and `tally`'s
 `FILE...` may be left out, meaning standard input (`[FILE | -]`, "none
-reads standard input"). Parsing prose for a schema would make a second
+reads standard input"), and `list`'s `DIR...`, meaning the root. Parsing prose for a schema would make a second
 source of truth, so `introspect`'s operands gain `min` and `max` counts
 (`PATH` 1/1, `FILE...` 1/unbounded for `seek`, 0/unbounded for `tally`),
-taken from the same table the parser runs on (D11). That change comes first,
-with its own gate: each tool's counts match what its parser accepts.
+written in the operand table `introspect` prints. That change comes first
+(#16), with its own gate: for every tool and every count, the parser's
+`args.missing-operand` and `args.too-many-operands` appear exactly where the
+counts say (`test_operands.py`).
 
 Properties are named as the flags are, without the dashes (`max-count`),
 and operands in lower case (`pattern`, `files`). `additionalProperties` is

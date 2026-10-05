@@ -60,6 +60,17 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+# What the harness itself puts in a workspace to configure an agent: the config
+# opencode reads, and the skills it and Claude Code load. Not the agent's doing,
+# so not a change (found when every edit task failed on `opencode.json`).
+HARNESS_FILES = {"opencode.json"}
+HARNESS_DIRS = (".opencode", ".claude")
+
+
+def is_harness(rel):
+    return rel in HARNESS_FILES or rel.split(os.sep)[0] in HARNESS_DIRS
+
+
 def snapshot(ws):
     """Every file under `ws`, by relative path: its hash, or its target for a link."""
     out = {}
@@ -67,6 +78,8 @@ def snapshot(ws):
         for name in files + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
             p = Path(root) / name
             rel = str(p.relative_to(ws))
+            if is_harness(rel):
+                continue
             out[rel] = "link:" + os.readlink(p) if p.is_symlink() else sha(p.read_bytes())
     return out
 

@@ -76,6 +76,25 @@ class Checks(unittest.TestCase):
             shutil.rmtree(run_dir, ignore_errors=True)
 
 
+    def test_what_the_harness_installs_is_not_a_change(self):
+        # Every arm writes config and skills into the workspace; none of it may
+        # turn a state-checking task into a failure.
+        import json
+        import shutil
+        t = tasks.BY_ID["e1-append"]
+        run_dir, ws, facts = ab.new_workspace(t)
+        try:
+            (ws / "opencode.json").write_text(json.dumps(ab.opencode_config("skills", ws, "ollama/q")))
+            ab.skills_into(ws, ".opencode/skills")
+            ab.skills_into(ws, ".claude/skills")
+            self.assertEqual(tasks.changed(ws, facts), [])
+            self.assertEqual(tasks.litter(ws, facts), 0)
+            ab.run_script(t.bash, ws, facts, BIN)
+            self.assertTrue(t.check(ws, "", facts)[0])
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)
+
+
 class Parsers(unittest.TestCase):
     def test_claude_code_stream(self):
         r = ab.claude_parse((FIXTURES / "claude-mcp.jsonl").read_text())

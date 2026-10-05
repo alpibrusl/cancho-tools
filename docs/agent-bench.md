@@ -153,6 +153,13 @@ reported per agent in §10; the local model costs time and nothing else.
   `$PWD`, and a child started with `cwd=` inherits its parent's. Every run now
   sets `PWD` and gets `--dir`. Nothing had run yet (the runs failed at the model
   lookup), but an agent's tools would have worked in the real repository.
+* **The harness's own files counted as the agent's changes.** The first edit run
+  failed on `opencode.json`, the config the benchmark writes into the workspace
+  after the fixture is snapshotted; the skills arm's `SKILL.md` files would have
+  done the same. The pilot was stopped at once, the harness's files are now
+  excluded from a snapshot (a test installs every arm's setup and requires no
+  change; it fails without the fix), and the two results affected were discarded.
+  The read tasks, which check only the answer, were not.
 * **The arms' limits hold.** In the `skills` arm, a plain `grep` is refused by the
   permission rule, and the model loaded the skill and then called the tool.
 * **The tools' definitions are a per-turn cost, measured:** the first call's input

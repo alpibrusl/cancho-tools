@@ -61,6 +61,7 @@ CASES = [
      ["--old=beta", "--new=BETA", "--dry-run", "--", "plain.txt"]),
     ("write", {"path": "fresh.txt", "create": True, "dry-run": True, "stdin": "new\n"},
      ["--create", "--dry-run", "--stdin", "--", "fresh.txt"]),
+    ("move", {"path": "plain.txt", "newname": "moved.txt", "dry-run": True}, ["--dry-run", "--", "plain.txt", "moved.txt"]),
 ]
 
 

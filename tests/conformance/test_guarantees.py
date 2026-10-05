@@ -20,7 +20,7 @@ import unittest
 
 from harness import TOOLS, Fixture, introspect, run
 from test_memory import MEASURED
-from test_mutation import WRITERS
+from test_mutation import MOVERS, WRITERS
 from test_schema import corpus
 
 KEYS = ["deterministic", "idempotent", "atomic", "requires_precondition", "dry_run", "bounded_memory"]
@@ -59,9 +59,9 @@ class Guarantees(unittest.TestCase):
                 self.assertIn(tool, in_m2, "%s claims deterministic, and M2 does not run it" % tool)
             self.assertEqual(g["bounded_memory"], tool in in_m9, "%s: bounded_memory and M9 disagree" % tool)
             for key in ("atomic", "dry_run"):
-                self.assertEqual(g[key], tool in WRITERS, "%s: %s and M7 disagree" % (tool, key))
+                self.assertEqual(g[key], tool in WRITERS | MOVERS, "%s: %s and M7 disagree" % (tool, key))
             self.assertEqual(g["requires_precondition"], tool in WRITERS, tool)
-            self.assertEqual(g["concurrency"].startswith("locked"), tool in WRITERS, tool)
+            self.assertEqual(g["concurrency"].startswith("locked"), tool in WRITERS | MOVERS, tool)
 
     def test_a_writer_refuses_without_a_stated_belief(self):
         fx = Fixture()
@@ -80,7 +80,7 @@ class Guarantees(unittest.TestCase):
         try:
             before = tree(fx.root)
             for tool, args, stdin in corpus(fx):
-                if tool in WRITERS or not self.g[tool]["idempotent"]:
+                if tool in WRITERS or tool in MOVERS or not self.g[tool]["idempotent"]:
                     continue
                 first = run(tool, *args, stdin=stdin, cwd=fx.root)
                 second = run(tool, *args, stdin=stdin, cwd=fx.root)

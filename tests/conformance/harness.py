@@ -19,7 +19,7 @@ import jsonschema
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BIN = pathlib.Path(os.environ.get("TOOLBOX_BIN", ROOT / "build"))
-TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list"]
+TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move"]
 STREAMS = {"seek", "hash", "list"}
 TRAPS = {132, 134, 136, 139, -4, -6, -8, -11}
 

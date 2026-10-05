@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list"]
+TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move"]
 REPO = "https://github.com/alpibrusl/lexsys-tools"
 
 CSS = """
@@ -338,7 +338,7 @@ def index_page(readme, tools):
     # The README's own tool table stays; the cards come first, as the way in.
     first_h2 = body.find("<h2")
     body = body[:first_h2] + f'<h2 id="tools-at-a-glance">The tools at a glance</h2><div class="cards">{cards}</div>' + body[first_h2:]
-    return page("lexsys-tools", body, description="An agent toolbox in lex-sys: seven unix-like tools with a JSON contract.")
+    return page("lexsys-tools", body, description="An agent toolbox in lex-sys: nine unix-like tools with a JSON contract.")
 
 
 def main():

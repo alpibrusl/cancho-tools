@@ -50,6 +50,12 @@ std = true
 out = "build/hash"
 
 [[bin]]
+name = "move"
+sources = ["contract", "tools/move", "generated/move"]
+std = true
+out = "build/move"
+
+[[bin]]
 name = "list"
 sources = ["contract", "tools/list", "generated/list"]
 std = true

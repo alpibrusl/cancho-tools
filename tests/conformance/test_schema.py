@@ -49,6 +49,13 @@ def corpus(fx):
                  ["--root", r, "--old", "zzz", "--new", "b", "plain.txt"], ["--root", r, "--new", "b", "plain.txt"],
                  ["--root", r, "--old", "gamma", "--new", "G", "--dry-run", "latin1.txt"], ["--root", r, "--old", "a", "--new", "A", "--expect", "6", "--max-diff-lines", "0", "--dry-run", "plain.txt"]]:
         out.append(("replace", args, b""))
+    # `move`: dry runs and refusals only, so the shared fixture is the same after each.
+    for args in [["--root", r, "--dry-run", "plain.txt", "moved.txt"], ["--root", r, "--dry-run", "sub", "tree"],
+                 ["--root", r, "--dry-run", "--if-sha256", sha256(fx.path("plain.txt").read_bytes()), "plain.txt", "moved.txt"],
+                 ["--root", r, "--dry-run", "link.txt", "link2.txt"], ["--root", r, "plain.txt", "crlf.txt"],
+                 ["--root", r, "--if-sha256", "0" * 64, "plain.txt", "moved.txt"], ["--root", r, "missing.txt", "moved.txt"],
+                 ["--root", r, "plain.txt", "a/b"], ["--root", r, "plain.txt"], []]:
+        out.append(("move", args, b""))
     return out
 
 

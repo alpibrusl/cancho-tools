@@ -1,6 +1,6 @@
 # lexsys-tools
 
-Eight small command-line tools for AI agents, written in
+Nine small command-line tools for AI agents, written in
 [lex-sys](https://github.com/alpibrusl/lex-sys). They do the everyday work
 of `grep`, `ls`/`find`, `sed -n`, `jq`, `sort | uniq -c`, `sha256sum` and a
 careful `cp`, but every answer is JSON, every error names a rule and often comes
@@ -17,6 +17,7 @@ the compiler proved it needs.
 | [`hash`](#hash-sha-256-or-sha-512) | `sha256sum`, `sha512sum` | file digests of any size, `--verify` |
 | [`write`](#write-replace-a-file-only-if-it-is-what-you-think) | `cp`, `>`, `tee` | replace a file atomically, only if it holds what the caller says |
 | [`replace`](#replace-change-exact-text) | `sed -i` | replace exact text an expected number of times, atomically |
+| [`move`](#move-rename-in-place-never-over-anything) | `mv` | rename a file or directory in place, never over an existing name |
 
 **Site:** <https://alpibrusl.github.io/lexsys-tools/> has one page per tool,
 generated from the tool itself: flags, rules, exit codes, authority, JSON
@@ -33,7 +34,7 @@ what came back. Each difference below is about that gap:
 |---|---|
 | **parses text.** `grep` prints `path:line:text`, which is ambiguous when a file name holds a `:`; a match in a binary file becomes the sentence `binary file matches`; bytes that are not UTF-8 reach the model raw or replaced. | **reads records with a schema.** Every output is JSON against a published schema (`seek.v1` …). A path, a line number and a byte offset are fields. Binary content is flagged and still searched. Bytes that are not UTF-8 come back as `{"b64": …}`, so nothing is lost. |
 | **cannot tell a short answer from a cut one.** Output that stopped because of a pipe, a timeout or a kill looks like output that ended. | **knows when it has everything.** A stream ends with an `end` record, so a stream without one was cut short. A capped answer says `truncated: true` and gives the `next` cursor (`--skip`, `next.line`) to continue exactly where it stopped. |
-| **guesses from exit codes and English.** `grep` exits 2 when one of three files is missing even though it printed matches; `jq` answers `Cannot index number with number`, exit 5. | **branches on a rule.** Each error is `{code, rule, message, hint, repair, detail}`, with 37 stable rule tags (`io.not-found`, `path.dotdot`, `precondition.hash-mismatch` …) and exit codes with one meaning each. One bad file is an error record in the stream, and the other files are still searched. |
+| **guesses from exit codes and English.** `grep` exits 2 when one of three files is missing even though it printed matches; `jq` answers `Cannot index number with number`, exit 5. | **branches on a rule.** Each error is `{code, rule, message, hint, repair, detail}`, with 38 stable rule tags (`io.not-found`, `path.dotdot`, `precondition.hash-mismatch` …) and exit codes with one meaning each. One bad file is an error record in the stream, and the other files are still searched. |
 | **has to work out the fix.** | **is often handed the fix.** When the correction is mechanical, `repair` is an argv to run as it stands, and a repair never widens what the tool may touch. |
 | **overwrites blindly.** `sed -i`, `>` and `cp` replace whatever is there, even if the file changed since the agent read it, or another agent is writing it. | **states what it expects.** `write` needs `--create` or `--if-sha256` of the content it read. `replace` needs the text to occur exactly `--expect` times. A stale view is `precondition.hash-mismatch`, not a lost edit. Writes are atomic and locked (of two racing writers exactly one wins), idempotent (a retried write that already landed answers `changed: false`), and `--dry-run` shows the lines it would change (a bounded diff) without changing them. |
 | **can be led out of its workspace.** A path with `..`, an absolute path or a symbolic link reaches anything the process can. | **stays under `--root`.** `..`, absolute and outside paths are refused before anything is opened, and no link below the root is followed (`path.symlink`). |
@@ -119,7 +120,7 @@ seek skill               # a SKILL.md an agent can load
 
 ## As an MCP server
 
-`server/mcp.ls` serves the eight tools to an agent runtime over MCP (stdio,
+`server/mcp.ls` serves the nine tools to an agent runtime over MCP (stdio,
 protocol `2025-06-18`): `tools/list` is generated from each tool's
 `introspect`, and a `tools/call` runs the binary and answers with its output
 byte for byte (and, for the five tools that print one JSON document, as
@@ -337,10 +338,39 @@ nothing is written. `--if-sha256` adds a guard on the whole file. Like
 `write`, it is atomic and locked, and `--dry-run` makes no mutating system
 call.
 
+### `move`: rename in place, never over anything
+
+```console
+$ move --root . --dry-run notes.txt notes-2026.txt        # exit 9
+{"ok":true,"command":"move","schema":"move.v1","data":{"path":"notes.txt","to":"notes-2026.txt","changed":false,"kind":"file","sha256":null},
+ "dry_run":true,"planned_actions":[{"op":"move","path":"notes.txt","to":"notes-2026.txt","kind":"file","sha256":null}],…}
+
+$ move --root . notes.txt todo.txt                        # todo.txt exists: exit 5, nothing changed
+{"ok":false,"command":"move","schema":"move.v1","error":{"code":"CONFLICT","rule":"conflict.exists","message":"the new name is taken, and move never replaces a name",…}}
+```
+
+`mv` replaces its destination without a word, the way `sed -i` and `>` replace
+a file. `move` never does: an existing name is `conflict.exists`. The new
+name is one component in **the same directory** (`path.bad-name` otherwise;
+a move to another directory is not offered, because the language's rename is
+one directory's). `--if-sha256` says the file is what you read
+(`precondition.hash-mismatch`, exit 5), and makes a retry safe: when the
+source is gone and the destination holds exactly that content, the move had
+landed, and the answer is `changed: false`. A directory or a link is renamed
+as itself and never followed; a link in a directory of the path is
+`path.symlink`. Both names are locked (the `.lexsys-lock` sidecar `write`
+uses), the rename is one `renameat`, and `--dry-run` makes no mutating call.
+
+**The limit, measured.** The lock stops other toolbox processes, not one that
+takes no lock: a process creating the destination at a random moment during
+the move lost its file in 55 of 20,000 trials (0.28%), and in 100 of 100 when
+the rename was delayed (`scripts/move_race.py`). Closing it needs a no-replace
+rename the language does not have yet.
+
 ## Errors you can act on
 
 Every error is data: `{code, rule, message, hint, repair, detail}`. Match on
-`rule`; the 37 rules are listed by `introspect` and on the site. When a fix
+`rule`; the 38 rules are listed by `introspect` and on the site. When a fix
 can be applied mechanically, `repair` is a command to run as it stands:
 
 ```console
@@ -399,6 +429,7 @@ clock, foreign code or the environment.
 | `seek`, `peek`, `hash` | the same, plus `file_read` |
 | `jsonq`, `tally` | the same, plus `io_read` (they also read standard input) |
 | `replace` | `args, dir_read, dir_write, err_write, file_read, file_write, fs_read(""), heap, io_write` |
+| `move` | the same as `replace` |
 | `write` | the same as `replace`, plus `io_read` |
 
 `fs_read("")` names the *kind* of access, not its extent. Extent comes from
@@ -489,7 +520,7 @@ Results are in [`docs/history.md`](docs/history.md).
 
 ## Status and limits
 
-* **Done:** all eight tools, the contract, the authority gate, the
+* **Done:** all nine tools, the contract, the authority gate, the
   benchmark harness, symlink-safe `--root`, `list` on lex-sys's directory
   listing ([lex-sys#222](https://github.com/alpibrusl/lex-sys/issues/222)),
   and the MCP server ([#10](https://github.com/alpibrusl/lexsys-tools/issues/10),

@@ -28,6 +28,8 @@ SETUP = {
     "tally": ([], ["words.txt"]),
     "hash": ([], ["plain.txt"]),
     "list": ([], ["sub"]),
+    # Two operands, and a dry run so that none of the counts moves a file.
+    "move": (["--dry-run"], ["plain.txt", "moved.txt"]),
 }
 
 # What a tool that reads standard input is given when it has no operand.

@@ -1,0 +1,314 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alpibrusl/lexsys-tools/schemas/move.v1.json",
+  "title": "move.v1",
+  "description": "One JSON object on one line. ok is false exactly when errors is present; error is its first element.",
+  "type": "object",
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "command": {
+      "const": "move"
+    },
+    "schema": {
+      "const": "move.v1"
+    },
+    "data": {
+      "$ref": "#/$defs/data"
+    },
+    "dry_run": {
+      "const": true
+    },
+    "planned_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "op": {
+            "const": "move"
+          },
+          "path": {
+            "$ref": "#/$defs/text_or_bytes"
+          },
+          "to": {
+            "$ref": "#/$defs/text_or_bytes"
+          },
+          "kind": {
+            "enum": [
+              "file",
+              "directory",
+              "link",
+              "other"
+            ]
+          },
+          "sha256": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            ]
+          }
+        },
+        "required": [
+          "op",
+          "path",
+          "to",
+          "kind",
+          "sha256"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/error"
+      },
+      "minItems": 1
+    },
+    "meta": {
+      "$ref": "#/$defs/meta"
+    }
+  },
+  "required": [
+    "ok",
+    "command",
+    "schema",
+    "meta"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "error"
+              ]
+            },
+            {
+              "required": [
+                "errors"
+              ]
+            }
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "error",
+          "errors"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "text_or_bytes": {
+      "description": "UTF-8 text as a string; other bytes as base64 (RFC 4648 section 4, padded).",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "b64": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9+/]*={0,2}$"
+            }
+          },
+          "required": [
+            "b64"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "repair": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "retry"
+            },
+            "argv": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "kind",
+            "argv"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "none"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "choose"
+            },
+            "options": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "argv": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "argv"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "options"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "GENERAL_ERROR",
+            "INVALID_ARGS",
+            "NOT_FOUND",
+            "PERMISSION_DENIED",
+            "CONFLICT",
+            "PRECONDITION_FAILED"
+          ]
+        },
+        "rule": {
+          "type": "string",
+          "pattern": "^[a-z]+\\.[a-z0-9-]+$"
+        },
+        "message": {
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repair": {
+          "$ref": "#/$defs/repair"
+        },
+        "detail": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "code",
+        "rule",
+        "message",
+        "hint",
+        "repair",
+        "detail"
+      ],
+      "additionalProperties": false
+    },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/text_or_bytes"
+        },
+        "to": {
+          "$ref": "#/$defs/text_or_bytes"
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory",
+            "link",
+            "other"
+          ]
+        },
+        "sha256": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "to",
+        "changed",
+        "kind",
+        "sha256"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

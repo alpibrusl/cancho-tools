@@ -533,9 +533,17 @@ def main():
     r.add_argument("--out", default="bench-out")
     r.add_argument("--run-as", default="", help="run the agent as this unprivileged account (docs/agent-bench.md §11.4)")
     r.add_argument("--agent-bin", default="", help="with --run-as: a directory that account can read, holding the agent")
+    f = sub.add_parser("preflight", help="§11.4: check the isolation of an identity, and run nothing")
+    f.add_argument("--run-as", required=True)
+    f.add_argument("--agent-bin", default="")
     p = sub.add_parser("report")
     p.add_argument("results")
     a = ap.parse_args()
+    if a.cmd == "preflight":
+        problems = check_identity(Identity(a.run_as, a.agent_bin))
+        print("\n".join(problems) or "the preflight found no escape: as %s it cannot read an operator-only file, list or write "
+              "the operator's home, use docker or sudo, and it can run the agent and the tools" % a.run_as)
+        sys.exit(1 if problems else 0)
     if a.cmd == "verify":
         problems = verify(bin_dir())
         print("\n".join(problems) or "every task: the reference solutions pass, doing nothing fails, the unsafe solution fails")

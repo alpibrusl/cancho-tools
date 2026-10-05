@@ -52,10 +52,20 @@ second asker.
   and a remove are native; a **cross-directory move is not** without a new
   compiler builtin, and `move` does not pretend to be one.
 * **A rename replaces what is there.** POSIX `renameat` silently overwrites an
-  existing destination, so a guarded move has to look first (§4). **Open:** a
-  race between the look and the rename is closed against the tools (the writers'
-  lock sidecar) and not against an arbitrary process; `write` has the same limit.
-  The gate in §4 measures it rather than asserting it.
+  existing destination, so a guarded move has to look first (§4). The look and the
+  rename are two calls, so a process that takes no lock can create the destination
+  between them. ~~**Open:** a race ... closed against the tools and not against an
+  arbitrary process.~~ **Measured (`move`, `scripts/move_race.py`, #24):** a creator
+  arriving at a random moment during the move lost its file in **55 of 20,000** trials
+  (0.28%), and in **100 of 100** with the rename delayed 30 ms under `strace`. So the
+  limit is real: the lock stops other toolbox processes and nothing else. Closing it
+  needs a no-replace rename (`renameat2` `RENAME_NOREPLACE`, `renamex_np`
+  `RENAME_EXCL`), which `dir_rename` does not offer; that is a cancho addition, filed.
+* **A name has to leave room for its lock.** The sidecar `<name>.lexsys-lock` is 12
+  bytes longer than the name, so a name over 243 bytes cannot be locked; cancho's
+  `dir_open_append` answers `EINVAL` for it, not the kernel's `ENAMETOOLONG`. `move`
+  refuses such a name with a rule (`path.bad-name`, or `path.too-long` for the source);
+  `write` has the same limit and a generic failure for it.
 * **`narrow` takes a literal** (cancho `docs/processes.md` §7.1, measured): the
   directory `run` may start programs from is a source literal, baked at build as
   the MCP server's is (`scripts/mcp.py build --bin`).
@@ -116,6 +126,11 @@ run [--root DIR] [--timeout-ms N] [--max-output N] [--stdin | --stdin-file PATH]
   `write`'s is.
 
 ## 4. `move`: a rename, a tombstone, and nothing across directories
+
+> **Built, rename only: #24.** `--remove` (the tombstone) waits for a reading of D15 (§0). The
+> mutants found two defects the design did not foresee: `--if-sha256` on a link was
+> reported as a directory, and on a FIFO the hash would have blocked on `open`, so a
+> hash is now asked only of a regular file and every other kind is refused before any open.
 
 ```
 move [--root DIR] [--if-sha256 HEX] [--dry-run] PATH NEWNAME          # rename in place

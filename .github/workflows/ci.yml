@@ -70,6 +70,10 @@ jobs:
         working-directory: tools
         run: python3 scripts/demo_race.py --check
 
+      - name: The published contract package matches contract/ (docs/next-tools.md section 5)
+        working-directory: tools
+        run: python3 scripts/package.py --check
+
       - name: The MCP server's tool definitions are generated from introspect (docs/mcp.md)
         working-directory: tools
         run: python3 scripts/mcp.py --check

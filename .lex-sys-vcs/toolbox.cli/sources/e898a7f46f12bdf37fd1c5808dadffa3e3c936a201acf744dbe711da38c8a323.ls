@@ -1,0 +1,538 @@
+edition 5;
+
+module toolbox.cli;
+
+// `toolbox.cli` -- one table per tool drives the parser, `introspect` and
+// `skill` (D11), so there is no second list to drift.
+//
+// lex-sys `docs/flags.md` §1 measured the failure this exists to refuse: a
+// program that answered `--decode` by encoding and exiting 0. Here a flag
+// that is not in the table is `args.unknown-flag`, never ignored; a flag
+// the table says is boolean refuses a value; a flag that takes one refuses
+// to go without; a flag given twice is refused rather than one of the two
+// silently winning.
+//
+// The table is one string, because a literal may not span lines: entries
+// separated by `;`, fields by `|`:
+//
+//     name|short|kind|role|default|help
+//
+// `short` is one letter or empty. `kind` is `bool`, `nat` (a decimal of at
+// most 18 digits, so it cannot overflow), `hex64` (a SHA-256 digest in
+// lowercase hex), `text` (not empty), `any` (empty allowed), `path`, or `choice:a/b/c`. `role` is `none`,
+// `path-read`, `path-write`, `root` or `guard` -- what the flag does to
+// the tool's reach, which a mediator reads (D13) and which decides whether
+// a repair may suggest it (D6 rule 1: only `none`). `default` is the value
+// when the flag is absent, for `nat`, `text` and `choice`; the getters
+// below read it from the table, so it is written once.
+
+import std.buffer;
+import std.bytes;
+import std.flags;
+import std.json;
+import std.vec;
+import toolbox.fail;
+import toolbox.sha;
+
+// Where each flag's value is: three ints per table entry -- given (0/1),
+// the argument index of the value (-1 for a boolean), and the offset in
+// that argument where the value starts. Values are `&static` slices of
+// the arguments, so nothing is copied.
+pub res struct Parsed {
+    slots: Box[[int]],
+    operands: vec.Vec[int],
+}
+
+// ---- the table -----------------------------------------------------------
+
+pub fn entries(table: &static [byte]) -> [] int {
+    if len(table) == 0 {
+        return 0;
+    }
+    return bytes.count_byte(table, ';') + 1;
+}
+
+pub fn entry(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(table, ';', i + 1);
+}
+
+pub fn name_of(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(entry(table, i), '|', 1);
+}
+
+pub fn short_of(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(entry(table, i), '|', 2);
+}
+
+pub fn kind_of(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(entry(table, i), '|', 3);
+}
+
+pub fn role_of(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(entry(table, i), '|', 4);
+}
+
+pub fn default_of(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(entry(table, i), '|', 5);
+}
+
+pub fn help_of(table: &static [byte], i: int) -> [] &static [byte] {
+    return bytes.field(entry(table, i), '|', 6);
+}
+
+pub fn takes_value(table: &static [byte], i: int) -> [] bool {
+    return !bytes.equal(kind_of(table, i), "bool");
+}
+
+pub fn index_of[&n](table: &static [byte], name: &n [byte]) -> [] int {
+    var i = 0;
+    let n = entries(table);
+    while i < n {
+        if bytes.equal(name_of(table, i), name) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+fn index_of_short(table: &static [byte], letter: int) -> [] int {
+    var i = 0;
+    let n = entries(table);
+    while i < n {
+        let s = short_of(table, i);
+        if len(s) == 1 && int_of(s[0]) == letter {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// ---- values --------------------------------------------------------------
+
+// A non-negative decimal of 1 to 18 digits, or -1. Eighteen digits is the
+// longest that cannot overflow an `int`, so no input reaches the overflow
+// trap (M4).
+pub fn parse_nat[&t](text: &t [byte]) -> [] int {
+    if len(text) == 0 || len(text) > 18 {
+        return 0 - 1;
+    }
+    var n = 0;
+    var i = 0;
+    while i < len(text) {
+        let c = int_of(text[i]);
+        if !bytes.is_digit(c) {
+            return 0 - 1;
+        }
+        n = n * 10 + bytes.digit_of(c);
+        i = i + 1;
+    }
+    return n;
+}
+
+// Whether `value` is one of `choice:a/b/c`'s choices.
+fn in_choice[&k, &v](kind: &k [byte], value: &v [byte]) -> [] bool {
+    let list = kind[7..len(kind)];
+    let n = bytes.count_byte(list, '/') + 1;
+    var i = 1;
+    while i <= n {
+        if bytes.equal(bytes.field(list, '/', i), value) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn valid[&v](kind: &static [byte], value: &v [byte]) -> [] bool {
+    if bytes.equal(kind, "nat") {
+        return parse_nat(value) >= 0;
+    }
+    if bytes.equal(kind, "hex64") {
+        return sha.is_hex(value, 64);
+    }
+    if bytes.starts_with(kind, "choice:") {
+        return in_choice(kind, value);
+    }
+    if bytes.equal(kind, "any") {
+        return true;
+    }
+    return len(value) > 0;
+}
+
+// What a kind expects, in words, for an `args.bad-value` detail.
+fn expected(kind: &static [byte]) -> [] &static [byte] {
+    if bytes.equal(kind, "nat") {
+        return "a non-negative decimal integer of at most 18 digits";
+    }
+    if bytes.equal(kind, "hex64") {
+        return "64 lowercase hexadecimal digits (a SHA-256 digest)";
+    }
+    if bytes.starts_with(kind, "choice:") {
+        return kind[7..len(kind)];
+    }
+    return "a non-empty value";
+}
+
+// ---- suggestions ---------------------------------------------------------
+
+// Levenshtein distance, for names of at most 64 bytes; 99 otherwise.
+fn distance[&a, &b](x: &a [byte], y: &b [byte]) -> [] int {
+    if len(x) > 64 || len(y) > 64 {
+        return 99;
+    }
+    var result = 0;
+    region r {
+        let prev = alloc_slice[r](len(y) + 1, 0);
+        let cur = alloc_slice[r](len(y) + 1, 0);
+        var j = 0;
+        while j <= len(y) {
+            prev[j] = j;
+            j = j + 1;
+        }
+        var i = 1;
+        while i <= len(x) {
+            cur[0] = i;
+            j = 1;
+            while j <= len(y) {
+                var cost = 1;
+                if int_of(x[i - 1]) == int_of(y[j - 1]) {
+                    cost = 0;
+                }
+                var best = prev[j - 1] + cost;
+                if prev[j] + 1 < best {
+                    best = prev[j] + 1;
+                }
+                if cur[j - 1] + 1 < best {
+                    best = cur[j - 1] + 1;
+                }
+                cur[j] = best;
+                j = j + 1;
+            }
+            j = 0;
+            while j <= len(y) {
+                prev[j] = cur[j];
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        result = prev[len(y)];
+    }
+    return result;
+}
+
+// The one table flag nearest `name`, within distance 2, that a repair may
+// suggest (role `none`); -1 when there is none or two are equally near.
+pub fn nearest[&n](table: &static [byte], name: &n [byte]) -> [] int {
+    var best = 0 - 1;
+    var best_d = 3;
+    var tied = false;
+    var i = 0;
+    let n = entries(table);
+    while i < n {
+        if bytes.equal(role_of(table, i), "none") {
+            let d = distance(name, name_of(table, i));
+            if d < best_d {
+                best = i;
+                best_d = d;
+                tied = false;
+            } else if d == best_d {
+                tied = true;
+            }
+        }
+        i = i + 1;
+    }
+    if tied {
+        return 0 - 1;
+    }
+    return best;
+}
+
+// ---- parsing -------------------------------------------------------------
+
+// Where the value of the flag just stepped over is: `(cursor, argument,
+// offset)`, or argument -1 when the arguments ran out. `std.flags.value`'s
+// own rules, answering a position instead of a slice so the parser can
+// keep it: the rest of a bundled run (`-m5`), a long flag's `=value`, or
+// the whole next argument.
+fn value_at[&g](args: &g Args, c: flags.Cursor) -> [args] (flags.Cursor, int, int) {
+    if c.offset > 0 && c.at < arg_count(args) {
+        let current = arg(args, c.at);
+        if c.offset < len(current) {
+            return (flags.Cursor { at: c.at + 1, offset: 0, only_operands: c.only_operands }, c.at, c.offset);
+        }
+    }
+    if c.at > 0 && c.at <= arg_count(args) {
+        let previous = arg(args, c.at - 1);
+        if len(previous) > 2 && int_of(previous[0]) == '-' && int_of(previous[1]) == '-' {
+            var i = 2;
+            while i < len(previous) {
+                if int_of(previous[i]) == '=' {
+                    return (c, c.at - 1, i + 1);
+                }
+                i = i + 1;
+            }
+        }
+    }
+    if c.at < arg_count(args) {
+        return (flags.Cursor { at: c.at + 1, offset: 0, only_operands: c.only_operands }, c.at, 0);
+    }
+    return (c, 0 - 1, 0);
+}
+
+fn flag_error[&h, &f](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], flag: &f [byte], at: int) -> [heap] fail.Errors {
+    var w = fail.open(heap, rule, message, hint);
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, "flag");
+    w = json.put_string(heap, w, flag);
+    w = json.put_key(heap, w, "position");
+    w = json.put_int(heap, w, at);
+    return fail.add(heap, e, w);
+}
+
+fn dashed[&h, &n](heap: &!h Heap, name: &n [byte]) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, len(name) + 2);
+    b = buffer.append(heap, b, "--");
+    return buffer.append(heap, b, name);
+}
+
+fn unknown_long[&h, &g](heap: &!h Heap, e: fail.Errors, args: &g Args, table: &static [byte], at: int, name: &static [byte]) -> [heap, args] fail.Errors {
+    let whole = arg(args, at);
+    let near = nearest(table, name);
+    var w = fail.open(heap, "args.unknown-flag", "this flag is not one the tool takes", "the tool's flags are listed by `introspect`; POSIX spellings are not promised");
+    if near >= 0 {
+        // The argument as typed with only the name corrected: whatever
+        // followed `=` is kept.
+        var fixed = dashed(heap, name_of(table, near));
+        fixed = buffer.append(heap, fixed, whole[2 + len(name)..len(whole)]);
+        borrow fixed as &f in {
+            w = fail.retry_replacing(heap, w, args, at, buffer.bytes(f));
+        }
+        buffer.drop(heap, fixed);
+    } else {
+        w = fail.no_repair(heap, w);
+    }
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, "flag");
+    var shown = dashed(heap, name);
+    borrow shown as &s in {
+        w = json.put_string(heap, w, buffer.bytes(s));
+    }
+    buffer.drop(heap, shown);
+    w = json.put_key(heap, w, "position");
+    w = json.put_int(heap, w, at);
+    if near >= 0 {
+        w = json.put_key(heap, w, "nearest");
+        var spelled = dashed(heap, name_of(table, near));
+        borrow spelled as &s in {
+            w = json.put_string(heap, w, buffer.bytes(s));
+        }
+        buffer.drop(heap, spelled);
+    }
+    return fail.add(heap, e, w);
+}
+
+// Record flag `i`'s value, or refuse it.
+fn take[&h, &g, &s](heap: &!h Heap, e: fail.Errors, args: &g Args, table: &static [byte], slots: &!s [int], i: int, shown: &static [byte], flag_at: int, value_arg: int, value_from: int) -> [heap, args] fail.Errors {
+    if slots[3 * i] != 0 {
+        return flag_error(heap, e, "args.duplicate-flag", "this flag was given more than once", "give each flag once", shown, flag_at);
+    }
+    if value_arg < 0 {
+        return flag_error(heap, e, "args.missing-value", "this flag takes a value and none followed it", "", shown, flag_at);
+    }
+    let value = arg(args, value_arg)[value_from..len(arg(args, value_arg))];
+    let kind = kind_of(table, i);
+    if !valid(kind, value) {
+        var w = fail.open(heap, "args.bad-value", "this flag's value is not of the kind it takes", "");
+        w = fail.no_repair(heap, w);
+        w = fail.detail_open(heap, w);
+        w = json.put_key(heap, w, "flag");
+        w = json.put_string(heap, w, shown);
+        w = json.put_key(heap, w, "value");
+        w = json.put_string(heap, w, value);
+        w = json.put_key(heap, w, "expected");
+        w = json.put_string(heap, w, expected(kind));
+        return fail.add(heap, e, w);
+    }
+    slots[3 * i] = 1;
+    slots[3 * i + 1] = value_arg;
+    slots[3 * i + 2] = value_from;
+    return e;
+}
+
+// Walk the command line against `table`. Every problem is an error in
+// `e`, in argument order; the walk goes on after one, so an invocation
+// with two mistakes reports both (D5).
+pub fn parse[&h, &g](heap: &!h Heap, args: &g Args, table: &static [byte], errs: fail.Errors) -> [heap, args] (Parsed, fail.Errors) {
+    let n = entries(table);
+    let slots = box_slice(heap, 3 * n + 3, 0);
+    var operands = vec.empty(heap, 8, 0);
+    var e = errs;
+    borrow mut slots as &!sw in {
+        let s = contents(sw);
+        var c = flags.start();
+        var going = true;
+        while going {
+            let before = c;
+            let (next, step) = flags.step(args, c);
+            c = next;
+            match step {
+                flags.Arg::Long(name) => {
+                    let i = index_of(table, name);
+                    let whole = arg(args, before.at);
+                    let has_equals = len(whole) > 2 + len(name);
+                    if i < 0 {
+                        e = unknown_long(heap, e, args, table, before.at, name);
+                    } else if !takes_value(table, i) {
+                        if has_equals {
+                            e = flag_error(heap, e, "args.unexpected-value", "this flag takes no value", "write the flag alone", whole, before.at);
+                        } else if s[3 * i] != 0 {
+                            e = flag_error(heap, e, "args.duplicate-flag", "this flag was given more than once", "give each flag once", whole, before.at);
+                        } else {
+                            s[3 * i] = 1;
+                            s[3 * i + 1] = 0 - 1;
+                        }
+                    } else {
+                        let (after, value_arg, value_from) = value_at(args, c);
+                        c = after;
+                        e = take(heap, e, args, table, s, i, whole[0..2 + len(name)], before.at, value_arg, value_from);
+                    }
+                }
+                flags.Arg::Short(letter) => {
+                    let i = index_of_short(table, letter);
+                    let whole = arg(args, before.at);
+                    // The letter as typed, `-x`: inside a bundle it is the
+                    // dash and this one letter.
+                    var at = before.offset;
+                    if at == 0 {
+                        at = 1;
+                    }
+                    if i < 0 {
+                        var b = buffer.empty(heap, 2);
+                        b = buffer.push(heap, b, byte_of('-'));
+                        b = buffer.push(heap, b, whole[at]);
+                        borrow b as &r in {
+                            e = flag_error(heap, e, "args.unknown-flag", "this flag is not one the tool takes", "the tool's flags are listed by `introspect`; POSIX spellings are not promised", buffer.bytes(r), before.at);
+                        }
+                        buffer.drop(heap, b);
+                    } else if !takes_value(table, i) {
+                        if s[3 * i] != 0 {
+                            e = flag_error(heap, e, "args.duplicate-flag", "this flag was given more than once", "give each flag once", whole, before.at);
+                        } else {
+                            s[3 * i] = 1;
+                            s[3 * i + 1] = 0 - 1;
+                        }
+                    } else {
+                        let (after, value_arg, value_from) = value_at(args, c);
+                        c = after;
+                        e = take(heap, e, args, table, s, i, whole, before.at, value_arg, value_from);
+                    }
+                }
+                flags.Arg::Operand(text) => {
+                    // `step` moved past exactly this argument.
+                    operands = vec.push(heap, operands, c.at - 1);
+                }
+                flags.Arg::Done => {
+                    going = false;
+                }
+            }
+        }
+    }
+    return (Parsed { slots: slots, operands: operands }, e);
+}
+
+pub fn drop[&h](heap: &!h Heap, p: Parsed) -> [heap] int {
+    let Parsed { slots, operands } = p;
+    unbox_slice(heap, slots);
+    return vec.drop(heap, operands);
+}
+
+// ---- reading what was parsed ---------------------------------------------
+
+pub fn has[&p, &n](p: &p Parsed, table: &static [byte], name: &n [byte]) -> [] bool {
+    let i = index_of(table, name);
+    if i < 0 {
+        return false;
+    }
+    return contents(p.slots)[3 * i] != 0;
+}
+
+// The value given, or the table's default.
+pub fn text[&g, &p, &n](args: &g Args, p: &p Parsed, table: &static [byte], name: &n [byte]) -> [args] &static [byte] {
+    let i = index_of(table, name);
+    if i < 0 {
+        return "";
+    }
+    let s = contents(p.slots);
+    if s[3 * i] == 0 || s[3 * i + 1] < 0 {
+        return default_of(table, i);
+    }
+    let whole = arg(args, s[3 * i + 1]);
+    return whole[s[3 * i + 2]..len(whole)];
+}
+
+// A `nat` flag's value, or its default; -1 if neither is a number.
+pub fn nat[&g, &p, &n](args: &g Args, p: &p Parsed, table: &static [byte], name: &n [byte]) -> [args] int {
+    return parse_nat(text(args, p, table, name));
+}
+
+// The argument index a flag's value came from, for a repair that
+// rewrites it; -1 when the flag was not given.
+pub fn value_index[&p, &n](p: &p Parsed, table: &static [byte], name: &n [byte]) -> [] int {
+    let i = index_of(table, name);
+    if i < 0 {
+        return 0 - 1;
+    }
+    let s = contents(p.slots);
+    if s[3 * i] == 0 {
+        return 0 - 1;
+    }
+    return s[3 * i + 1];
+}
+
+// Whether the value of `name` started at the beginning of its argument
+// (`--flag value`), so that replacing that argument replaces only the
+// value.
+pub fn value_is_whole[&p, &n](p: &p Parsed, table: &static [byte], name: &n [byte]) -> [] bool {
+    let i = index_of(table, name);
+    if i < 0 {
+        return false;
+    }
+    return contents(p.slots)[3 * i + 2] == 0;
+}
+
+pub fn operand_count[&p](p: &p Parsed) -> [] int {
+    return vec.size(p.operands);
+}
+
+pub fn operand_index[&p](p: &p Parsed, k: int) -> [] int {
+    return vec.get(p.operands, k);
+}
+
+pub fn operand[&g, &p](args: &g Args, p: &p Parsed, k: int) -> [args] &static [byte] {
+    return arg(args, vec.get(p.operands, k));
+}
+
+// ---- subcommands ---------------------------------------------------------
+
+// `tool introspect [--output json]` is 1, `tool skill` is 2, anything
+// else 0 (D11). A pattern or path that is literally `introspect` is
+// written after `--`.
+pub fn subcommand[&g](args: &g Args) -> [args] int {
+    let n = arg_count(args);
+    if n < 2 {
+        return 0;
+    }
+    let first = arg(args, 1);
+    if bytes.equal(first, "introspect") {
+        if n == 2 || n == 4 && bytes.equal(arg(args, 2), "--output") && bytes.equal(arg(args, 3), "json") || n == 3 && bytes.equal(arg(args, 2), "--output=json") {
+            return 1;
+        }
+    }
+    if bytes.equal(first, "skill") && n == 2 {
+        return 2;
+    }
+    return 0;
+}

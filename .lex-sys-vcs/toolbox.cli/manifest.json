@@ -1,8 +1,8 @@
 {
   "entries": {
-    "002b4f8e4924ed13cf4b11e7c3a8bd1c739fa894242634265c6d54ee0b71fd04": {
-      "name": "take",
-      "stage_id": "45d9382b8fefa687aa4f07f9babff1bd333314593256661e69d4644754612567",
+    "014b04a0846574190e7efe82e600a1ea4bcc913677921af3d74c18f530441aed": {
+      "name": "parse",
+      "stage_id": "0acf4ccd2a6aaef510bf21cec2934e95a805413fb5868e20ce079c57fc10cde4",
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     },
@@ -30,6 +30,12 @@
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     },
+    "21382f39aa78003dcccb1601fcd39c64bd47c5fb970a1ae2833a0848c1d6a612": {
+      "name": "unknown_long",
+      "stage_id": "be494fa065934a02b6da631891ef856115a4a02cb388e4a7d98e1eb33c6b9984",
+      "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
+      "uses_std": true
+    },
     "2276b4c4adaf9800e7bed27aeddf50cc1c14c931ca1a9200a8b2ab285e84ada2": {
       "name": "text",
       "stage_id": "3d3d7a2f414dc7b39ea961cdd005a1fcbb0f1c8f753bc1f914dc38460008c00c",
@@ -45,6 +51,12 @@
     "2faf0ff648cbcb13a016e0eaba3100bbec4ee133d98b0670bfdeb47a56a32656": {
       "name": "subcommand",
       "stage_id": "af0a720b9fb917864112f50d66365a96b96d2b4b982b1a17606a76620f6e721d",
+      "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
+      "uses_std": true
+    },
+    "438115c584dd451f98f5787852f0abc92872712c96876fdc552fc9ae465c3b0a": {
+      "name": "flag_error",
+      "stage_id": "92bc7cf9e82cf467c32c75a58c5de304d83d540e7a3e70ed460372dd713040f9",
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     },
@@ -75,6 +87,12 @@
     "86e65f8ad5cba46a650a0319bde17984e72cd95d8a004ec55433621d15a08373": {
       "name": "kind_of",
       "stage_id": "a8bfdb4db08ef11f51ce77246806785544dd0579c44488701d06903925917715",
+      "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
+      "uses_std": true
+    },
+    "89ff4dad262347789f837b72a99c68022da75509f8c34b90e0391142ca71c0ec": {
+      "name": "take",
+      "stage_id": "ddc54e3ea93a5590762b95ecf0dceaddb0ff20b66a8b62ae3c0f40930a2b51e6",
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     },
@@ -144,12 +162,6 @@
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     },
-    "c1b9bba7514bd03d000a5dcadc635a8eee451c474c9af9b0a0e459a20b20eb07": {
-      "name": "flag_error",
-      "stage_id": "9035ea752a052b2a3dece4dd5390395e6854ca027f2824e9b459c43a3c5b782d",
-      "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
-      "uses_std": true
-    },
     "c421d51fd58205ab5ea7d483ab8b0b921b5a6165569b75bac7cf9a7f70a74688": {
       "name": "nearest",
       "stage_id": "4f27c0e67e3991a84461b4b3bb1eafae2cd2f86dbf893427cfdcb006a3c22198",
@@ -159,12 +171,6 @@
     "c8ec7275694d7f2c7ce8179f78f9beebb17fe1b7b96ba3276a500378fc11aee9": {
       "name": "dashed",
       "stage_id": "ebf5949048f9cab6778f520c483bb5534337dc2761ddf8637899b93540a93e87",
-      "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
-      "uses_std": true
-    },
-    "d36d5785ddc5286543b8c9cc0427668583ccdc9069f87f944c1bf85c8bb9abf9": {
-      "name": "parse",
-      "stage_id": "776fb7d7cfec54369b9cf16df69a03e1395dc4abdf134c5f03dea67d710617c4",
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     },
@@ -189,12 +195,6 @@
     "f3d8a3d5340e11095249510911cf467eb207534e22e4a41f8ebf693b34d4374e": {
       "name": "value_index",
       "stage_id": "4189bfb026b7210f4766e4c7fcdeb6aabe33bce16338989e240a73860928c929",
-      "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
-      "uses_std": true
-    },
-    "fe7ef0a4572d972b81e83961b7f4628fb8410fcb84376c1c2de96603d16aa0de": {
-      "name": "unknown_long",
-      "stage_id": "0c84b59fd4249b1a9bd863371435a77330f1c6603cd1e948ec3d6ce8c6534204",
       "source_hash": "e898a7f46f12bdf37fd1c5808dadffa3e3c936a201acf744dbe711da38c8a323",
       "uses_std": true
     }

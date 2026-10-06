@@ -485,6 +485,23 @@ A 64 MiB text file, through a pipe, minimum of 7 interleaved rounds
 python3 scripts/toolbench.py --tool seek --size 64MiB    # measure on your machine
 ```
 
+## As a package
+
+`contract/` (argument parsing, errors, path confinement, self-description) is
+published as a lex-sys package, one store per module, committed in
+`.lex-sys-vcs/` and checked against the sources in CI
+(`scripts/package.py --check`). A project that builds more tools on it names
+each module it imports:
+
+```toml
+[dependencies.cli]
+git = "https://github.com/alpibrusl/lexsys-tools"
+rev = "<a full commit hash>"
+path = ".lex-sys-vcs/toolbox.cli"
+```
+
+`toolbox.built` is not in the package: each tool generates its own.
+
 ## Developing
 
 ```

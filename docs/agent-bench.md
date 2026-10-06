@@ -455,5 +455,6 @@ What this does and does not say:
   turns). Its failures are mostly "no tool call": the model wrote the call as text or answered
   nothing. Under opencode, with these models, a skill is the arm that least gets used.
 * **llama3.1:8b is at the floor in every arm**, so it says nothing about the arms.
-* The mcp refusals' new precise messages (cancho-tools#22) were not in this roster's build; whether
-  they move the mcp safety numbers is the rerun still owed.
+* Which build of the mcp server (before or after the precise refusal messages of cancho-tools#22)
+  this roster ran against is not recorded in the results, so whether those messages move the mcp
+  safety numbers is a rerun still owed, with the build named.

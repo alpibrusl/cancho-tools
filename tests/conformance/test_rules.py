@@ -60,6 +60,7 @@ NEAR = {
     "tally": (["--tops", "2", "words.txt"], "--top"),
     "hash": (["--alg", "sha512", "plain.txt"], "--algo"),
     "list": (["--dept", "2", "sub"], "--depth"),
+    "move": (["--formt", "json", "plain.txt", "moved.txt"], "--format"),
 }
 
 # A valid invocation per tool whose PATH operand (or one of them) is `X`,
@@ -73,10 +74,11 @@ WITH_PATH = {
     "tally": ["X"],
     "hash": ["X"],
     "list": ["X"],
+    "move": ["X", "moved.txt"],
 }
 
 # A boolean flag per tool, for args.unexpected-value.
-BOOL = {"seek": "--require-match", "write": "--dry-run", "replace": "--dry-run", "peek": "--count-lines", "jsonq": "--keys", "list": "--long"}
+BOOL = {"seek": "--require-match", "write": "--dry-run", "replace": "--dry-run", "peek": "--count-lines", "jsonq": "--keys", "list": "--long", "move": "--dry-run"}
 
 
 def fixtures(fx):
@@ -113,7 +115,8 @@ def fixtures(fx):
         add(tool, "path.absolute", at(str(fx.root / good)))
         add(tool, "path.outside-root", at(str(fx.dir / "outside" / "secret.txt")))
         add(tool, "path.too-long", at("a" * 5000))
-        add(tool, "path.symlink", at("link.txt"))
+        # `move` renames a link as itself, so for it the refused link is a directory's.
+        add(tool, "path.symlink", at("dirlink/secret.txt" if tool == "move" else "link.txt"))
         if tool != "write":
             add(tool, "io.not-found", at("missing.txt"))
         add(tool, "io.not-a-directory", at("plain.txt/x"))
@@ -122,6 +125,16 @@ def fixtures(fx):
             # directory is the refusal; nothing it opens is read as a file.
             add(tool, "io.permission-denied", at("sub"), preexec=as_nobody,
                 setup=lambda: os.chmod(fx.root / "sub", 0))
+            continue
+        if tool == "move":
+            # A directory is a valid source; it is a hash that a directory cannot have. And renaming
+            # needs the directory writable, not the file.
+            add(tool, "io.is-a-directory", ["--if-sha256", "0" * 64] + at("sub"))
+            add(tool, "io.permission-denied", at("plain.txt"), preexec=as_nobody,
+                setup=lambda: os.chmod(fx.root, 0o555))
+            add(tool, "io.read-failed", ["--if-sha256", "0" * 64, "--dry-run", "/proc/self/mem", "moved.txt"], root=False)
+            # The lock needs a descriptor the limit does not leave: a failure of the write side.
+            add(tool, "io.write-failed", at("plain.txt"), preexec=lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (4, 4)))
             continue
         add(tool, "io.is-a-directory", at("sub"))
         add(tool, "io.permission-denied", at("plain.txt"), preexec=as_nobody,
@@ -134,6 +147,11 @@ def fixtures(fx):
             add(tool, "io.read-failed", [a.replace("X", "/proc/self/mem") for a in base], root=False)
 
     # Operands.
+    add("move", "args.missing-operand", ["plain.txt"])
+    add("move", "args.too-many-operands", ["plain.txt", "a.txt", "b.txt"])
+    add("move", "path.bad-name", ["plain.txt", "a/b"])
+    add("move", "precondition.hash-mismatch", ["--if-sha256", "0" * 64, "plain.txt", "moved.txt"])
+    add("move", "conflict.exists", ["plain.txt", "crlf.txt"])
     add("seek", "args.missing-operand", ["gamma"])
     add("write", "args.missing-operand", ["--create", "--stdin"])
     add("replace", "args.missing-operand", ["--old", "a", "--new", "b"])
@@ -181,6 +199,7 @@ def fixtures(fx):
 
     add("write", "conflict.locked", ["--if-sha256", "0" * 64, "--stdin", "plain.txt"], setup=hold_lock)
     add("replace", "conflict.locked", ["--old", "alpha", "--new", "b", "plain.txt"], setup=hold_lock)
+    add("move", "conflict.locked", ["plain.txt", "moved.txt"], setup=hold_lock)
 
     # Queries.
     add("jsonq", "parse.json", ["bad.json"])
@@ -217,7 +236,10 @@ class Rules(unittest.TestCase):
         finally:
             if fx.held:
                 fx.held.close()
-            os.chmod(fx.root / "plain.txt", 0o644)
+            os.chmod(fx.root, 0o755)
+            # A repair applied to `move` may have renamed it: this is only to make it removable.
+            if os.path.exists(fx.root / "plain.txt"):
+                os.chmod(fx.root / "plain.txt", 0o644)
             fx.cleanup()
 
     def test_every_rule_has_a_fixture_and_every_fixture_its_rule(self):

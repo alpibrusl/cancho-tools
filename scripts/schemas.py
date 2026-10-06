@@ -177,6 +177,18 @@ SCHEMAS = {
             **WRITE_DIFFS,
         })},
     }),
+    "move": document("move", obj({
+        "path": TB, "to": TB, "changed": {"type": "boolean"},
+        "kind": {"enum": ["file", "directory", "link", "other"]},
+        "sha256": {"oneOf": [{"type": "null"}, HEX64]},
+    }), {
+        "dry_run": {"const": True},
+        "planned_actions": {"type": "array", "items": obj({
+            "op": {"const": "move"}, "path": TB, "to": TB,
+            "kind": {"enum": ["file", "directory", "link", "other"]},
+            "sha256": {"oneOf": [{"type": "null"}, HEX64]},
+        })},
+    }),
     "replace": document("replace", obj({
         "path": TB, "changed": {"type": "boolean"}, "replacements": NAT, "bytes": NAT,
         "before_sha256": HEX64, "after_sha256": HEX64,

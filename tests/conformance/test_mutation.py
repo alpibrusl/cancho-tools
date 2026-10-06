@@ -23,6 +23,12 @@ from harness import Fixture, binary, sha256
 # (tests/conformance/test_guarantees.py).
 WRITERS = {"write", "replace"}
 
+# `move` is atomic, locked and has a dry run like the writers, but it states no belief
+# about content (its precondition is that the new name is free, checked every time), so
+# it is not a writer in the sense of `requires_precondition`. Its gates are in
+# test_move.py.
+MOVERS = {"move"}
+
 MUTATING = re.compile(rb"^(?:\d+ +|\[pid +\d+\] )?(rename\w*|unlink\w*|mkdir\w*|rmdir|truncate|ftruncate|link\w*|symlink\w*|fsync|fdatasync|flock)\(", re.M)
 OPEN_FOR_WRITE = re.compile(rb"open(?:at)?\([^)]*O_(?:WRONLY|RDWR|CREAT|TRUNC|APPEND)")
 

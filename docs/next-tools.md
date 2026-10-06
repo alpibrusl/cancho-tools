@@ -211,21 +211,23 @@ covers is the declarative core.
   `contract/`, build a throwaway program against it with `cancho install`, and
   confirm the tools here still build from the same package.
 
-**Performance, against `csvtk`: a budget, not a match.** `csvtk` is Go, multi-threaded, and
-tuned for files of gigabytes; this tool is bounded by design (`--max-rows`, `--max-line-bytes`,
-default well under a gigabyte) and its gain is the envelope: tagged errors, exact integer
-arithmetic, byte-stable output, a provable authority row, `--dry-run`-style plans, a cursor. The
-project's own precedent is `seek`, which is 3 to 5 times slower than `grep` and says so, and is
-gated only against pathologies (D15, M9). So `table` does **not** promise to match `csvtk`. It
-promises, and gates: (1) **linear time and bounded memory** on the largest input it accepts (a
-1 M-row file within the default caps, peak RSS reported, as `tally`'s `--max-keys` is); (2) **a
-measured ratio against `csvtk` on three operations**, select, filter and group-count, on one fixed
-generated file, recorded in the document whatever it is, with `csvtk` and `mlr` (Miller) as the
-two incumbents. A ratio worse than about 10x on any of the three is a defect to fix before the
-tool ships, not a number to explain; better than that is not a goal. (3) Correctness beats speed:
-`csvtk`-compatible quoting (RFC 4180, embedded newlines, BOM) is a gate, since a fast wrong
-parser is the failure that matters. **Open:** the baseline is not measured yet: `csvtk` is not
-installed on either machine, and installing it is a download to be approved.
+**Performance, against `csvtk`: parity is the aim where it can be reached, and it is measured.** The
+first version of this paragraph cited D15's old "3 to 5 times slower than `grep`" for `seek`; that
+is out of date. The README's current table (64 MiB, minimum of 7 interleaved rounds, Linux x86_64)
+has `seek` at 0.49 s against `grep -F -n -b` 0.51 s, `tally` and `jsonq` and `list` ahead of their
+incumbents, and only `hash` behind (0.52 s against `sha256sum` 0.17 s, OpenSSL's assembly). The
+tools here have reached parity with single-threaded incumbents by measuring and iterating
+(`docs/history.md`), and `table` should be held to the same practice, not excused from it.
+What differs from `grep` is that `csvtk` is multi-threaded Go: on a many-core machine it can use
+cores a single-process tool here does not. So the gate is: (1) **linear time and bounded memory**
+on the largest input accepted (1 M rows within the default caps, peak RSS reported); (2) **a measured
+ratio against `csvtk` and Miller (`mlr`)** on select, filter and group-count, on one fixed generated
+file, with `csvtk` pinned to one thread (`-t 1`) for the like-for-like number and its default for the
+honest one, both recorded; the target is parity with the one-thread figure, and a ratio worse than
+about 2x there is a defect to work on, as `seek`'s was; (3) **correctness before speed**: RFC 4180
+quoting, embedded newlines and BOM are a gate, since a fast wrong parser is the failure that
+matters. **Open:** the baseline is not measured: `csvtk` is installed on neither machine, and
+installing it is a download to be approved.
 
 ## 6. In what order
 

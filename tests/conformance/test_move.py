@@ -259,6 +259,88 @@ class Apply(unittest.TestCase):
         print("\nmove M7: %d mover/writer races, exactly one winner each" % trials)
 
 
+class Remove(unittest.TestCase):
+    """`--remove` deletes nothing: the file is renamed to `.NAME.removed-HASH8`, only as the caller read it."""
+
+    def setUp(self):
+        self.fx = Fixture()
+        self.h = sha256((self.fx.root / "plain.txt").read_bytes())
+        self.tomb = ".plain.txt.removed-" + self.h[:8]
+
+    def tearDown(self):
+        self.fx.cleanup()
+
+    def test_the_file_is_renamed_to_its_tombstone_and_its_bytes_survive(self):
+        content = (self.fx.root / "plain.txt").read_bytes()
+        code, doc = run_move(self.fx, "--remove", "--if-sha256", self.h, "plain.txt")
+        self.assertEqual((code, doc["data"]["changed"], doc["data"]["to"], doc["data"]["sha256"]), (0, True, self.tomb, self.h))
+        self.assertFalse((self.fx.root / "plain.txt").exists())
+        self.assertEqual((self.fx.root / self.tomb).read_bytes(), content)
+
+    def test_undoing_it_is_a_move_back(self):
+        content = (self.fx.root / "plain.txt").read_bytes()
+        run_move(self.fx, "--remove", "--if-sha256", self.h, "plain.txt")
+        code, doc = run_move(self.fx, "--if-sha256", self.h, self.tomb, "plain.txt")
+        self.assertEqual((code, doc["data"]["changed"]), (0, True))
+        self.assertEqual((self.fx.root / "plain.txt").read_bytes(), content)
+
+    def test_without_a_hash_nothing_is_removed(self):
+        state = names(self.fx.root)
+        code, doc = run_move(self.fx, "--remove", "plain.txt")
+        self.assertEqual((code, doc["error"]["rule"]), (2, "args.required-flag"))
+        self.assertEqual(names(self.fx.root), state)
+
+    def test_a_new_name_is_refused_beside_remove(self):
+        code, doc = run_move(self.fx, "--remove", "--if-sha256", self.h, "plain.txt", "other.txt")
+        self.assertEqual((code, doc["error"]["rule"]), (2, "args.too-many-operands"))
+        self.assertTrue((self.fx.root / "plain.txt").exists())
+
+    def test_a_stale_hash_removes_nothing(self):
+        state = names(self.fx.root)
+        code, doc = run_move(self.fx, "--remove", "--if-sha256", "0" * 64, "plain.txt")
+        self.assertEqual((code, doc["error"]["rule"]), (5, "precondition.hash-mismatch"))
+        self.assertEqual(names(self.fx.root), state)
+
+    def test_a_retry_that_had_landed_is_unchanged(self):
+        run_move(self.fx, "--remove", "--if-sha256", self.h, "plain.txt")
+        state = tree(self.fx.dir)
+        code, doc = run_move(self.fx, "--remove", "--if-sha256", self.h, "plain.txt")
+        self.assertEqual((code, doc["data"]["changed"]), (0, False))
+        self.assertEqual(tree(self.fx.dir), state)
+
+    def test_a_taken_tombstone_is_a_conflict_and_nothing_is_replaced(self):
+        (self.fx.root / self.tomb).write_bytes(b"something else\n")
+        code, doc = run_move(self.fx, "--remove", "--if-sha256", self.h, "plain.txt")
+        self.assertEqual((code, doc["error"]["rule"]), (5, "conflict.exists"))
+        self.assertEqual((self.fx.root / self.tomb).read_bytes(), b"something else\n")
+        self.assertTrue((self.fx.root / "plain.txt").exists())
+
+    def test_a_dry_run_plans_a_remove_and_changes_nothing(self):
+        state = names(self.fx.root)
+        code, doc = run_move(self.fx, "--remove", "--dry-run", "--if-sha256", self.h, "plain.txt")
+        self.assertEqual(code, 9)
+        self.assertEqual([(a["op"], a["to"]) for a in doc["planned_actions"]], [("remove", self.tomb)])
+        self.assertEqual(names(self.fx.root), state)
+
+    def test_only_a_regular_file_is_removed(self):
+        for name in ("sub", "link.txt"):
+            if not (self.fx.root / name).is_symlink() and not (self.fx.root / name).exists():
+                continue
+            code, doc = run_move(self.fx, "--remove", "--if-sha256", self.h, name)
+            self.assertNotEqual(code, 0, name)
+            self.assertTrue(os.path.lexists(self.fx.root / name), name)
+
+    def test_a_name_too_long_for_its_tombstone_is_a_refusal(self):
+        name = "n" * 240
+        (self.fx.root / name).write_bytes(b"x")
+        code, doc = run_move(self.fx, "--remove", "--if-sha256", sha256(b"x"), name)
+        self.assertEqual((code, doc["error"]["rule"]), (2, "path.too-long"))
+        self.assertTrue((self.fx.root / name).exists())
+        # A dry run takes no lock, so the name check alone must refuse what could not be done.
+        code, doc = run_move(self.fx, "--remove", "--dry-run", "--if-sha256", sha256(b"x"), name)
+        self.assertEqual((code, doc["error"]["rule"]), (2, "path.too-long"))
+
+
 class Confinement(unittest.TestCase):
     """M8: no link is followed, and a link is a thing that can be renamed."""
 

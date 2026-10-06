@@ -361,6 +361,16 @@ as itself and never followed; a link in a directory of the path is
 `path.symlink`. Both names are locked (the `.lexsys-lock` sidecar `write`
 uses), the rename is one `renameat`, and `--dry-run` makes no mutating call.
 
+**Removing, without deleting.** `move --remove --if-sha256 HEX PATH` is the
+toolbox's only way to take a file away, and it deletes nothing: the file is
+renamed to its tombstone, `.NAME.removed-` and the first eight hex digits of
+the hash, in the same directory. The hash is required (`args.required-flag`),
+because a file is removed only as the caller read it; there is no NEWNAME; a
+tombstone that already exists is `conflict.exists`; a retry that had landed is
+`changed: false`; `--dry-run` plans an `op: "remove"`. Nothing purges a
+tombstone, so `move .NAME.removed-… NAME` undoes it. Reclaiming the space is
+a shell's job.
+
 **The limit, measured.** The lock stops other toolbox processes, not one that
 takes no lock: a process creating the destination at a random moment during
 the move lost its file in 55 of 20,000 trials (0.28%), and in 100 of 100 when

@@ -32,6 +32,11 @@ MUTANTS = [
     ("the source is not locked", "    match atomic.acquire(heap, dir, name) {\n        Opened::Failed(reason) => {\n            if atomic.would_block(reason) {\n                e = conflict_locked(heap, e, from_shown);", "    match atomic.acquire(heap, dir, \"lock-elsewhere-too\") {\n        Opened::Failed(reason) => {\n            if atomic.would_block(reason) {\n                e = conflict_locked(heap, e, from_shown);"),
     ("anything can be given a hash", "    } else if guarded && src_kind != dirs.kind_file() {", "    } else if guarded && src_kind == 99 {"),
     ("a rename to the same name is a conflict", "            if bytes.equal(name, newname) {\n                // Already where it is to be: nothing to do.\n            } else if dst_errno == 0 {", "            if dst_errno == 0 {"),
+    ("--remove needs no hash", "        if !cli.has(parsed, table, \"if-sha256\") {\n            e = flag_problem(heap, e, \"args.required-flag\"", "        if false && !cli.has(parsed, table, \"if-sha256\") {\n            e = flag_problem(heap, e, \"args.required-flag\""),
+    ("--remove accepts a NEWNAME", "        } else if cli.operand_count(parsed) > 1 {\n            e = flag_problem(heap, e, \"args.too-many-operands\", \"move --remove", "        } else if cli.operand_count(parsed) > 9 {\n            e = flag_problem(heap, e, \"args.too-many-operands\", \"move --remove"),
+    ("the tombstone does not carry the hash", "    return buffer.append(heap, b, hex[0..8]);", "    return buffer.append(heap, b, \"00000000\");"),
+    ("a dry run names its plan a move", "op = \"remove\";", "op = \"move\";"),
+    ("a too-long tombstone name is allowed", "                            if bad_name(buffer.bytes(cb)) {", "                            if false && bad_name(buffer.bytes(cb)) {"),
     ("the parent directory is not synced", "            atomic.sync_parent(dir);\n            o = Outcome { changed: true, planned: false, found: o.found };", "            o = Outcome { changed: true, planned: false, found: o.found };"),
 ]
 

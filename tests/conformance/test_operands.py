@@ -32,6 +32,10 @@ SETUP = {
     "move": (["--dry-run"], ["plain.txt", "moved.txt"]),
 }
 
+# An operand `introspect` lists as optional because a flag makes it unneeded: the tool wants this many in
+# its ordinary form, and wants `fewest` in the form the flags select (`move --remove` takes no NEWNAME).
+MODAL = {"move": {"ordinary": 2, "flags": ["--remove", "--if-sha256", "0" * 64, "--dry-run"], "fewest": 1}}
+
 # What a tool that reads standard input is given when it has no operand.
 STDIN = {"jsonq": b"{}", "tally": b"a\n", "write": b"x"}
 
@@ -76,7 +80,7 @@ class OperandCounts(unittest.TestCase):
                         stdin=STDIN.get(tool, b""), cwd=self.fx.root)
                 raised = set(m.decode() for m in RULE.findall(r.stdout))
                 expected = set()
-                if n < least:
+                if n < MODAL.get(tool, {}).get("ordinary", least):
                     expected.add("args.missing-operand")
                 if most is not None and n > most:
                     expected.add("args.too-many-operands")
@@ -84,6 +88,22 @@ class OperandCounts(unittest.TestCase):
                     disagreements.append("%s with %d operand(s): raised %s, introspect says %s"
                                          % (tool, n, sorted(raised), sorted(expected)))
         self.assertEqual(disagreements, [])
+
+    def test_a_flag_that_drops_an_optional_operand_is_what_introspect_says(self):
+        for tool, mode in MODAL.items():
+            least, most = bounds(tool)
+            self.assertEqual(least, mode["fewest"], tool)
+            _, fill = SETUP[tool]
+            for n in range(mode["fewest"] + 2):
+                operands = [fill[min(i, len(fill) - 1)] for i in range(n)]
+                r = run(tool, "--root", self.fx.root, *mode["flags"], *operands, cwd=self.fx.root)
+                raised = set(m.decode() for m in RULE.findall(r.stdout))
+                expected = set()
+                if n < mode["fewest"]:
+                    expected.add("args.missing-operand")
+                if n > mode["fewest"]:
+                    expected.add("args.too-many-operands")
+                self.assertEqual(raised, expected, (tool, n))
 
 
 if __name__ == "__main__":

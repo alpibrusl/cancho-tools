@@ -184,7 +184,7 @@ SCHEMAS = {
     }), {
         "dry_run": {"const": True},
         "planned_actions": {"type": "array", "items": obj({
-            "op": {"const": "move"}, "path": TB, "to": TB,
+            "op": {"enum": ["move", "remove"]}, "path": TB, "to": TB,
             "kind": {"enum": ["file", "directory", "link", "other"]},
             "sha256": {"oneOf": [{"type": "null"}, HEX64]},
         })},

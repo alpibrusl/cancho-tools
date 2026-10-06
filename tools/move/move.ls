@@ -33,7 +33,15 @@ edition 6;
 //   beneath --root with no link followed (`toolbox.place`), and a link is
 //   renamed as itself, never its target (`dir_rename` takes the entry).
 //
-// No tool deletes (D15), and this one does not either: it moves a name, and
+// * **`--remove`** is the one deletion the toolbox offers, and it deletes nothing:
+//   `move --remove --if-sha256 HEX PATH` renames the file to its tombstone,
+//   `.<name>.removed-<first 8 hex of HEX>`, in the same directory. It needs the
+//   hash (`args.required-flag` without it), only a regular file has one, and
+//   every guard above holds -- a taken tombstone is `conflict.exists`, a retry
+//   that had landed is `changed: false`. Nothing purges a tombstone; moving it
+//   back undoes the removal (D15, as amended in `docs/next-tools.md`).
+//
+// No tool deletes (D15), and this one does not either, even with --remove: it moves a name, and
 // every move can be undone by moving it back.
 
 import std.buffer;
@@ -51,11 +59,11 @@ import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;if-sha256||hex64|guard||the file's current content must hash to this SHA-256, and a retry that already landed then answers changed: false;dry-run||bool|guard||check everything and report planned_actions, exit 9, change nothing;format||choice:json/text|none|json|json for a program, text for a person";
+    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;if-sha256||hex64|guard||the file's current content must hash to this SHA-256, and a retry that already landed then answers changed: false;remove||bool|guard||remove the file by renaming it to its tombstone .NAME.removed-HASH8 (needs --if-sha256, takes no NEWNAME, and nothing is deleted);dry-run||bool|guard||check everything and report planned_actions, exit 9, change nothing;format||choice:json/text|none|json|json for a program, text for a person";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name; locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|1|1|its new name: one component, in the same directory, and not one that exists", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked", limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
+    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name; locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered. With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked", limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -128,6 +136,15 @@ fn destination[&h, &p, &n](heap: &!h Heap, from_shown: &p [byte], newname: &n [b
     return buffer.append(heap, b, newname);
 }
 
+// `.NAME.removed-HASH8`: the tombstone a removal renames the file to.
+fn tombstone[&h, &n, &x](heap: &!h Heap, leaf: &n [byte], hex: &x [byte]) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, len(leaf) + 20);
+    b = buffer.append(heap, b, ".");
+    b = buffer.append(heap, b, leaf);
+    b = buffer.append(heap, b, ".removed-");
+    return buffer.append(heap, b, hex[0..8]);
+}
+
 fn data[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byte], o: Outcome, sha: &x [byte]) -> [heap] buffer.Buffer {
     var w = json.writer(heap, 192);
     w = json.begin_object(heap, w);
@@ -149,7 +166,7 @@ fn data[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byt
     return json.finish(w);
 }
 
-fn planned[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byte], o: Outcome, sha: &x [byte]) -> [heap] buffer.Buffer {
+fn planned[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byte], o: Outcome, sha: &x [byte], op: &static [byte]) -> [heap] buffer.Buffer {
     var w = json.writer(heap, 192);
     w = json.begin_object(heap, w);
     w = json.put_key(heap, w, "dry_run");
@@ -159,7 +176,7 @@ fn planned[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [
     if o.planned {
         w = json.begin_object(heap, w);
         w = json.put_key(heap, w, "op");
-        w = json.put_string(heap, w, "move");
+        w = json.put_string(heap, w, op);
         w = json.put_key(heap, w, "path");
         w = text.put(heap, w, from_shown);
         w = json.put_key(heap, w, "to");
@@ -443,8 +460,19 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
     let (root, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
     e = after_root;
+    let removing = cli.has(parsed, table, "remove");
     var operands_ok = false;
-    if cli.operand_count(parsed) < 2 {
+    if removing {
+        if !cli.has(parsed, table, "if-sha256") {
+            e = flag_problem(heap, e, "args.required-flag", "--remove needs --if-sha256: a file is removed only as the caller read it", "read the file's hash first, then pass it", "--if-sha256");
+        } else if cli.operand_count(parsed) < 1 {
+            e = flag_problem(heap, e, "args.missing-operand", "move --remove takes the PATH to remove", "move --remove --if-sha256 HEX PATH", "PATH");
+        } else if cli.operand_count(parsed) > 1 {
+            e = flag_problem(heap, e, "args.too-many-operands", "move --remove takes one PATH and no NEWNAME: the tombstone's name is derived", "move --remove --if-sha256 HEX PATH", "PATH");
+        } else {
+            operands_ok = true;
+        }
+    } else if cli.operand_count(parsed) < 2 {
         e = flag_problem(heap, e, "args.missing-operand", "move takes the PATH to rename and its NEWNAME", "move PATH NEWNAME", "PATH NEWNAME");
     } else if cli.operand_count(parsed) > 2 {
         e = flag_problem(heap, e, "args.too-many-operands", "move takes one PATH and one NEWNAME", "move one name per call", "PATH NEWNAME");
@@ -452,7 +480,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         operands_ok = true;
     }
     var newname: &static [byte] = "";
-    if operands_ok {
+    if operands_ok && !removing {
         newname = cli.operand(args, parsed, 1);
         if bad_name(newname) {
             var w = fail.open(heap, "path.bad-name", "NEWNAME must be one name in the same directory: 1 to 243 bytes, not . or .., no /, not a lock sidecar", "give a bare name; to move to another directory is not something this tool does");
@@ -480,15 +508,35 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
             borrow target as &tp in {
                 from_copy = buffer.append(heap, from_copy, path.shown(tp));
                 if path.ok(tp) {
-                    buffer.drop(heap, to_copy);
-                    to_copy = destination(heap, path.shown(tp), newname);
-                    borrow to_copy as &dc in {
-                        let (applied, outcome, digest) = beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), newname, buffer.bytes(dc), e);
-                        e = applied;
-                        o = outcome;
-                        buffer.drop(heap, sha);
-                        sha = digest;
+                    // The name to rename to: NEWNAME, or the tombstone `--remove` derives.
+                    var chosen = buffer.empty(heap, len(newname) + 1);
+                    var fits = true;
+                    if removing {
+                        buffer.drop(heap, chosen);
+                        chosen = tombstone(heap, place.leaf(path.full(tp)), cli.text(args, parsed, table, "if-sha256"));
+                        borrow chosen as &cb in {
+                            if bad_name(buffer.bytes(cb)) {
+                                e = name_too_long(heap, e, path.shown(tp));
+                                fits = false;
+                            }
+                        }
+                    } else {
+                        chosen = buffer.append(heap, chosen, newname);
                     }
+                    if fits {
+                        buffer.drop(heap, to_copy);
+                        borrow chosen as &cb in {
+                            to_copy = destination(heap, path.shown(tp), buffer.bytes(cb));
+                            borrow to_copy as &dc in {
+                                let (applied, outcome, digest) = beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), buffer.bytes(cb), buffer.bytes(dc), e);
+                                e = applied;
+                                o = outcome;
+                                buffer.drop(heap, sha);
+                                sha = digest;
+                            }
+                        }
+                    }
+                    buffer.drop(heap, chosen);
                 }
             }
             path.drop(heap, target);
@@ -509,13 +557,25 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                         payload = data(heap, buffer.bytes(fc), buffer.bytes(tc), o, buffer.bytes(sh));
                         if cli.has(parsed, table, "dry-run") {
                             buffer.drop(heap, extra);
-                            extra = planned(heap, buffer.bytes(fc), buffer.bytes(tc), o, buffer.bytes(sh));
+                            var op: &static [byte] = "move";
+                            if removing {
+                                op = "remove";
+                            }
+                            extra = planned(heap, buffer.bytes(fc), buffer.bytes(tc), o, buffer.bytes(sh), op);
                             line = buffer.append(heap, line, "dry run: ");
                         }
                         if o.changed {
-                            line = buffer.append(heap, line, "moved ");
+                            if removing {
+                                line = buffer.append(heap, line, "removed (tombstoned) ");
+                            } else {
+                                line = buffer.append(heap, line, "moved ");
+                            }
                         } else if o.planned {
-                            line = buffer.append(heap, line, "would move ");
+                            if removing {
+                                line = buffer.append(heap, line, "would remove (tombstone) ");
+                            } else {
+                                line = buffer.append(heap, line, "would move ");
+                            }
                         } else {
                             line = buffer.append(heap, line, "unchanged ");
                         }

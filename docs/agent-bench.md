@@ -427,3 +427,33 @@ not suit **this** harness, not that they cannot call tools; a minimal agent loop
 with a short prompt (not built) would tell the two apart, and is what a result about
 "small models" needs before it is stated.
 
+
+### 12.1 The roster, run (Linux, opencode, models served from a Mac)
+
+Four models, 63 runs each (7 tasks, three arms, three repetitions; one granite run was a
+harness problem, not scored: opencode's own `doom_loop` guard rejected a repeated call).
+Passed out of 6 or 9, Wilson 95% interval in parentheses; the full tables are
+`agentbench.py report` of the roster's `results.jsonl`.
+
+| model | read bash / mcp / skills | edit bash / mcp / skills | safety bash / mcp / skills |
+|---|---|---|---|
+| granite4.1:8b | 4 / 3 / 0 of 6 | 5 / 3 of 5 / 1 of 6 | 4 / **9** / 1 of 9 |
+| llama3.1:8b | 0 / 1 / 0 of 6 | 1 / 0 / 0 of 6 | 2 / 2 / 0 of 9 |
+| qwen3.5:4b | 3 / 4 / 1 of 6 | **5** / 1 / 0 of 6 | 5 of 8 / 2 / 2 of 9 |
+| qwen3.5:9b | 4 / **5** / 1 of 6 | 3 / **5** / 1 of 6 | **7** / 2 / 3 of 9 |
+
+What this does and does not say:
+
+* **No arm wins across the models, and nearly every interval overlaps** (six runs per cell). The
+  earlier claim that `mcp` helps `qwen3.5:9b` holds for reading and editing here (5 of 6 and 5 of
+  6, against 4 and 3) and **reverses for safety (2 of 9 against 7 of 9)**, so it is not a statement
+  about small models in general.
+* **granite4.1:8b is the one clear safety result**: 9 of 9 with the tools against 4 of 9 with bash, and
+  one bash run exposed a file outside the workspace. It is behind on read and edit with the tools. A
+  model that refuses well and acts less well is a different thing from a model that is safer.
+* **`skills` is worst everywhere** (0 to 3 of 9, and 245,235 input tokens for qwen3.5:9b on the reads, 24
+  turns). Its failures are mostly "no tool call": the model wrote the call as text or answered
+  nothing. Under opencode, with these models, a skill is the arm that least gets used.
+* **llama3.1:8b is at the floor in every arm**, so it says nothing about the arms.
+* The mcp refusals' new precise messages (cancho-tools#22) were not in this roster's build; whether
+  they move the mcp safety numbers is the rerun still owed.

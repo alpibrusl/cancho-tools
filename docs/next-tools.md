@@ -218,16 +218,36 @@ has `seek` at 0.49 s against `grep -F -n -b` 0.51 s, `tally` and `jsonq` and `li
 incumbents, and only `hash` behind (0.52 s against `sha256sum` 0.17 s, OpenSSL's assembly). The
 tools here have reached parity with single-threaded incumbents by measuring and iterating
 (`docs/history.md`), and `table` should be held to the same practice, not excused from it.
-What differs from `grep` is that `csvtk` is multi-threaded Go: on a many-core machine it can use
-cores a single-process tool here does not. So the gate is: (1) **linear time and bounded memory**
-on the largest input accepted (1 M rows within the default caps, peak RSS reported); (2) **a measured
-ratio against `csvtk` and Miller (`mlr`)** on select, filter and group-count, on one fixed generated
-file, with `csvtk` pinned to one thread (`-t 1`) for the like-for-like number and its default for the
-honest one, both recorded; the target is parity with the one-thread figure, and a ratio worse than
-about 2x there is a defect to work on, as `seek`'s was; (3) **correctness before speed**: RFC 4180
-quoting, embedded newlines and BOM are a gate, since a fast wrong parser is the failure that
-matters. **Open:** the baseline is not measured: `csvtk` is installed on neither machine, and
-installing it is a download to be approved.
+`csvtk` is multi-threaded Go, which looked like the difference from `grep`, so it was measured
+(csvtk 0.38.0 from Homebrew, an Apple-silicon Mac with 16 cores at load average about 4.5 from other
+work, a generated 1,000,000-row, 31.7 MB file with a quoted column, minimum of 5 runs):
+
+| `csvtk` | `-j 1` | `-j 4` | default (`-j` = cores) |
+|---|---:|---:|---:|
+| `cut -f status,bytes` | 0.182 s | 0.202 s | 0.200 s |
+| `filter -f 'bytes>50000'` | 0.283 s | 0.251 s | 0.255 s |
+| `freq -f status` | 0.181 s | 0.205 s | 0.214 s |
+
+**Its threads do not help on these three**: one thread is as fast as sixteen (it pipelines the
+parse, but the parse is the serial part). So the figure to match is the single-thread one, which is
+the same kind of target as `seek`'s, and no multi-threaded design is needed to reach it. Not
+measured here: wider files, a sort, a join, where it may differ.
+
+**If threads were ever wanted**, cancho has them: `spawn`/`join` are real `pthread`s on both
+backends, a payload can be a reference to a struct, `fork_heap` gives a worker its own `Heap`
+(`docs/parallelism.md` §4, T0 to T3 built), and two threads at 0.9x of two processes was met for the
+server. What it lacks: atomics and channels (T5, "not until a program asks"), so a worker can only
+return a partial result through its job struct and the parent merges them in order, which keeps the
+output byte-stable. The honest limits for this tool are that a CSV's quoted newlines make a split at
+an arbitrary byte unsafe (a worker must resynchronise, or the file be split on a verified record
+boundary), the scaling measured there is 2.8x at 4 threads, and each tool's `main` today releases what
+it does not use, so a thread count would be one more limit and one more row to justify. A first
+version is single-threaded; threads are a later, measured step, gated at "more than 1.5x at 4 threads
+on the same file, and the same bytes".
+
+The gates for `table` are therefore: (1) linear time and bounded memory on the largest input accepted;
+(2) the ratio against `csvtk -j 1` (target parity; about 2x worse is a defect to work on, as `seek`'s
+was); (3) RFC 4180 quoting, embedded newlines and BOM, correctness before speed.
 
 ## 6. In what order
 

@@ -270,6 +270,26 @@ The gates for `table` are therefore: (1) linear time and bounded memory on the l
 (2) the ratio against `csvtk -j 1` (target parity; about 2x worse is a defect to work on, as `seek`'s
 was); (3) RFC 4180 quoting, embedded newlines and BOM, correctness before speed.
 
+**Formats: the engine is tabular, the input is a reader.** `table` is the declarative core
+(select, filter, group, aggregate, sort, top-N) over records; which file the records come from is a
+reader, so a format is an addition and not a new tool. Stance, in the order it would be taken:
+
+1. **CSV and TSV**, built (cancho-table#1, #2; filter and group in progress).
+2. **A record-reader interface** the engine takes its rows from, so the plan does not know the format.
+3. **JSON lines** (one object per line). cancho has a strict, bounded JSON parser (`std.json`, a tape;
+   `jsonq` is built on it), so a reader is cheap. What needs deciding is not parsing but meaning: a cell
+   may be a string, number, bool, null, object or array, so a column is a declared flat projection
+   (`--select a,b.c`, dotted paths), a number compares as an exact integer only when declared so, and a
+   non-scalar in a cell is a tagged refusal, never a stringify. One large JSON *array* is refused with a
+   pointer to `jsonq`: the parser cannot stream it in bounded memory.
+4. **`--query`**, the string front end to the same plan (§5, above).
+5. **Parquet: not now.** It needs a Thrift decoder for the footer, decompression (snappy, zstd, gzip: none
+   is in cancho's `std`, checked), the dictionary, run-length and bit-packed encodings, nested types and
+   nulls, and its gain over CSV (column pruning, compression) implies a column-wise engine, which is the
+   question of cancho `docs/parallelism.md` §6, not a reader. **If a user has a file they need:** a
+   read-only subset (plain, dictionary and run-length encodings; uncompressed and snappy), every other
+   encoding or codec a tagged refusal, each piece with its own gate and mutants. Not before.
+
 ## 6. In what order
 
 1. **cancho:** a working directory for a spawned child, and standard error beside

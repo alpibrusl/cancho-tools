@@ -211,6 +211,27 @@ covers is the declarative core.
   `contract/`, build a throwaway program against it with `cancho install`, and
   confirm the tools here still build from the same package.
 
+  **The spike, done.** It works, with one prerequisite and one cost.
+  * **Prerequisite, found by the spike: cancho#299.** `cancho vcs publish` refused `contract/sha.cho`
+    (four `[int]` statics) because a static's signature hash left out its name, so two statics of one type
+    collided in the store. The pinned compiler (`fe32ac2`) has the bug; the fix moves the identity of a
+    static once. The package needs a compiler with it, so the pin moves.
+  * **What was done** (compiler from #299, `--ignore-compiler-rev`): `cancho vcs publish --std --store
+    .cancho-vcs --dir contract` made 13 per-module stores (1.1 MB), committed to a throwaway git repository;
+    a consumer named each module it imports as `[dependencies.NAME] git, rev, path = ".cancho-vcs/toolbox.NAME"`
+    and `cancho install` fetched them (a local path works as `git`; dependencies of dependencies come from
+    the stores' `requires/`). A one-line program built against `toolbox.rules` returned its 38 rules, and **the
+    real `move`** (`tools/move` and `generated/move` unchanged, eight dependencies) built and ran, and its
+    authority report from `cancho authority` is the same as from the in-tree sources: nine effects, 233
+    functions, `bounded: true`.
+  * **The cost: one dependency line per module a tool imports directly**, not one per package, because the
+    unit of a store is a module. `table` would list about eight. `toolbox.built` is not in the package and
+    must not be: it is each tool's own generated module.
+  * **Not decided:** where the package lives. Publishing from this repository (the store committed here, a CI
+    check that it matches `vcs publish --dir contract`, as cancho does for `packages/*`) keeps one source of
+    truth and needs no new repository; the tools here keep `sources = ["contract", ...]`. `table`'s repository
+    then names this one as its origin and a commit as its `rev`.
+
 **Performance, against `csvtk`: parity is the aim where it can be reached, and it is measured.** The
 first version of this paragraph cited D15's old "3 to 5 times slower than `grep`" for `seek`; that
 is out of date. The README's current table (64 MiB, minimum of 7 interleaved rounds, Linux x86_64)

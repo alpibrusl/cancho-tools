@@ -36,6 +36,7 @@ import toolbox.lines;
 import toolbox.out;
 import toolbox.path;
 import toolbox.place;
+import toolbox.sort;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
@@ -246,46 +247,6 @@ fn before[&m](m: &m map.Map[int], a: int, b: int) -> [] bool {
     return bytes.compare(map.key_at(m, a), map.key_at(m, b)) < 0;
 }
 
-// Sort `order[0..n]` (entry numbers) by `before`: a bottom-up merge sort,
-// stable and O(n log n), through `spare`.
-fn sort[&m, &o, &s](m: &m map.Map[int], order: &!o [int], spare: &!s [int], n: int) -> [] int {
-    var width = 1;
-    while width < n {
-        var lo = 0;
-        while lo < n {
-            var mid = lo + width;
-            if mid > n {
-                mid = n;
-            }
-            var hi = lo + 2 * width;
-            if hi > n {
-                hi = n;
-            }
-            var i = lo;
-            var j = mid;
-            var k = lo;
-            while k < hi {
-                if i < mid && (j >= hi || !before(m, order[j], order[i])) {
-                    spare[k] = order[i];
-                    i = i + 1;
-                } else {
-                    spare[k] = order[j];
-                    j = j + 1;
-                }
-                k = k + 1;
-            }
-            lo = hi;
-        }
-        var c = 0;
-        while c < n {
-            order[c] = spare[c];
-            c = c + 1;
-        }
-        width = width * 2;
-    }
-    return 0;
-}
-
 // The answer: `{"total", "distinct", "skipped", "top": [...], "truncated"}`
 // and its text form.
 fn report[&h, &m](heap: &!h Heap, m: &m map.Map[int], c: Count, top: int) -> [heap] (buffer.Buffer, buffer.Buffer) {
@@ -304,7 +265,7 @@ fn report[&h, &m](heap: &!h Heap, m: &m map.Map[int], c: Count, top: int) -> [he
                 }
                 e = e + 1;
             }
-            sort(m, o, contents(sw), n);
+            sort.by_map(m, o, contents(sw), n, before);
         }
     }
     unbox_slice(heap, spare);

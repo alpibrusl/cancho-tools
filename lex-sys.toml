@@ -85,3 +85,8 @@ std = true
 name = "diff"
 sources = ["contract", "tests/diff_test.ls"]
 std = true
+
+[[test]]
+name = "sort"
+sources = ["contract", "tests/sort_test.ls"]
+std = true

@@ -157,6 +157,47 @@ class Server(unittest.TestCase):
         [r], _ = talk(self.fx.root, [call("peek", {"path": "plain.txt", "lines": "1:2\u0000--root=/"})])
         self.assertEqual(r["error"]["code"], -32602)
 
+    def test_a_refusal_names_every_fault_and_the_fix(self):
+        """The mistake small models made most (docs/agent-bench.md §10): numbers and
+        booleans sent as strings, several at once. The answer says which, what was wanted,
+        what arrived and what to send, for all of them, with the rule and each property in
+        `data`, as the tools' own errors do."""
+        sent = {"path": "notes.txt", "old": "a", "new": "b", "expect": "1", "dry-run": "false",
+                "max-bytes": "1073741824", "max-diff-lines": "100000"}
+        [r], _ = talk(self.fx.root, [call("replace", sent)])
+        error = r["error"]
+        self.assertEqual(error["code"], -32602)
+        self.assertEqual(error["data"]["rule"], "mcp.wrong-type")
+        self.assertEqual([p["property"] for p in error["data"]["problems"]], ["expect", "dry-run", "max-bytes", "max-diff-lines"])
+        self.assertEqual(error["data"]["problems"][1], {"property": "dry-run", "expected": "a boolean", "got": "string"})
+        for fragment in ["`expect` must be a non-negative integer, not a string", "send a JSON number such as 1",
+                         "`dry-run` must be a boolean, not a string", "send true or false", "`max-bytes`", "`max-diff-lines`"]:
+            self.assertIn(fragment, error["message"])
+        # Nothing was run: a refusal is not a call.
+        self.assertFalse((self.fx.root / "notes.txt").exists())
+
+    def test_each_kind_of_refusal_has_its_rule_and_names_the_property(self):
+        cases = [
+            ("seek", {"pattern": "x", "files": ["a"], "root": "/"}, "mcp.unknown-argument", "`root` is not a property of seek"),
+            ("seek", {"pattern": "x", "files": ["a", 2]}, "mcp.wrong-type", "`files` must be an array of strings, but an item is a number"),
+            ("seek", {"pattern": "x", "files": "a"}, "mcp.wrong-type", "`files` must be an array of strings, not a string"),
+            ("seek", {"pattern": "x", "files": ["a"], "max-count": -1}, "mcp.wrong-type", "negative or fractional"),
+            ("seek", {"pattern": "a\u0000b", "files": ["a"]}, "mcp.nul-in-argument", "`pattern` contains a NUL byte"),
+            ("seek", {"pattern": "x", "files": ["a\u0000b"]}, "mcp.nul-in-argument", "`files` contains a NUL byte"),
+            ("seek", ["a"], "mcp.arguments-not-object", "`arguments` must be an object"),
+            ("write", {"path": "n", "create": True, "stdin": 5}, "mcp.wrong-type", "`stdin` must be a string, not a number"),
+        ]
+        for tool, arguments, rule, fragment in cases:
+            with self.subTest(arguments=arguments):
+                [r], _ = talk(self.fx.root, [call(tool, arguments)])
+                self.assertEqual(r["error"]["code"], -32602)
+                self.assertEqual(r["error"]["data"]["rule"], rule)
+                self.assertIn(fragment, r["error"]["message"])
+        # An unknown property lists the real ones, so one retry is enough.
+        [r], _ = talk(self.fx.root, [call("seek", {"pattern": "x", "files": ["a"], "root": "/"})])
+        self.assertIn("max-count", r["error"]["message"])
+        self.assertEqual(r["error"]["data"]["property"], "root")
+
     def test_a_stream_is_text_even_when_it_is_one_line(self):
         # `list` of an empty directory prints one record, `end`: one JSON
         # object, and still a stream, so it is not structured content.

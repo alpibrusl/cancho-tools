@@ -269,3 +269,42 @@ from the tools' own descriptions: the prompt said what it wanted, not how.
   and a Bash line that chains several commands is held for approval as a
   whole. Neither applies to MCP, which is the route to prefer for Claude
   Code; the skills remain for a runtime without MCP.
+
+## 10. A refusal names the fix (found by the benchmark)
+
+The server's own refusals were the one place the tools' principle, *an error names
+a rule and says what to change*, did not hold. A bad argument was answered with "an
+argument of the wrong type; the tool's inputSchema gives each one's": no property, no
+expected type, no rule. In the agent benchmark (`docs/agent-bench.md` §10) the `mcp`
+arm's commonest refusal was exactly that, 9 times on `replace`, 3 on `peek` and 2 on
+`jsonq`, and the calls inspected were `llama3.1:8b` sending every value as a string
+(`"expect": "1"`, `"dry-run": "false"`, even the defaults at their ceilings), several
+wrong at once.
+
+Now every refusal is `-32602` with a message that says which property, what the
+schema wants, what arrived and, for the mistake made most, what to send, and a `data`
+object an agent can branch on:
+
+```
+`expect` must be a non-negative integer, not a string; send a JSON number such as 1, not a string such as "1";
+`dry-run` must be a boolean, not a string; send true or false, not a string
+{"rule": "mcp.wrong-type", "problems": [{"property": "expect", "expected": "a non-negative integer", "got": "string"}, ...]}
+```
+
+* **All the type faults, in one answer.** A caller that sent three values as strings
+  is told all three, not the first and then the second. (An unknown property is
+  reported once the types are right.)
+* **Rules:** `mcp.wrong-type`, `mcp.unknown-argument` (it lists the tool's real
+  properties, so one retry is enough), `mcp.nul-in-argument`,
+  `mcp.arguments-not-object`.
+* **Strictness is unchanged.** `"1"` is still refused where an integer is declared:
+  the server validates against the schema it published, as the specification
+  requires, and says how to correct it. Coercing would make the schema a suggestion.
+* **Checked** by `test_mcp.py`: the benchmark's own mistake, each kind of refusal
+  and its rule, and four mutants (no hint, only the first fault, the wrong rule, an
+  unnamed property), all killed.
+* **Not measured yet:** whether models recover on the retry. That is the `mcp` arm
+  rerun on the same models (the benchmark is paused, `docs/agent-bench.md` §10), and
+  it is what would show whether a precise message changes a pass rate or only reads
+  better.
+

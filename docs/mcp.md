@@ -3,7 +3,8 @@
 > **Status: built** (`server/mcp.ls`, `scripts/mcp.py`,
 > `tests/conformance/test_mcp.py`), on lex-sys edition 7 with
 > `std.process` (lex-sys `docs/processes.md` §7.1, merged as lex-sys#276,
-> `fe32ac2`, which `lex-sys.toml` pins). Every claim below was measured on
+> `fe32ac2`; `lex-sys.toml` now pins `f8ebe98`, lex-sys#299, which only adds statics in
+> packages). Every claim below was measured on
 > macOS 26.2 arm64 and Linux 7.0 x86_64, unless it says otherwise. §8 is what
 > building it found.
 

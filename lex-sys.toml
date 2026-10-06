@@ -1,6 +1,6 @@
 [package]
 name = "lexsys-tools"
-lex-sys = "fe32ac2d6c4d0e7ffdc7bf91ea3a83c5fff92ec8"   # the compiler these sources were written for
+lex-sys = "f8ebe98e6867e1b7af3a5636b180b56eb3dd3cc1"   # the compiler these sources were written for
 
 # One program per tool (D17): a program's authority is the union of what its
 # main reaches, so a multi-call binary would report every tool's row for every

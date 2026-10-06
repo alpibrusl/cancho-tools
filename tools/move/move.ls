@@ -74,8 +74,7 @@ fn flag_problem[&h](heap: &!h Heap, e: fail.Errors, rule: &static [byte], messag
     var w = fail.open(heap, rule, message, hint);
     w = fail.no_repair(heap, w);
     w = fail.detail_open(heap, w);
-    w = json.put_key(heap, w, "flags");
-    w = json.put_string(heap, w, flags);
+    w = fail.detail_str(heap, w, "flags", flags);
     return fail.add(heap, e, w);
 }
 
@@ -288,12 +287,9 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
                         var w = fail.open(heap, "precondition.hash-mismatch", "the file does not hold the content --if-sha256 named", "re-read the file, then decide");
                         w = fail.repair_none(heap, w, "the file changed since it was read; re-read, then decide");
                         w = fail.detail_open(heap, w);
-                        w = json.put_key(heap, w, "path");
-                        w = text.put(heap, w, from_shown);
-                        w = json.put_key(heap, w, "expected_sha256");
-                        w = json.put_string(heap, w, cli.text(args, parsed, table, "if-sha256"));
-                        w = json.put_key(heap, w, "actual_sha256");
-                        w = json.put_string(heap, w, buffer.bytes(hb));
+                        w = fail.detail_text(heap, w, "path", from_shown);
+                        w = fail.detail_str(heap, w, "expected_sha256", cli.text(args, parsed, table, "if-sha256"));
+                        w = fail.detail_str(heap, w, "actual_sha256", buffer.bytes(hb));
                         e = fail.add(heap, e, w);
                         matches = false;
                     }
@@ -309,10 +305,8 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
                 var w = fail.open(heap, "conflict.exists", "the new name is taken, and move never replaces a name", "choose another name, or look at what is there first");
                 w = fail.repair_none(heap, w, "whether to replace what is there is a decision, not a retry");
                 w = fail.detail_open(heap, w);
-                w = json.put_key(heap, w, "path");
-                w = text.put(heap, w, from_shown);
-                w = json.put_key(heap, w, "to");
-                w = text.put(heap, w, to_shown);
+                w = fail.detail_text(heap, w, "path", from_shown);
+                w = fail.detail_text(heap, w, "to", to_shown);
                 e = fail.add(heap, e, w);
             } else if dst_errno != 2 {
                 e = fail.io_error(heap, e, dst_errno, true, to_shown);
@@ -340,10 +334,8 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
             var w = fail.open(heap, fail.io_rule(failed, true), "the rename failed; nothing was moved", "");
             w = fail.no_repair(heap, w);
             w = fail.detail_open(heap, w);
-            w = json.put_key(heap, w, "path");
-            w = text.put(heap, w, from_shown);
-            w = json.put_key(heap, w, "errno");
-            w = json.put_int(heap, w, failed);
+            w = fail.detail_text(heap, w, "path", from_shown);
+            w = fail.detail_int(heap, w, "errno", failed);
             e = fail.add(heap, e, w);
         } else {
             atomic.sync_parent(dir);
@@ -364,8 +356,7 @@ fn conflict_locked[&h, &q](heap: &!h Heap, e: fail.Errors, shown_path: &q [byte]
     var w = fail.open(heap, "conflict.locked", "another writer holds this file's lock", "retry after it finishes, then look at the file again");
     w = fail.repair_none(heap, w, "another writer is changing this file; look again after that writer finishes");
     w = fail.detail_open(heap, w);
-    w = json.put_key(heap, w, "path");
-    w = text.put(heap, w, shown_path);
+    w = fail.detail_text(heap, w, "path", shown_path);
     return fail.add(heap, e, w);
 }
 
@@ -486,8 +477,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
             var w = fail.open(heap, "path.bad-name", "NEWNAME must be one name in the same directory: 1 to 243 bytes, not . or .., no /, not a lock sidecar", "give a bare name; to move to another directory is not something this tool does");
             w = fail.no_repair(heap, w);
             w = fail.detail_open(heap, w);
-            w = json.put_key(heap, w, "newname");
-            w = text.put(heap, w, newname);
+            w = fail.detail_text(heap, w, "newname", newname);
             e = fail.add(heap, e, w);
             operands_ok = false;
         }

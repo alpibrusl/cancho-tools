@@ -19,6 +19,17 @@ module toolbox.fail;
 //     e = json.put_string(heap, e, shown);
 //     errs = fail.add(heap, errs, e);
 //
+// With several detail keys, `detail_str`, `detail_int`, `detail_bool` and
+// `detail_text` write the key and its value in one call:
+//
+//     e = fail.detail_open(heap, e);
+//     e = fail.detail_text(heap, e, "path", shown);   // text_or_bytes (toolbox.text)
+//     e = fail.detail_int(heap, e, "errno", errno);
+//
+// and `choose_open` .. `choose_close` build a repair that offers several
+// retries, for an error whose cure is one of a few (`choose_replacing` does
+// one option: the whole invocation with an argument swapped).
+//
 // A repair never widens authority (D6 rule 1): the only repairs built here
 // replace one argument with a spelling the tool itself derived, and the
 // callers that build one never add `--root`, a write flag, `--create`, or
@@ -172,10 +183,90 @@ pub fn retry_replacing[&h, &g, &r](heap: &!h Heap, w: json.Writer, args: &g Args
     return retry_close(heap, o);
 }
 
+// `"repair":{"kind":"choose","options":[` -- the caller writes each option
+// (`choose_option_open`, its arguments, `choose_option_close`), then
+// `choose_close`. A script picks one; none is applied on its own.
+pub fn choose_open[&h](heap: &!h Heap, w: json.Writer) -> [heap] json.Writer {
+    var o = json.put_key(heap, w, "repair");
+    o = json.begin_object(heap, o);
+    o = json.put_key(heap, o, "kind");
+    o = json.put_string(heap, o, "choose");
+    o = json.put_key(heap, o, "options");
+    return json.begin_array(heap, o);
+}
+
+// `{"argv":[` -- one option; the caller writes its argument strings
+// (`choose_arg`), then `choose_option_close`.
+pub fn choose_option_open[&h](heap: &!h Heap, w: json.Writer) -> [heap] json.Writer {
+    var o = json.begin_object(heap, w);
+    o = json.put_key(heap, o, "argv");
+    return json.begin_array(heap, o);
+}
+
+// One argument string of the option being written.
+pub fn choose_arg[&h, &a](heap: &!h Heap, w: json.Writer, argument: &a [byte]) -> [heap] json.Writer {
+    return json.put_string(heap, w, argument);
+}
+
+// `]}` -- the option is complete.
+pub fn choose_option_close[&h](heap: &!h Heap, w: json.Writer) -> [heap] json.Writer {
+    let a = json.end_array(heap, w);
+    return json.end_object(heap, a);
+}
+
+// `]}` -- the repair is complete.
+pub fn choose_close[&h](heap: &!h Heap, w: json.Writer) -> [heap] json.Writer {
+    let a = json.end_array(heap, w);
+    return json.end_object(heap, a);
+}
+
+// One whole option: the invocation with argument `at` replaced by
+// `replacement` (as `retry_replacing` does for the one retry), between
+// `choose_open` and `choose_close`.
+pub fn choose_option_replacing[&h, &g, &r](heap: &!h Heap, w: json.Writer, args: &g Args, at: int, replacement: &r [byte]) -> [heap, args] json.Writer {
+    var o = choose_option_open(heap, w);
+    var i = 0;
+    while i < arg_count(args) {
+        if i == at {
+            o = choose_arg(heap, o, replacement);
+        } else {
+            o = choose_arg(heap, o, arg(args, i));
+        }
+        i = i + 1;
+    }
+    return choose_option_close(heap, o);
+}
+
 // `"detail":{` -- rule-specific data; the caller writes keys, then `add`.
 pub fn detail_open[&h](heap: &!h Heap, w: json.Writer) -> [heap] json.Writer {
     let k = json.put_key(heap, w, "detail");
     return json.begin_object(heap, k);
+}
+
+// `"key":"value"` in the detail: a string.
+pub fn detail_str[&h, &k, &v](heap: &!h Heap, w: json.Writer, key: &k [byte], value: &v [byte]) -> [heap] json.Writer {
+    let o = json.put_key(heap, w, key);
+    return json.put_string(heap, o, value);
+}
+
+// `"key":N` in the detail: an integer.
+pub fn detail_int[&h, &k](heap: &!h Heap, w: json.Writer, key: &k [byte], value: int) -> [heap] json.Writer {
+    let o = json.put_key(heap, w, key);
+    return json.put_int(heap, o, value);
+}
+
+// `"key":true|false` in the detail.
+pub fn detail_bool[&h, &k](heap: &!h Heap, w: json.Writer, key: &k [byte], value: bool) -> [heap] json.Writer {
+    let o = json.put_key(heap, w, key);
+    return json.put_bool(heap, o, value);
+}
+
+// `"key":…` in the detail: bytes that may not be UTF-8, as `toolbox.text`
+// writes them (a string, or `{"b64": …}`). Use this for a path or a key from
+// the data; `detail_str` is for text the tool wrote itself.
+pub fn detail_text[&h, &k, &v](heap: &!h Heap, w: json.Writer, key: &k [byte], value: &v [byte]) -> [heap] json.Writer {
+    let o = json.put_key(heap, w, key);
+    return text.put(heap, o, value);
 }
 
 // The rule of an error being built, read back from the writer: the second

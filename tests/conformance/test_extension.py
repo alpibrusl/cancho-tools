@@ -35,6 +35,14 @@ class Extension(unittest.TestCase):
     def run_ext(self, *args):
         return subprocess.run([str(self.exe), *args], capture_output=True, text=True)
 
+    def run_raw(self, *args):
+        return subprocess.run([str(self.exe), *args], capture_output=True)
+
+    def error_schema(self):
+        """The shared `error` definition every tool's schema carries, with its `repair` forms."""
+        defs = json.loads((ROOT / "schemas" / "peek.v1.json").read_text())["$defs"]
+        return {"$ref": "#/$defs/error", "$defs": defs}
+
     def test_the_tools_own_rule_has_its_own_exit_and_code(self):
         p = self.run_ext()
         doc = json.loads(p.stdout)
@@ -69,6 +77,63 @@ class Extension(unittest.TestCase):
     def test_the_skill_names_it(self):
         text = self.run_ext("skill").stdout
         self.assertIn("`demo.ragged` (exit 8): a row with the wrong number of fields", text)
+
+    # `toolbox.fail`'s choose-repair and detail helpers, and `toolbox.sort` (docs: README, "As a package").
+
+    def test_choose_repair_is_the_schemas_shape(self):
+        doc = json.loads(self.run_ext("choose", "two").stdout)
+        err = doc["error"]
+        self.assertEqual(err["repair"], {"kind": "choose", "options": [
+            {"argv": ["one", "choose", "two"]}, {"argv": ["ext", 'two "quoted"']}]})
+        self.assertEqual(err["detail"], {})
+        try:
+            import jsonschema
+        except ImportError:
+            return
+        jsonschema.validate(err, self.error_schema())
+
+    def test_detail_helpers_write_key_and_value_in_one_call(self):
+        err = json.loads(self.run_ext("detail", "a/b").stdout)["error"]
+        self.assertEqual(list(err["detail"].items()), [("name", "plain"), ("row", 3), ("negative", -7), ("ragged", True), ("path", "a/b")])
+        self.assertIsNone(err["repair"])
+        try:
+            import jsonschema
+        except ImportError:
+            return
+        jsonschema.validate(err, self.error_schema())
+
+    def test_detail_text_writes_bytes_that_are_not_utf8_as_b64(self):
+        p = self.run_raw("detail", b"\xff\xfe")
+        err = json.loads(p.stdout)["error"]
+        self.assertEqual(err["detail"]["path"], {"b64": "//4="})
+
+    def test_detail_text_with_no_argument_is_the_empty_string(self):
+        self.assertEqual(json.loads(self.run_ext("detail").stdout)["error"]["detail"]["path"], "")
+
+    def order(self, *args):
+        p = self.run_ext(*args)
+        self.assertEqual(p.returncode, 0, p.stdout)
+        return json.loads(p.stdout)["data"]["order"]
+
+    def test_sort_by_keys_is_stable(self):
+        self.assertEqual(self.order("sort", "3", "1", "2", "1", "3", "2"), [1, 3, 2, 5, 0, 4])
+
+    def test_sort_by_keys_descending_is_stable(self):
+        self.assertEqual(self.order("sort-desc", "3", "1", "2", "1", "3", "2"), [0, 4, 2, 5, 1, 3])
+
+    def test_sort_by_a_comparator_with_a_context(self):
+        self.assertEqual(self.order("sort-odd", "2", "3", "4", "5", "6"), [1, 3, 0, 2, 4])
+
+    def test_sort_of_nothing_and_of_one(self):
+        self.assertEqual(self.order("sort"), [])
+        self.assertEqual(self.order("sort", "5"), [0])
+
+    def test_sort_matches_python_on_many_keys(self):
+        keys = [(i * 7919 + 13) % 97 for i in range(700)]
+        want = sorted(range(len(keys)), key=lambda i: keys[i])
+        self.assertEqual(self.order("sort", *map(str, keys)), want)
+        want = sorted(range(len(keys)), key=lambda i: -keys[i])
+        self.assertEqual(self.order("sort-desc", *map(str, keys)), want)
 
 
 if __name__ == "__main__":

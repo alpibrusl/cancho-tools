@@ -510,11 +510,39 @@ the exit code, the code name, `introspect` and the skill all take them from
 there. A shared tag always keeps its shared meaning: a repeat in `extra_rules`
 is ignored (`tests/conformance/test_extension.py`).
 
+**Helpers for errors and sorting.** Three small pieces came out of building a
+tool on the package (lexsys-table):
+
+* `fail.choose_open`, `choose_option_open`, `choose_arg`, `choose_option_close`,
+  `choose_close` write a `{"kind":"choose","options":[{"argv":[...]},...]}`
+  repair (an error whose cure is one of a few), and `choose_option_replacing`
+  writes one whole option: the invocation with an argument replaced, as
+  `retry_replacing` does for the one retry.
+* `fail.detail_str`, `detail_int`, `detail_bool` and `detail_text` write a detail
+  key and its value in one call (`detail_text` writes bytes that may not be
+  UTF-8 as `toolbox.text` does: a string, or `{"b64": ...}`). An error with
+  several keys is `detail_open`, one line per key, `add`; `tools/move` is written
+  that way.
+* `toolbox.sort` is a stable bottom-up merge sort over a `[int]` of indices,
+  with no allocation of its own: `sort.identity(order, n)`, then
+  `sort.by_keys(keys, order, spare, n, descending)` for a number per entry, or
+  `sort.by(table, order, spare, n, before)` / `sort.by_map(m, order, spare, n,
+  before)` with a comparator `fn(&c [int], int, int) -> [] bool` /
+  `fn(&c map.Map[int], int, int) -> [] bool`. A comparator is a captureless
+  function value, so its context is passed beside it, not captured. The context
+  cannot be a type of the caller's own: a function generic over the context
+  cannot be published into the package by the pinned compiler, so the three
+  contexts above are concrete types. `tools/tally` sorts with `sort.by_map`.
+
+Their tests are `tests/sort_test.ls`, the program `tests/extension/ext.ls`
+(`tests/conformance/test_extension.py`) and the mutants of
+`scripts/helper_mutants.py`.
+
 ## Developing
 
 ```
 contract/           the shared package: rules, fail, out, cli, path, place (open
-                    beneath --root), lines, text, sha, atomic, limit, describe
+                    beneath --root), lines, text, sha, atomic, limit, sort, describe
 tools/<tool>/       one program per tool
 generated/<tool>/   the embedded manifest (written by scripts/manifest.py)
 manifests/          each tool's authority, as the compiler reports it

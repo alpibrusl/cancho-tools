@@ -148,6 +148,7 @@ def fixtures(fx):
 
     # Operands.
     add("move", "args.missing-operand", ["plain.txt"])
+    add("move", "args.required-flag", ["--remove", "plain.txt"])
     add("move", "args.too-many-operands", ["plain.txt", "a.txt", "b.txt"])
     add("move", "path.bad-name", ["plain.txt", "a/b"])
     add("move", "precondition.hash-mismatch", ["--if-sha256", "0" * 64, "plain.txt", "moved.txt"])

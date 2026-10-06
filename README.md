@@ -502,6 +502,14 @@ path = ".lex-sys-vcs/toolbox.cli"
 
 `toolbox.built` is not in the package: each tool generates its own.
 
+**A tool's own rules.** The 38 shared rules are a catalogue in the package. A tool
+built on it that has rules of its own (a CSV reader's `parse.csv-ragged-row`)
+lists them in `describe.Tool`'s `extra_rules` (`tag|exit|repairable|summary`,
+`;`-separated), makes its errors with `fail.empty_in` and `fail.open_in`, and
+the exit code, the code name, `introspect` and the skill all take them from
+there. A shared tag always keeps its shared meaning: a repeat in `extra_rules`
+is ignored (`tests/conformance/test_extension.py`).
+
 ## Developing
 
 ```

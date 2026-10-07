@@ -1,9 +1,9 @@
 {
-  "op_id": "18ebc16d0a45fca18d29bc7e8822b111ae0066a1149c0902dc54b56f1856689a",
+  "op_id": "04ffd813d093007a4e76137f715481488dafb216475790a76268c1d4c2d3a6c1",
   "operation": {
     "kind": "AddFunction",
     "sig_id": "fa482ef86d83a4cb51e6ca1eb2ff327430657b34e18cc41f363a535a6d111f5f",
-    "stage_id": "73c46ec84ca3efa8dca978ad41d2c0007839cd99f2dda3203353021b0088f04f",
+    "stage_id": "995e53f7e63208aca757a416ef50fd3eb7d2642d3527d9158bed4568080d1942",
     "effects": [
       "dir_write",
       "file_write"

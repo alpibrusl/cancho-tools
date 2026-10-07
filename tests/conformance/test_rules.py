@@ -205,11 +205,12 @@ def fixtures(fx):
     add("write", "conflict.locked", ["--if-sha256", "0" * 64, "--stdin", "plain.txt"], setup=hold_lock)
     add("replace", "conflict.locked", ["--old", "alpha", "--new", "b", "plain.txt"], setup=hold_lock)
     add("move", "conflict.locked", ["plain.txt", "moved.txt"], setup=hold_lock)
-    # `move`'s own rule (extra_rules): a filesystem that cannot rename without replacing. CI has none, so
+    # A rule `move` and `write --create` share: a filesystem that cannot rename without replacing. CI has none, so
     # the kernel's answer for one (EINVAL from renameat2, as on NFS and ntfs-3g) is injected under strace.
     # Where there is no strace the fixture is not offered and check_rules says so.
     if STRACE:
         add("move", "io.rename-unsupported", ["plain.txt", "moved.txt"], wrap=INJECT_UNSUPPORTED)
+        add("write", "io.rename-unsupported", ["--create", "--stdin", "fresh.txt"], wrap=INJECT_UNSUPPORTED)
 
     # Queries.
     add("jsonq", "parse.json", ["bad.json"])
@@ -313,7 +314,10 @@ class Rules(unittest.TestCase):
                         failures.append("%s %s: the repair adds %s, whose role is %s" % (tool, rule, added, roles.get(added)))
         self.maxDiff = None
         self.assertEqual(failures, [])
-        self.assertEqual(reached - own, set(shared), "rules without a fixture: %s" % sorted(set(shared) - reached))
+        wanted = set(shared)
+        if not STRACE:
+            wanted.discard("io.rename-unsupported")
+        self.assertEqual(reached - own, wanted, "rules without a fixture: %s" % sorted(wanted - reached))
         for tool in TOOLS:
             declared = {r["rule"] for r in introspect(tool)["rules"]}
             if not STRACE:

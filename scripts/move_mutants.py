@@ -48,7 +48,6 @@ MUTANTS = [
     ("an unsupported filesystem's errno 95 is not mapped", "        } else if failed == 95 || failed == 45 {", "        } else if failed == 99 || failed == 45 {"),
     ("an unsupported filesystem's errno 45 is not mapped", "        } else if failed == 95 || failed == 45 {", "        } else if failed == 95 || failed == 99 {"),
     ("an unsupported filesystem is taken for a success", "            Done::Failed(reason) => {\n                failed = reason;\n                if failed == 0 {", "            Done::Failed(reason) => {\n                failed = reason;\n                if reason == 95 {\n                    failed = 0;\n                }\n                if failed == 0 {"),
-    ("the unsupported refusal has the wrong exit code", "io.rename-unsupported|8|never", "io.rename-unsupported|1|never"),
 ]
 
 original = SOURCE.read_text()

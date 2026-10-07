@@ -67,13 +67,8 @@ fn flag_table() -> [] &static [byte] {
     return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;if-sha256||hex64|guard||the file's current content must hash to this SHA-256, and a retry that already landed then answers changed: false;remove||bool|guard||remove the file by renaming it to its tombstone .NAME.removed-HASH8 (needs --if-sha256, takes no NEWNAME, and nothing is deleted);dry-run||bool|guard||check everything and report planned_actions, exit 9, change nothing;format||choice:json/text|none|json|json for a program, text for a person";
 }
 
-// The one rule only `move` has (`describe.Tool.extra_rules`): the filesystem cannot rename without replacing.
-fn extra_rules() -> [] &static [byte] {
-    return "io.rename-unsupported|8|never|the filesystem cannot refuse an existing name atomically, so move did not rename";
-}
-
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name (the kernel refuses it, even if another process creates it mid-move); locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered. With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked;io.rename-unsupported", extra_rules: extra_rules(), limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
+    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name (the kernel refuses it, even if another process creates it mid-move); locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered. With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked;io.rename-unsupported", extra_rules: "", limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -217,7 +212,7 @@ fn planned[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [
 
 // The new name is taken: the look found it, or the kernel refused the rename (`EEXIST`). One refusal, either way.
 fn name_taken[&h, &p, &z](heap: &!h Heap, e: fail.Errors, from_shown: &p [byte], to_shown: &z [byte]) -> [heap] fail.Errors {
-    var w = fail.open_in(heap, extra_rules(), "conflict.exists", "the new name is taken, and move never replaces a name", "choose another name, or look at what is there first");
+    var w = fail.open(heap, "conflict.exists", "the new name is taken, and move never replaces a name", "choose another name, or look at what is there first");
     w = fail.repair_none(heap, w, "whether to replace what is there is a decision, not a retry");
     w = fail.detail_open(heap, w);
     w = fail.detail_text(heap, w, "path", from_shown);
@@ -229,7 +224,7 @@ fn name_taken[&h, &p, &z](heap: &!h Heap, e: fail.Errors, from_shown: &p [byte],
 // replacing, and `dir_rename_new` has no fallback. The kernel answers a taken name `EEXIST` first, so this is
 // only ever a name that was free.
 fn rename_unsupported[&h, &p, &z](heap: &!h Heap, e: fail.Errors, from_shown: &p [byte], to_shown: &z [byte], errno: int) -> [heap] fail.Errors {
-    var w = fail.open_in(heap, extra_rules(), "io.rename-unsupported", "this filesystem cannot rename without replacing, and move never replaces a name; nothing was moved", "rename within a filesystem that supports it (ext4, XFS, Btrfs, tmpfs, APFS), or check the name yourself and use a shell");
+    var w = fail.open(heap, "io.rename-unsupported", "this filesystem cannot rename without replacing, and move never replaces a name; nothing was moved", "rename within a filesystem that supports it (ext4, XFS, Btrfs, tmpfs, APFS), or check the name yourself and use a shell");
     w = fail.no_repair(heap, w);
     w = fail.detail_open(heap, w);
     w = fail.detail_text(heap, w, "path", from_shown);
@@ -638,7 +633,7 @@ fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io)
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());
     }
-    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty_in(heap, extra_rules()));
+    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty(heap));
     var status = 0;
     borrow parsed as &p in {
         status = body(heap, args, p, fs, io, e);

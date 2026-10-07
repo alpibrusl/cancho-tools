@@ -164,6 +164,7 @@
     "schema",
     "second_range",
     "sentences",
+    "shell_builtin",
     "short_of",
     "shown",
     "size",
@@ -186,5 +187,5 @@
   ],
   "folded_operators": 25,
   "folded_calls": 0,
-  "functions": 241
+  "functions": 242
 }

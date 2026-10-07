@@ -78,6 +78,7 @@ def main():
         print("%-9s %s  [%s]" % (verdict, name, why), flush=True)
         if verdict != "killed":
             survivors.append(name)
+    subprocess.run([COMPILER, "build"], cwd=ROOT, capture_output=True)  # leave build/ as the sources are
     print("%d of %d killed" % (len(chosen) - len(survivors), len(chosen)))
     return 1 if survivors else 0
 

@@ -1,4 +1,4 @@
-"""M9 -- memory does not scale with the input (lex-sys docs/agent-toolbox.md
+"""M9 -- memory does not scale with the input (cancho docs/agent-toolbox.md
 D8 point 4): each streaming tool, run on 1 MiB, 64 MiB and 256 MiB, keeps
 its peak resident memory within a factor of 1.5. The examples/seek this
 replaces failed it by about 95 times (787,816 KB against 8,304 KB).

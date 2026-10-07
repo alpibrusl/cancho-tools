@@ -1,6 +1,6 @@
 """The diff `write` and `replace` answer with is the change they make (issue #8).
 
-`contract/diff.ls` answers one hunk: the lines between the common leading and
+`contract/diff.cho` answers one hunk: the lines between the common leading and
 trailing lines of the old and new content. The claim an agent relies on is
 that the hunk is exact -- keeping the first `old_start - 1` old lines, then
 `added`, then the old lines after the `removed_count` removed gives the new

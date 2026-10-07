@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a tool with its root baked in (lex-sys docs/agent-toolbox.md D14).
+"""Build a tool with its root baked in (cancho docs/agent-toolbox.md D14).
 
     python3 scripts/variant.py --tool seek --root /srv/work [--out DIR]
 
@@ -72,8 +72,8 @@ def build(tool, root, out_dir):
     # checked, exactly as for the shipped tools.
     first = manifest.derive(files)
     schema = json.loads((ROOT / "schemas" / ("%s.v1.json" % tool)).read_text())
-    built = next(f for f in files if f.endswith("__built.ls"))
-    pathlib.Path(built).write_text(manifest.generated(first, schema, proj["package"]["lex-sys"]))
+    built = next(f for f in files if f.endswith("__built.cho"))
+    pathlib.Path(built).write_text(manifest.generated(first, schema, proj["package"]["cancho"]))
     if manifest.derive(files) != first:
         sys.exit("variant: no fixed point")
     binary = pathlib.Path(out_dir) / tool

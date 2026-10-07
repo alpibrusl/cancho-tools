@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Mutation check of `move` (docs/next-tools.md §4): each mutant is tools/move/move.ls with
+"""Mutation check of `move` (docs/next-tools.md §4): each mutant is tools/move/move.cho with
 one deliberate defect, rebuilt, and run against `test_move` and `test_rules`. A mutant is
 killed when a test fails. The file is restored after every mutant, whatever happens.
 
     python3 scripts/move_mutants.py [name-substring ...]
 
-Run where the pinned compiler is (`lex-sys` on PATH, or LEX_SYS). Exit status 1 if one survives.
+Run where the pinned compiler is (`cancho` on PATH, or CANCHO). Exit status 1 if one survives.
 """
 import os
 import pathlib
@@ -14,8 +14,8 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "tools" / "move" / "move.ls"
-COMPILER = os.environ.get("LEX_SYS", "lex-sys")
+SOURCE = ROOT / "tools" / "move" / "move.cho"
+COMPILER = os.environ.get("CANCHO", "cancho")
 
 # (name, the text replaced, its replacement): each `old` occurs exactly once.
 MUTANTS = [

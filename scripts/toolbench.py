@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""toolbench -- the offline performance harness (lex-sys docs/agent-toolbox.md
+"""toolbench -- the offline performance harness (cancho docs/agent-toolbox.md
 §7.1 M9, slice S3). It reports; it publishes nothing and gates nothing
 against GNU (speed is a non-goal, §1.2). The one performance *gate*, memory
 flatness, is tests/conformance/test_memory.py.
@@ -144,7 +144,7 @@ def environment():
             return None
     return {
         "machine": platform.machine(), "kernel": platform.release(), "cpus": os.cpu_count(),
-        "lex_sys": version([os.environ.get("LEX_SYS", "lex-sys"), "--version"]),
+        "cancho": version([os.environ.get("CANCHO", "cancho"), "--version"]),
         "grep": version(["grep", "--version"]), "rg": version(["rg", "--version"]), "jq": version(["jq", "--version"]),
         "coreutils": version(["sha256sum", "--version"]), "locale": "LC_ALL=C for every incumbent",
         "page_cache": "warm (one unmeasured run of each command first)",

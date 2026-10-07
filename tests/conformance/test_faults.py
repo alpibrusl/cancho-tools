@@ -7,7 +7,7 @@ must end without a signal and, in JSON mode, with output that validates
 against the schema. N per tool is FAULTS_N (default 250); the seed is
 FAULTS_SEED (default 1), so a failure is reproducible from its number.
 
-Not covered, by design (lex-sys docs/agent-toolbox.md D8 point 7): a source
+Not covered, by design (cancho docs/agent-toolbox.md D8 point 7): a source
 that never ends or never answers -- /dev/zero, a FIFO with no writer, an
 idle standard input. No tool takes a clock, so none can time out; the
 supervisor owns the wall clock.

@@ -1,9 +1,9 @@
 """A tool's own rules (`toolbox.rules`, "A tool's own rules, beside the shared catalogue").
 
-`tests/extension/ext.ls` is a program that is built with the contract and has two rules of its
+`tests/extension/ext.cho` is a program that is built with the contract and has two rules of its
 own, `demo.ragged` (exit 8, repairable sometimes) and `demo.other` (exit 3). The exit code, the
 code name, `introspect` and `skill` must all take them from `extra_rules`, and the shared rules
-must mean what they meant. Built here, not in `lex-sys.toml`: it is not one of the tools.
+must mean what they meant. Built here, not in `cancho.toml`: it is not one of the tools.
 """
 
 import json
@@ -15,7 +15,7 @@ import unittest
 
 from harness import ROOT
 
-COMPILER = os.environ.get("LEX_SYS", "lex-sys")
+COMPILER = os.environ.get("CANCHO", "cancho")
 
 
 class Extension(unittest.TestCase):
@@ -23,10 +23,10 @@ class Extension(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.exe = pathlib.Path(cls.tmp.name) / "ext"
-        sources = sorted(str(p) for p in (ROOT / "contract").glob("*.ls")) + [str(ROOT / "tests" / "extension" / "ext.ls")]
+        sources = sorted(str(p) for p in (ROOT / "contract").glob("*.cho")) + [str(ROOT / "tests" / "extension" / "ext.cho")]
         b = subprocess.run([COMPILER, "build", *sources, "--std", "-o", str(cls.exe)], capture_output=True, text=True)
         if b.returncode != 0:
-            raise AssertionError("ext.ls did not build:\n" + b.stdout + b.stderr)
+            raise AssertionError("ext.cho did not build:\n" + b.stdout + b.stderr)
 
     @classmethod
     def tearDownClass(cls):
@@ -53,7 +53,7 @@ class Extension(unittest.TestCase):
         self.assertEqual(doc["errors"][1]["code"], "INVALID_ARGS")
 
     def test_a_repeat_of_a_shared_tag_is_ignored(self):
-        # `ext.ls` repeats `path.empty` in its own rules with exit 8; the shared meaning (2) wins.
+        # `ext.cho` repeats `path.empty` in its own rules with exit 8; the shared meaning (2) wins.
         p = self.run_ext("shared")
         self.assertEqual(p.returncode, 2)
         self.assertEqual(json.loads(p.stdout)["error"]["rule"], "path.empty")

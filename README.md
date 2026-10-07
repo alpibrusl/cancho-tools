@@ -1,7 +1,7 @@
-# lexsys-tools
+# cancho-tools
 
 Nine small command-line tools for AI agents, written in
-[lex-sys](https://github.com/alpibrusl/lex-sys). They do the everyday work
+[cancho](https://github.com/alpibrusl/cancho). They do the everyday work
 of `grep`, `ls`/`find`, `sed -n`, `jq`, `sort | uniq -c`, `sha256sum` and a
 careful `cp`, but every answer is JSON, every error names a rule and often comes
 with a command that fixes it, and every binary carries the exact authority
@@ -19,7 +19,7 @@ the compiler proved it needs.
 | [`replace`](#replace-change-exact-text) | `sed -i` | replace exact text an expected number of times, atomically |
 | [`move`](#move-rename-in-place-never-over-anything) | `mv` | rename a file or directory in place, never over an existing name |
 
-**Site:** <https://alpibrusl.github.io/lexsys-tools/> has one page per tool,
+**Site:** <https://alpibrusl.github.io/cancho-tools/> has one page per tool,
 generated from the tool itself: flags, rules, exit codes, authority, JSON
 schemas and a ready-made `SKILL.md`.
 
@@ -30,7 +30,7 @@ prose, notices when something is off and retries. An agent reads text it
 has to parse, often cannot see stderr, and has to decide its next step from
 what came back. Each difference below is about that gap:
 
-| An agent with the classic tool… | With lexsys-tools |
+| An agent with the classic tool… | With cancho-tools |
 |---|---|
 | **parses text.** `grep` prints `path:line:text`, which is ambiguous when a file name holds a `:`; a match in a binary file becomes the sentence `binary file matches`; bytes that are not UTF-8 reach the model raw or replaced. | **reads records with a schema.** Every output is JSON against a published schema (`seek.v1` …). A path, a line number and a byte offset are fields. Binary content is flagged and still searched. Bytes that are not UTF-8 come back as `{"b64": …}`, so nothing is lost. |
 | **cannot tell a short answer from a cut one.** Output that stopped because of a pipe, a timeout or a kill looks like output that ended. | **knows when it has everything.** A stream ends with an `end` record, so a stream without one was cut short. A capped answer says `truncated: true` and gives the `next` cursor (`--skip`, `next.line`) to continue exactly where it stopped. |
@@ -84,31 +84,31 @@ shopping list
 
 What is **not** claimed: that agents finish more tasks, or finish them
 faster, with these tools. That needs an agent-in-the-loop evaluation
-([lex-sys#228](https://github.com/alpibrusl/lex-sys/issues/228)) that has
+([cancho#228](https://github.com/alpibrusl/cancho/issues/228)) that has
 not been run. Everything in the table is a property the conformance gates
 check on every commit.
 
 ## Quick start
 
-The tools are built by the lex-sys compiler at the commit pinned in
-[`lex-sys.toml`](lex-sys.toml). You need Rust (for the compiler) and `clang`.
+The tools are built by the cancho compiler at the commit pinned in
+[`cancho.toml`](cancho.toml). You need Rust (for the compiler) and `clang`.
 
 ```sh
 # 1. The compiler, at the pinned commit
-git clone https://github.com/alpibrusl/lex-sys
-git clone https://github.com/alpibrusl/lexsys-tools
-cd lex-sys
-git checkout "$(sed -n 's/^lex-sys *= *"\([0-9a-f]*\)".*/\1/p' ../lexsys-tools/lex-sys.toml)"
-cargo build --release -p lex-sys
+git clone https://github.com/alpibrusl/cancho
+git clone https://github.com/alpibrusl/cancho-tools
+cd cancho
+git checkout "$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' ../cancho-tools/cancho.toml)"
+cargo build --release -p cancho
 export PATH="$PWD/target/release:$PATH"
 
 # 2. The tools
-cd ../lexsys-tools
-lex-sys build            # every tool into build/
+cd ../cancho-tools
+cancho build            # every tool into build/
 export PATH="$PWD/build:$PATH"
 
 # 3. Try one
-seek --root . --format text 'fn main' tools/seek/seek.ls
+seek --root . --format text 'fn main' tools/seek/seek.cho
 ```
 
 Every tool describes itself:
@@ -120,7 +120,7 @@ seek skill               # a SKILL.md an agent can load
 
 ## As an MCP server
 
-`server/mcp.ls` serves the nine tools to an agent runtime over MCP (stdio,
+`server/mcp.cho` serves the nine tools to an agent runtime over MCP (stdio,
 protocol `2025-06-18`): `tools/list` is generated from each tool's
 `introspect`, and a `tools/call` runs the binary and answers with its output
 byte for byte (and, for the five tools that print one JSON document, as
@@ -138,7 +138,7 @@ build/mcp --root /path/to/workspace [--timeout-ms 30000] [--max-output 16777216]
 A client starts it like any stdio server, for example:
 
 ```json
-{"mcpServers": {"lexsys-tools": {"command": "/abs/path/to/lexsys-tools/build/mcp",
+{"mcpServers": {"cancho-tools": {"command": "/abs/path/to/cancho-tools/build/mcp",
                                  "args": ["--root", "/path/to/workspace"]}}}
 ```
 
@@ -462,7 +462,7 @@ authority reads `fs_read("/srv/work")`.
 A 64 MiB text file, through a pipe, minimum of 7 interleaved rounds
 (`scripts/toolbench.py`), Linux x86_64:
 
-| Command | lexsys-tools | Incumbent |
+| Command | cancho-tools | Incumbent |
 |---|---|---|
 | `seek gamma` (about a million matches) | **0.49 s** | `grep -F -n -b` 0.51 s, `rg` 0.39 s |
 | `seek` with no match | **0.04 s** | `grep -F -n -b` 0.04 s |
@@ -474,7 +474,7 @@ A 64 MiB text file, through a pipe, minimum of 7 interleaved rounds
 | `list`, one directory of 100,000 files | **0.144 s** | `find -printf` 0.146 s, `ls -1` 0.154 s |
 
 * `sha256sum`'s lead is OpenSSL's hand-written vector assembly, which
-  lex-sys has no way to express.
+  cancho has no way to express.
 * Startup is 1.76 ms, against 1.70 ms for `/usr/bin/true`.
 * `--root` adds about 5.5 µs per file opened.
 * Speed is reported, not gated, and these times come from a shared machine.
@@ -488,16 +488,16 @@ python3 scripts/toolbench.py --tool seek --size 64MiB    # measure on your machi
 ## As a package
 
 `contract/` (argument parsing, errors, path confinement, self-description) is
-published as a lex-sys package, one store per module, committed in
-`.lex-sys-vcs/` and checked against the sources in CI
+published as a cancho package, one store per module, committed in
+`.cancho-vcs/` and checked against the sources in CI
 (`scripts/package.py --check`). A project that builds more tools on it names
 each module it imports:
 
 ```toml
 [dependencies.cli]
-git = "https://github.com/alpibrusl/lexsys-tools"
+git = "https://github.com/alpibrusl/cancho-tools"
 rev = "<a full commit hash>"
-path = ".lex-sys-vcs/toolbox.cli"
+path = ".cancho-vcs/toolbox.cli"
 ```
 
 `toolbox.built` is not in the package: each tool generates its own.
@@ -534,7 +534,7 @@ tool on the package (lexsys-table):
   cannot be published into the package by the pinned compiler, so the three
   contexts above are concrete types. `tools/tally` sorts with `sort.by_map`.
 
-Their tests are `tests/sort_test.ls`, the program `tests/extension/ext.ls`
+Their tests are `tests/sort_test.cho`, the program `tests/extension/ext.cho`
 (`tests/conformance/test_extension.py`) and the mutants of
 `scripts/helper_mutants.py`.
 
@@ -548,7 +548,7 @@ generated/<tool>/   the embedded manifest (written by scripts/manifest.py)
 manifests/          each tool's authority, as the compiler reports it
 schemas/            one JSON Schema per tool (written by scripts/schemas.py)
 tools.toml          the authority ceiling a person writes and reviews
-tests/*.ls          unit tests of the contract
+tests/*.cho          unit tests of the contract
 tests/conformance/  the conformance gates, run against the built binaries
 scripts/            manifest.py, schemas.py, variant.py, toolbench.py, site.py
 ```
@@ -556,16 +556,16 @@ scripts/            manifest.py, schemas.py, variant.py, toolbench.py, site.py
 The checks CI runs, in order:
 
 ```sh
-lex-sys fmt --check contract tools tests generated
-lex-sys build
-lex-sys test
+cancho fmt --check contract tools tests generated
+cancho build
+cancho test
 python3 scripts/schemas.py --check      # schemas are generated, not edited
 python3 scripts/manifest.py --check     # authority = the compiler's, embedded, within tools.toml
 python3 -m unittest discover -s tests/conformance -v   # needs jsonschema, jq, strace, ripgrep, cc
 ```
 
 After changing a tool's code, run `python3 scripts/manifest.py` to
-regenerate its manifest, then `lex-sys build` to embed it. A change that
+regenerate its manifest, then `cancho build` to embed it. A change that
 needs a new effect fails the check until `tools.toml` allows it.
 
 The conformance gates check:
@@ -584,26 +584,26 @@ Results are in [`docs/history.md`](docs/history.md).
 ## Status and limits
 
 * **Done:** all nine tools, the contract, the authority gate, the
-  benchmark harness, symlink-safe `--root`, `list` on lex-sys's directory
-  listing ([lex-sys#222](https://github.com/alpibrusl/lex-sys/issues/222)),
-  and the MCP server ([#10](https://github.com/alpibrusl/lexsys-tools/issues/10),
-  on lex-sys's `std.process`).
+  benchmark harness, symlink-safe `--root`, `list` on cancho's directory
+  listing ([cancho#222](https://github.com/alpibrusl/cancho/issues/222)),
+  and the MCP server ([#10](https://github.com/alpibrusl/cancho-tools/issues/10),
+  on cancho's `std.process`).
 * **Not yet:** `seek` over a directory (it takes named files; `list` then
-  `seek` is the pattern for now). Moving SHA-256 into the lex-sys standard library
-  ([#219](https://github.com/alpibrusl/lex-sys/issues/219)) and the lex-os
+  `seek` is the pattern for now). Moving SHA-256 into the cancho standard library
+  ([#219](https://github.com/alpibrusl/cancho/issues/219)) and the lex-os
   bridge that would enforce these authorities at run time are also not done.
-  Open work is tracked in [issues](https://github.com/alpibrusl/lexsys-tools/issues).
+  Open work is tracked in [issues](https://github.com/alpibrusl/cancho-tools/issues).
 * **Not claimed:** that agents do better with these tools than with the
   incumbents. That needs an agent-in-the-loop evaluation
-  ([lex-sys#228](https://github.com/alpibrusl/lex-sys/issues/228)) that has
+  ([cancho#228](https://github.com/alpibrusl/cancho/issues/228)) that has
   not been run. What is claimed is what the gates measure.
 
-The design is lex-sys
-[`docs/agent-toolbox.md`](https://github.com/alpibrusl/lex-sys/blob/main/docs/agent-toolbox.md)
-(epic [lex-sys#214](https://github.com/alpibrusl/lex-sys/issues/214)). The
+The design is cancho
+[`docs/agent-toolbox.md`](https://github.com/alpibrusl/cancho/blob/main/docs/agent-toolbox.md)
+(epic [cancho#214](https://github.com/alpibrusl/cancho/issues/214)). The
 record of how this was built, including where it departs from that design
 and what it found in the compiler, is in [`docs/history.md`](docs/history.md).
 
 ## License
 
-EUPL-1.2, as lex-sys.
+EUPL-1.2, as cancho.

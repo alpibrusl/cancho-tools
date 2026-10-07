@@ -1,6 +1,6 @@
-"""Shared pieces of the offline gates (lex-sys docs/agent-toolbox.md §7.1).
+"""Shared pieces of the offline gates (cancho docs/agent-toolbox.md §7.1).
 
-The binaries are build/<tool>, built by `lex-sys build` before the tests run
+The binaries are build/<tool>, built by `cancho build` before the tests run
 (TOOLBOX_BIN overrides the directory). Every test runs a real process and
 judges it from outside: exit status, the bytes on standard output, the files
 on disk.

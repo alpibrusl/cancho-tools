@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """The MCP server's tool definitions, generated from `introspect` (docs/mcp.md §3).
 
-    python3 scripts/mcp.py [--bin DIR]            # write generated/mcp/tools.ls
+    python3 scripts/mcp.py [--bin DIR]            # write generated/mcp/tools.cho
     python3 scripts/mcp.py --check                # fail if it is not current
     python3 scripts/mcp.py build --bin DIR --out FILE
 
-The tools are built first (`lex-sys build`); each one's `introspect` is the
-only description read. What it writes is one lex-sys module, `mcp.tools`: the
+The tools are built first (`cancho build`); each one's `introspect` is the
+only description read. What it writes is one cancho module, `mcp.tools`: the
 `tools/list` result as one literal, and for each tool the tables a call is
 checked against -- the properties it may pass, the flag each becomes, its
 operands with their counts, and how standard input reaches it.
 
 The server holds `Exec` narrowed to the directory of the binaries, and
 `narrow` takes a literal (docs/mcp.md §5), so the directory is in the source.
-The committed module and server say `/opt/lexsys-tools/bin`; `build --bin`
+The committed module and server say `/opt/cancho-tools/bin`; `build --bin`
 writes both with another directory into a scratch copy and builds that, as
 scripts/variant.py bakes `--root` (D14). Nothing a model sends reaches the
 directory: it picks one of eight names.
@@ -30,9 +30,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import manifest  # noqa: E402
 
 ROOT = manifest.ROOT
-DEFAULT_BIN = "/opt/lexsys-tools/bin"
-GENERATED = ROOT / "generated" / "mcp" / "tools.ls"
-SERVER = ROOT / "server" / "mcp.ls"
+DEFAULT_BIN = "/opt/cancho-tools/bin"
+GENERATED = ROOT / "generated" / "mcp" / "tools.cho"
+SERVER = ROOT / "server" / "mcp.cho"
 
 # Flags the server sets or that would change what the answer is: `--root` is
 # the server's (role `root`), and the server always asks for JSON.
@@ -192,9 +192,9 @@ def build(build_dir, bin_dir, out):
     check_bin(bin_dir)
     with tempfile.TemporaryDirectory() as scratch:
         src = pathlib.Path(scratch)
-        tools_ls = src / "tools.ls"
+        tools_ls = src / "tools.cho"
         tools_ls.write_text(generated(build_dir, bin_dir))
-        server_ls = src / "mcp.ls"
+        server_ls = src / "mcp.cho"
         server_ls.write_text(baked(SERVER.read_text(), bin_dir))
         subprocess.run([manifest.compiler(), "build", str(server_ls), str(tools_ls), "--std", "-o", out],
                        check=True)
@@ -216,7 +216,7 @@ def main():
     text = generated(a.build_dir, a.bin or DEFAULT_BIN)
     if a.check:
         if not GENERATED.exists() or GENERATED.read_text() != text:
-            sys.exit("mcp: generated/mcp/tools.ls is not what introspect says; run scripts/mcp.py")
+            sys.exit("mcp: generated/mcp/tools.cho is not what introspect says; run scripts/mcp.py")
         return
     GENERATED.parent.mkdir(parents=True, exist_ok=True)
     GENERATED.write_text(text)

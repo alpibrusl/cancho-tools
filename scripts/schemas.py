@@ -7,7 +7,7 @@ once, here, and each tool's file is self-contained (it is embedded in the
 tool's binary by scripts/manifest.py and printed by `introspect`).
 
 Every object is `additionalProperties: false` except an error's `detail`,
-which is rule-specific data (lex-sys docs/agent-toolbox.md D3, D5).
+which is rule-specific data (cancho docs/agent-toolbox.md D3, D5).
 
     python3 scripts/schemas.py           # write
     python3 scripts/schemas.py --check   # exit 1 if a committed file differs
@@ -85,7 +85,7 @@ def document(tool, data, extra=None):
     defs["data"] = data
     return {
         "$schema": DIALECT,
-        "$id": "https://github.com/alpibrusl/lexsys-tools/schemas/%s.v1.json" % tool,
+        "$id": "https://github.com/alpibrusl/cancho-tools/schemas/%s.v1.json" % tool,
         "title": "%s.v1" % tool,
         "description": "One JSON object on one line. ok is false exactly when errors is present; error is its first element.",
         "type": "object",
@@ -120,7 +120,7 @@ def stream(tool, records, end_counts):
         defs[name] = schema
     return {
         "$schema": DIALECT,
-        "$id": "https://github.com/alpibrusl/lexsys-tools/schemas/%s.v1.json" % tool,
+        "$id": "https://github.com/alpibrusl/cancho-tools/schemas/%s.v1.json" % tool,
         "title": "%s.v1" % tool,
         "description": "One line of an NDJSON stream. The last line of a stream that finished is the end record; a stream without one was cut short.",
         "oneOf": one_of,

@@ -1,0 +1,64 @@
+{
+  "entries": {
+    "00a46e8ffde42180c812357dd48b28f32b6547009e6ae851f611a3b958c5b606": {
+      "name": "guarantee_keys",
+      "stage_id": "8d58e67972d2b0310e3b3851ad4d59b170f346fd5961dbd56296beac6de86b55",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "14381285698ffa05eb4ad4ca6a712aa96f0560aa6e622548ba445e7c7ae0279b": {
+      "name": "count",
+      "stage_id": "b1c5430c18c641210b1550c323cf944e2dfa641c8a28d7b479861b4999d41d4a",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "26c93a39034f8697f65f6963fc8543185a919eabd5fc012d2d57dbc974e133ad": {
+      "name": "put_list",
+      "stage_id": "4128a5d0f48451647e1fd109ab60e929a832ec0fb4ff873dfd4fce32e4118839",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "2a5581881ef9d5bc818bae292d6b2030635033a19edd36409504839fc5801261": {
+      "name": "item",
+      "stage_id": "410cd85479f6a68e4918a309c7d7e5be90cc7b40e4a879c87e75822ad8dbaa57",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "406ce7ef694b7c98c93e1ea729fc05d0b97e31a3c514c0cbaf50dedd1b62b6e9": {
+      "name": "emits",
+      "stage_id": "267c5c072268558879e76a9b58b3ba9dd822284c7239e5788c20971c4812349b",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "5e5f956900464225b49e9a542a9163f2048c2f5ddca69bbc3a659cd366fe616a": {
+      "name": "guarantees_has",
+      "stage_id": "013cab34075a34ba4869e57776d747c3d8fdae5cf72625ed03ebfbcbd8a59557",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "626e8cb8683b60407005b2bac03f8ed8be030bc47e5dcc5f6ad29ab0a983b8b8": {
+      "name": "introspect",
+      "stage_id": "5582f407a15636a42f07bada73929afd38772e629df81627f11277b3804947e2",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "64175fa1a330683fa6d10193ec5042f97176710abd01cf675dc5413612695c54": {
+      "name": "answer",
+      "stage_id": "d781645aced0cb13d991043b227c017fe0792e4ac31c9e5d33ad18bf6ef87bb8",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "9b40f455f5cbd85593df86aede88df80b84722a80aba804191717c52d9149c9b": {
+      "name": "md",
+      "stage_id": "e9cd87274e8a2ecb76dd4d1e1d0f8dbeabd7812fb262e10d60605929a9e74bdd",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    },
+    "c438c59c5e3bf01a57536c7601e80bcf538edb3babb6da6c9b41cefc04910599": {
+      "name": "skill",
+      "stage_id": "c81a4eb3c02e4381487bedd541a442348bc66c1b4d83b470b77a849e2698fb55",
+      "source_hash": "6775f92b201bdaf8519028b59f8bdfc6a10ab22c8c9bee2a00c1bc2ec4b6a955",
+      "uses_std": true
+    }
+  }
+}

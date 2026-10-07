@@ -17,7 +17,7 @@ import unittest
 
 from harness import ROOT, TOOLS, introspect
 
-# lex-sys docs/agent-toolbox.md D13: each label and what the bridge does
+# cancho docs/agent-toolbox.md D13: each label and what the bridge does
 # with it. `refuse` labels must never appear in a tool.
 BRIDGE = {
     "fs_read": "fs_read with the argument as scope",
@@ -25,7 +25,7 @@ BRIDGE = {
     "net_out": "net with the host as scope",
     "file_read": "dropped: spent at open; fs_read is in the report",
     "file_write": "dropped: spent at open; fs_write is in the report",
-    # lex-sys docs/directory-handles.md: a handle label names no path. A
+    # cancho docs/directory-handles.md: a handle label names no path. A
     # directory is opened under an fs_read scope, and everything a Dir
     # reaches is beneath one, so the scope is the fs_read in the report.
     "dir_read": "dropped: spent at open_dir; fs_read is in the report",
@@ -47,8 +47,8 @@ READ_ONLY = {"seek", "peek", "jsonq", "tally", "hash", "list"}
 
 class Authority(unittest.TestCase):
     def test_manifest_check_passes(self):
-        compiler = os.environ.get("LEX_SYS", "lex-sys")
-        self.assertTrue(shutil.which(compiler), "M6 needs the compiler: put lex-sys on PATH or set LEX_SYS")
+        compiler = os.environ.get("CANCHO", "cancho")
+        self.assertTrue(shutil.which(compiler), "M6 needs the compiler: put cancho on PATH or set CANCHO")
         p = subprocess.run([sys.executable, str(ROOT / "scripts" / "manifest.py"), "--check"], capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 

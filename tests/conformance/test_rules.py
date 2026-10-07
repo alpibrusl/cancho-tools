@@ -3,11 +3,11 @@ list is exactly what its fixtures reach, and every repair a script can apply
 works when applied and takes no authority.
 
 * coverage: the rules reached by the fixtures equal the catalogue
-  (contract/rules.ls) -- `every_tool_rule_has_a_fixture`;
+  (contract/rules.cho) -- `every_tool_rule_has_a_fixture`;
 * each fixture's first error is its rule, with the catalogue's exit code;
 * hint soundness: a `retry` repair, run as it stands in the same state,
   succeeds and does not reach the same rule again; and every flag it adds
-  has role `none` (lex-sys docs/agent-toolbox.md D6 rule 1).
+  has role `none` (cancho docs/agent-toolbox.md D6 rule 1).
 
 Actionability (how many errors carry a repair at all) is reported, not
 gated, until a baseline exists (§7.1).
@@ -25,7 +25,7 @@ from harness import ROOT, TOOLS, Fixture, binary, introspect, run_argv, tmpfs
 
 
 def catalogue():
-    text = (ROOT / "contract" / "rules.ls").read_text()
+    text = (ROOT / "contract" / "rules.cho").read_text()
     body = re.search(r'pub fn catalogue\(\) -> \[\] &static \[byte\] \{\s*return "(.*?)";', text, re.S).group(1)
     out = {}
     for entry in body.split(";"):

@@ -159,7 +159,7 @@ def main():
     args = ap.parse_args()
     for name in ("hash", "write"):
         if not (BUILD / name).exists():
-            sys.exit(f"demo_race: build/{name} is missing; run `lex-sys build` first")
+            sys.exit(f"demo_race: build/{name} is missing; run `cancho build` first")
     section, outcome = transcript()
     problems = []
     if not outcome["classic_lost_a"]:

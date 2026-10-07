@@ -1,0 +1,288 @@
+edition 5;
+
+module toolbox.lines;
+
+// `toolbox.lines` -- lines from a file or standard input in bounded
+// memory (D8).
+//
+// cancho `examples/seek/` read a whole file into a doubling buffer, so its
+// memory tracked the file: 787,816 KB for a 256 MiB input (cancho
+// `docs/agent-toolbox.md` §2.3). Here memory is one 64 KiB chunk plus the
+// longest line, and the line is capped: a line longer than `cap` is
+// reported as `LONG` with its full length (so a repair can name a cap that
+// would hold it) and is skipped, never clipped and never a trap.
+//
+// The walk is a state machine, because there are no closures to hand a
+// callback to:
+//
+//     var r = lines.start(heap, cap);
+//     loop: let (r2, s) = lines.next(heap, r); r = r2;
+//           s == lines.need()  -> r = lines.fill_file(r, handle) (or fill_stdin)
+//           s == lines.line()  -> use lines.text(&r), lines.number(&r), …
+//           s == lines.long()  -> lines.length(&r) is how long it was
+//           s == lines.done()  -> stop
+//
+// A line's text excludes its `\n`; a `\r` before it is kept, as `grep`
+// keeps it. A last line with no newline is a line (`newline(&r)` false).
+
+import std.buffer;
+
+pub fn need() -> [] int {
+    return 0;
+}
+
+pub fn line() -> [] int {
+    return 1;
+}
+
+pub fn done() -> [] int {
+    return 2;
+}
+
+pub fn long() -> [] int {
+    return 3;
+}
+
+pub fn chunk_size() -> [] int {
+    return 65536;
+}
+
+pub res struct Lines {
+    chunk: buffer.Buffer,
+    // How much of `chunk` has been consumed.
+    pos: int,
+    // The line being assembled, at most `cap` bytes.
+    held: buffer.Buffer,
+    cap: int,
+    // Bytes of input consumed, the offset of the current line, its number
+    // (1-based) and, when it ran past `cap`, its whole length.
+    seen: int,
+    begin: int,
+    count: int,
+    over: int,
+    // The source said it has no more; the last line ended with `\n`; the
+    // last answer was a line, so the next call starts a new one.
+    ended: bool,
+    newline: bool,
+    ready: bool,
+    // Bytes read from the source, and whether any was NUL.
+    read: int,
+    nul: bool,
+    // The errno of a failed read, 0 for none.
+    failed: int,
+    // When the current line lies whole inside `chunk`, it is not copied:
+    // `chunk[view_from..view_to]` is the line and `held` is unused. Only a
+    // line that spans two reads is assembled in `held`. (Copying every line
+    // was a fifth of `seek`'s time, measured with callgrind.)
+    viewing: bool,
+    view_from: int,
+    view_to: int,
+}
+
+pub fn start[&h](heap: &!h Heap, cap: int) -> [heap] Lines {
+    return Lines { chunk: buffer.empty(heap, chunk_size()), pos: 0, held: buffer.empty(heap, 256), cap: cap, seen: 0, begin: 0, count: 0, over: 0, ended: false, newline: false, ready: false, read: 0, nul: false, failed: 0, viewing: false, view_from: 0, view_to: 0 };
+}
+
+pub fn drop[&h](heap: &!h Heap, r: Lines) -> [heap] int {
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
+    buffer.drop(heap, chunk);
+    buffer.drop(heap, held);
+    return seen;
+}
+
+pub fn text[&r](r: &r Lines) -> [] &r [byte] {
+    if r.viewing {
+        return buffer.bytes(r.chunk)[r.view_from..r.view_to];
+    }
+    return buffer.bytes(r.held);
+}
+
+pub fn number[&r](r: &r Lines) -> [] int {
+    return r.count;
+}
+
+// The byte offset in the input where the current line starts.
+pub fn offset[&r](r: &r Lines) -> [] int {
+    return r.begin;
+}
+
+pub fn newline[&r](r: &r Lines) -> [] bool {
+    return r.newline;
+}
+
+// The current line's length, whether or not it was held.
+pub fn length[&r](r: &r Lines) -> [] int {
+    if r.over > 0 {
+        return r.over;
+    }
+    if r.viewing {
+        return r.view_to - r.view_from;
+    }
+    return buffer.size(r.held);
+}
+
+pub fn bytes_read[&r](r: &r Lines) -> [] int {
+    return r.read;
+}
+
+pub fn consumed[&r](r: &r Lines) -> [] int {
+    return r.seen;
+}
+
+pub fn saw_nul[&r](r: &r Lines) -> [] bool {
+    return r.nul;
+}
+
+pub fn failed[&r](r: &r Lines) -> [] int {
+    return r.failed;
+}
+
+pub fn ended[&r](r: &r Lines) -> [] bool {
+    return r.ended;
+}
+
+// The next line, or what is needed to get one.
+pub fn next[&h](heap: &!h Heap, r: Lines) -> [heap] (Lines, int) {
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
+    var h = held;
+    var o = over;
+    var b = begin;
+    var at = pos;
+    var s = seen;
+    if ready {
+        borrow mut h as &!hw in {
+            buffer.clear(hw);
+        }
+        o = 0;
+        b = seen;
+    }
+    var status = need();
+    var nl = false;
+    var view = false;
+    var vf = 0;
+    var vt = 0;
+    borrow chunk as &c in {
+        let data = buffer.bytes(c);
+        // One `memchr` for the end of the line (cancho `docs/byte-search.md`).
+        var k = len(data);
+        let found = index_of_byte(data[at..len(data)], byte_of(10));
+        if found >= 0 {
+            k = at + found;
+        }
+        let piece = data[at..k];
+        var held_now = 0;
+        borrow h as &hr in {
+            held_now = buffer.size(hr);
+        }
+        let whole = k < len(data) && held_now == 0 && o == 0;
+        if o > 0 {
+            o = o + len(piece);
+        } else if held_now + len(piece) > cap {
+            o = held_now + len(piece);
+        } else if whole {
+            // The line is all in this chunk: answer a view of it.
+            view = true;
+            vf = at;
+            vt = k;
+        } else {
+            h = buffer.append(heap, h, piece);
+        }
+        if k < len(data) {
+            s = s + (k + 1 - at);
+            at = k + 1;
+            nl = true;
+            status = line();
+        } else {
+            s = s + (k - at);
+            at = k;
+        }
+    }
+    if status == need() && ended {
+        var held_now = 0;
+        borrow h as &hr in {
+            held_now = buffer.size(hr);
+        }
+        if held_now > 0 || o > 0 {
+            status = line();
+        } else {
+            status = done();
+        }
+    }
+    var number = count;
+    if status == line() {
+        number = count + 1;
+        if o > 0 {
+            status = long();
+        }
+    }
+    let answered = status == line() || status == long();
+    return (Lines { chunk: chunk, pos: at, held: h, cap: cap, seen: s, begin: b, count: number, over: o, ended: ended, newline: nl, ready: answered, read: read, nul: nul, failed: failed, viewing: view, view_from: vf, view_to: vt }, status);
+}
+
+fn any_nul[&d](data: &d [byte]) -> [] bool {
+    return index_of_byte(data, byte_of(0)) >= 0;
+}
+
+// Refill from an open file. Call only after `next` answered `need`.
+pub fn fill_file[&f](r: Lines, file: &!f File) -> [file_read] Lines {
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
+    var c = chunk;
+    var e = ended;
+    var got = 0;
+    var bad = failed;
+    var z = nul;
+    borrow mut c as &!cw in {
+        buffer.clear(cw);
+        match file_read(file, buffer.room(cw)) {
+            Read::Got(n) => {
+                buffer.filled(cw, n);
+                got = n;
+            }
+            Read::End => {
+                e = true;
+            }
+            Read::Failed(reason) => {
+                e = true;
+                bad = reason;
+                if bad == 0 {
+                    bad = 5;
+                }
+            }
+        }
+    }
+    if got > 0 {
+        borrow c as &cr in {
+            if any_nul(buffer.bytes(cr)) {
+                z = true;
+            }
+        }
+    }
+    return Lines { chunk: c, pos: 0, held: held, cap: cap, seen: seen, begin: begin, count: count, over: over, ended: e, newline: newline, ready: ready, read: read + got, nul: z, failed: bad, viewing: false, view_from: 0, view_to: 0 };
+}
+
+// Refill from standard input, one `getchar` at a time (the only way the
+// language reads it, cancho `docs/standard-input.md`).
+pub fn fill_stdin[&h, &i](heap: &!h Heap, r: Lines, io: &!i Io) -> [heap, io_read] Lines {
+    let Lines { chunk, pos, held, cap, seen, begin, count, over, ended, newline, ready, read, nul, failed, viewing, view_from, view_to } = r;
+    var c = chunk;
+    var e = ended;
+    var got = 0;
+    var z = nul;
+    borrow mut c as &!cw in {
+        buffer.clear(cw);
+    }
+    var ch = 0;
+    while got < chunk_size() && !e {
+        ch = getchar(io);
+        if ch < 0 {
+            e = true;
+        } else {
+            if ch == 0 {
+                z = true;
+            }
+            c = buffer.push(heap, c, byte_of(ch));
+            got = got + 1;
+        }
+    }
+    return Lines { chunk: c, pos: 0, held: held, cap: cap, seen: seen, begin: begin, count: count, over: over, ended: e, newline: newline, ready: ready, read: read + got, nul: z, failed: failed, viewing: false, view_from: 0, view_to: 0 };
+}

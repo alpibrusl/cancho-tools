@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/alpibrusl/lexsys-tools/schemas/jsonq.v1.json",
+  "$id": "https://github.com/alpibrusl/cancho-tools/schemas/jsonq.v1.json",
   "title": "jsonq.v1",
   "description": "One JSON object on one line. ok is false exactly when errors is present; error is its first element.",
   "type": "object",

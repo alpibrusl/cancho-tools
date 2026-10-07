@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Mutation check of the contract's helpers (`fail.choose_*`, `fail.detail_*`, `toolbox.sort`): each
-mutant is `contract/fail.ls` or `contract/sort.ls` with one deliberate defect. It is killed when
-`tests/sort_test.ls` (lex-sys test) or `tests/conformance/test_extension.py` (a program built with the
-contract, tests/extension/ext.ls) fails, or when the contract no longer builds. The file is restored
+mutant is `contract/fail.cho` or `contract/sort.cho` with one deliberate defect. It is killed when
+`tests/sort_test.cho` (cancho test) or `tests/conformance/test_extension.py` (a program built with the
+contract, tests/extension/ext.cho) fails, or when the contract no longer builds. The file is restored
 after every mutant, whatever happens.
 
     python3 scripts/helper_mutants.py [name-substring ...]
 
-Run where the pinned compiler is (`lex-sys` on PATH, or LEX_SYS). Exit status 1 if one survives.
+Run where the pinned compiler is (`cancho` on PATH, or CANCHO). Exit status 1 if one survives.
 """
 import os
 import pathlib
@@ -16,7 +16,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-COMPILER = os.environ.get("LEX_SYS", "lex-sys")
+COMPILER = os.environ.get("CANCHO", "cancho")
 
 # (file, name, the text replaced, its replacement[, which occurrence]): without the last, `old` occurs exactly once in its file.
 MUTANTS = [
@@ -58,7 +58,7 @@ MUTANTS = [
     ("sort", "identity writes past n", "    while i < n && i < len(order) {", "    while i <= n && i < len(order) {"),
 ]
 
-PATHS = {"fail": ROOT / "contract" / "fail.ls", "sort": ROOT / "contract" / "sort.ls"}
+PATHS = {"fail": ROOT / "contract" / "fail.cho", "sort": ROOT / "contract" / "sort.cho"}
 originals = {k: v.read_text() for k, v in PATHS.items()}
 
 
@@ -68,8 +68,8 @@ def restore(*_):
 
 
 def build_and_test():
-    sources = sorted(str(p) for p in (ROOT / "contract").glob("*.ls"))
-    u = subprocess.run([COMPILER, "test", *sources, str(ROOT / "tests" / "sort_test.ls"), "--std"], cwd=ROOT, capture_output=True, text=True, timeout=900)
+    sources = sorted(str(p) for p in (ROOT / "contract").glob("*.cho"))
+    u = subprocess.run([COMPILER, "test", *sources, str(ROOT / "tests" / "sort_test.cho"), "--std"], cwd=ROOT, capture_output=True, text=True, timeout=900)
     if u.returncode:
         return "killed", "sort_test: " + (u.stdout + u.stderr).strip().splitlines()[-1][:100]
     p = subprocess.run([sys.executable, "-W", "ignore", "-m", "unittest", "test_extension"], cwd=ROOT / "tests" / "conformance", capture_output=True, text=True, timeout=900)

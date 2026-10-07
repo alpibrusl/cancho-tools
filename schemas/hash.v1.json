@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/alpibrusl/lexsys-tools/schemas/hash.v1.json",
+  "$id": "https://github.com/alpibrusl/cancho-tools/schemas/hash.v1.json",
   "title": "hash.v1",
   "description": "One line of an NDJSON stream. The last line of a stream that finished is the end record; a stream without one was cut short.",
   "oneOf": [

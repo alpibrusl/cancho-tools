@@ -511,7 +511,7 @@ there. A shared tag always keeps its shared meaning: a repeat in `extra_rules`
 is ignored (`tests/conformance/test_extension.py`).
 
 **Helpers for errors and sorting.** Three small pieces came out of building a
-tool on the package (lexsys-table):
+tool on the package (cancho-table):
 
 * `fail.choose_open`, `choose_option_open`, `choose_arg`, `choose_option_close`,
   `choose_close` write a `{"kind":"choose","options":[{"argv":[...]},...]}`

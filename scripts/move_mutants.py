@@ -22,7 +22,7 @@ COMPILER = os.environ.get("CANCHO", "cancho")
 
 # (name, the text replaced, its replacement): each `old` occurs exactly once.
 MUTANTS = [
-    ("an existing destination is replaced", "            } else if dst_errno == 0 {\n                var w = fail.open(heap, \"conflict.exists\"", "            } else if dst_errno == 99 {\n                var w = fail.open(heap, \"conflict.exists\""),
+    ("the look no longer refuses an existing destination (a dry run would plan it)", "            } else if dst_errno == 0 {\n                e = name_taken(", "            } else if dst_errno == 99 {\n                e = name_taken("),
     ("a stale hash is accepted", "if !bytes.equal(buffer.bytes(hb), cli.text(args, parsed, table, \"if-sha256\")) {\n                        var w = fail.open(heap, \"precondition.hash-mismatch\"", "if false && !bytes.equal(buffer.bytes(hb), cli.text(args, parsed, table, \"if-sha256\")) {\n                        var w = fail.open(heap, \"precondition.hash-mismatch\""),
     ("a retry is 'landed' whatever the destination holds", "landed = bytes.equal(buffer.bytes(tb), cli.text(args, parsed, table, \"if-sha256\"));", "landed = true;"),
     ("a retry that had landed is never recognised", "if guarded && dst_errno == 0 && dst_kind == dirs.kind_file() {", "if false && guarded && dst_errno == 0 && dst_kind == dirs.kind_file() {"),

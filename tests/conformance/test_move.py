@@ -322,8 +322,10 @@ class Unlocked(unittest.TestCase):
 
     def test_a_filesystem_without_the_flag_is_a_refusal_with_its_own_rule(self):
         # Linux answers EINVAL for a rename flag the filesystem does not implement (NFS, ntfs-3g),
-        # and the compiler's builtin turns that into EOPNOTSUPP (95); ENOTSUP is 95 as well.
-        for errno_name in ("EINVAL", "EOPNOTSUPP"):
+        # and the compiler's builtin turns that into EOPNOTSUPP (95); macOS answers ENOTSUP (45) itself.
+        # (45 is macOS's ENOTSUP; on Linux the number is EL2NSYNC, which no rename answers, so injecting it
+        # stands in for the macOS answer here. The real one is `UnsupportedFilesystem`, on ExFAT.)
+        for errno_name, shown in (("EINVAL", 95), ("EOPNOTSUPP", 95), ("EL2NSYNC", 45)):
             with self.subTest(errno=errno_name):
                 fx = Fixture()
                 try:
@@ -333,7 +335,7 @@ class Unlocked(unittest.TestCase):
                     self.assertEqual(p.returncode, 8, out)
                     err = json.loads(out)["error"]
                     self.assertEqual((err["rule"], err["code"]), ("io.rename-unsupported", "PRECONDITION_FAILED"))
-                    self.assertEqual(err["detail"], {"path": "src", "to": "dest", "errno": 95})
+                    self.assertEqual(err["detail"], {"path": "src", "to": "dest", "errno": shown})
                     self.assertIsNone(err["repair"], "never repairable")
                     self.assertEqual((fx.root / "src").read_bytes(), b"mover\n")
                     self.assertFalse((fx.root / "dest").exists(), "nothing was moved")

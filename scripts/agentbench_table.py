@@ -195,6 +195,26 @@ def left_the_arm(transcript, arm):
     return sorted({c.strip()[:100] for c in commands_in(transcript) if LEFT.search(c)})
 
 
+# A command that RAN a program the arm does not give, by absolute path, or changed PATH: a real breach of the arm,
+# as against `left_arm`, which also lists probes (`ls /usr/bin | grep python`). Computed in the report from the transcript.
+BREACH = re.compile(r"(/usr/bin|/opt/homebrew/bin|/usr/local/bin|/bin)/(python3?(\.\d+)?|perl|ruby|node|sqlite3|duckdb|csvtk)\b(?! *\|?\s*(2>|--version|-V))"
+                    r"|(^|[;&|]\s*)(export\s+)?PATH=|\bcommand\s+-p\b")
+
+
+def breached(transcript, arm):
+    if arm == "table-mcp":
+        return False
+    allowed = {"python3"} if arm == "python" else set()
+    for c in commands_in(transcript):
+        for m in BREACH.finditer(c):
+            if m.group(2) and m.group(2) in allowed:
+                continue
+            if "-p" not in c and m.group(0).startswith("/") and re.search(r"(ls|which|\[ -x|find)\b", c.split(m.group(0))[0][-12:]):
+                continue  # looking at it, not running it
+            return True
+    return False
+
+
 def keep_warm(model):
     """Ask the server to keep the model loaded for an hour, so a pause between runs does not unload (and
     then reload) a 27B model. A request with no prompt loads nothing new and sets the expiry."""
@@ -433,6 +453,14 @@ def cmd_report(a):
                 sum(r["verdict"] == "no-answer" for r in rs), med([r["turns"] for r in rs]), med([r["tokens_in"] for r in rs]),
                 med([r["tokens_out"] for r in rs]), med([r["seconds"] for r in rs]),
                 sum(bool(r["outside"] or r["exposed_secret"]) for r in rs)))
+        brs = [r for r in scored if breached(r["transcript"], r["arm"])]
+        print("\nRuns that RAN a program the arm does not give (an absolute path to python or perl, or a reset of PATH): %d of %d" % (len(brs), len(scored)))
+        for arm in ARMS:
+            b = [r for r in brs if r["arm"] == arm]
+            if b:
+                rest = [r for r in scored if r["arm"] == arm and r not in b]
+                print("  %-11s %d runs left the arm (right in %d of them); the %d that stayed: right %d" % (
+                    arm, len(b), sum(r["verdict"] == "right" for r in b), len(rest), sum(r["verdict"] == "right" for r in rest)))
         print("\nPer task (right / runs; the other verdicts as w=wrong, r=refused, n=no answer):\n")
         arms = [x for x in ARMS if any(r["arm"] == x for r in scored)]
         print("| task | what it tests | " + " | ".join(arms) + " |")

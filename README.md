@@ -303,6 +303,15 @@ $ printf 'hello again\n' | write --root . --if-sha256 5891b5b5…be03 --stdin NO
 
 * **Idempotent.** If the file already holds the new content, the answer is `changed: false`, exit 0.
 * **Atomic.** The content goes to a temporary file, which is synced and renamed over the target.
+* **`--create` never replaces, by the kernel.** Its rename is `renameat2(RENAME_NOREPLACE)` (macOS `renameatx_np`
+  with `RENAME_EXCL`), so a file made at the path after `write` looked, by a process that takes no lock, is
+  refused and not overwritten: `conflict.exists` (or `changed: false`, if it holds exactly the new content), the
+  temporary removed. Measured with `scripts/write_race.py` against a creator that takes no lock: with the replacing
+  rename 411 of 20,000 random arrivals lost the creator's file on the Mac, 107 of 20,000 on Linux x86-64, and 100
+  of 100 when the rename was delayed; now 0, 0 and 0. A filesystem that cannot refuse atomically (NFS, ntfs-3g,
+  ExFAT answer a free name `EINVAL`/`ENOTSUP`) is `io.rename-unsupported` (exit 8), never a replace. What is left:
+  `--if-sha256` replaces an existing file, which is its job, and the lock is advisory, so a writer that takes no
+  lock can still change that file between the look and the rename; no POSIX call makes a content compare-and-swap.
 * **Locked.** A lock is held from the check to the rename, so of two writers racing with the same `--if-sha256`, exactly one wins.
 * **Dry run.** `--dry-run` reports what would happen and exits 9 without changing anything.
 * **A diff.** The answer, and a dry run's `planned_actions`, carry `diff`: the lines that change (see `replace` below).
@@ -394,7 +403,7 @@ and nothing is replaced).
 ## Errors you can act on
 
 Every error is data: `{code, rule, message, hint, repair, detail}`. Match on
-`rule`; the 38 rules are listed by `introspect` and on the site. When a fix
+`rule`; the 39 rules are listed by `introspect` and on the site. When a fix
 can be applied mechanically, `repair` is a command to run as it stands:
 
 ```console
@@ -516,7 +525,7 @@ path = ".cancho-vcs/toolbox.cli"
 
 `toolbox.built` is not in the package: each tool generates its own.
 
-**A tool's own rules.** The 38 shared rules are a catalogue in the package. A tool
+**A tool's own rules.** The 39 shared rules are a catalogue in the package. A tool
 built on it that has rules of its own (a CSV reader's `parse.csv-ragged-row`)
 lists them in `describe.Tool`'s `extra_rules` (`tag|exit|repairable|summary`,
 `;`-separated), makes its errors with `fail.empty_in` and `fail.open_in`, and

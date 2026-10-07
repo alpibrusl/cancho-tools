@@ -22,6 +22,17 @@ edition 6;
 //   renamed over the destination while a `flock` on `<path>.lexsys-lock`
 //   is held from before the check until after the rename
 //   (`toolbox.atomic`).
+// * **`--create` never replaces, by the kernel.** Its last step is
+//   `atomic.create`, a no-replace rename (`renameat2` `RENAME_NOREPLACE`,
+//   macOS `renameatx_np` `RENAME_EXCL`), so a file made at the path after the
+//   look -- by a process that takes no lock, which the `flock` cannot stop --
+//   is refused (`conflict.exists`, or `changed: false` when it holds exactly
+//   the new content) and not overwritten (`scripts/write_race.py`). A
+//   filesystem that cannot refuse atomically is `io.rename-unsupported`; the
+//   temporary is removed on every refusal. `--if-sha256` replaces an existing
+//   file, which is its job, with the plain rename: between its look and its
+//   rename a lock-free writer can still change the file (the lock is
+//   advisory), and nothing in POSIX makes a compare-and-swap of content.
 // * **`--dry-run`** exits 9 with `planned_actions` and makes no mutating
 //   call: no lock file, no temporary, no rename. That is a property of
 //   this code and of `tests/conformance/test_mutation.py` (strace), not of
@@ -55,7 +66,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "write", version: "0.1.0", summary: "Replace a file atomically, only if it holds what the caller says it holds (--if-sha256) or does not exist (--create); idempotent, locked, with --dry-run.", usage: "write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX] [--dry-run] [--max-bytes N] [--max-diff-lines N] (--stdin | --content-file PATH) [--format json|text] PATH", output: "document", schema: "write.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file to create or replace", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;limit.input-too-large;precondition.required;precondition.hash-mismatch;precondition.content-mismatch;conflict.exists;conflict.locked", extra_rules: "", limits: "max-bytes|67108864|1073741824;max-diff-lines|200|100000", reversibility: "irreversible-bounded", stdin: "with --stdin", guarantees: "deterministic;idempotent;atomic;requires_precondition;dry_run" };
+    return describe.Tool { name: "write", version: "0.1.0", summary: "Replace a file atomically, only if it holds what the caller says it holds (--if-sha256) or does not exist (--create); idempotent, locked, with --dry-run.", usage: "write [--root DIR] (--create | --if-sha256 HEX) [--content-sha256 HEX] [--dry-run] [--max-bytes N] [--max-diff-lines N] (--stdin | --content-file PATH) [--format json|text] PATH", output: "document", schema: "write.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file to create or replace", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;limit.input-too-large;precondition.required;precondition.hash-mismatch;precondition.content-mismatch;conflict.exists;conflict.locked", extra_rules: "", limits: "max-bytes|67108864|1073741824;max-diff-lines|200|100000", reversibility: "irreversible-bounded", stdin: "with --stdin", guarantees: "deterministic;idempotent;atomic;requires_precondition;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -163,6 +174,24 @@ fn planned[&h, &p, &b, &a, &d](heap: &!h Heap, shown: &p [byte], o: Outcome, bef
     return inner;
 }
 
+// `--create` found the path taken: by the look, or by the kernel refusing the rename (`EEXIST`) because
+// something made the file after the look. One refusal either way; `have` is the file's hash, or empty
+// when it could not be read.
+fn create_refused[&h, &s, &x](heap: &!h Heap, e: fail.Errors, shown: &s [byte], have: &x [byte]) -> [heap] fail.Errors {
+    var w = fail.open(heap, "conflict.exists", "--create was given and the path exists with other content", "read the file, then write with --if-sha256 and its current hash");
+    w = fail.repair_none(heap, w, "the file exists; whether to replace it is a decision, not a retry");
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, "path");
+    w = text.put(heap, w, shown);
+    w = json.put_key(heap, w, "actual_sha256");
+    if len(have) == 0 {
+        w = json.put_null(heap, w);
+    } else {
+        w = json.put_string(heap, w, have);
+    }
+    return fail.add(heap, e, w);
+}
+
 // The precondition, checked against the file as it is now, and the write.
 // Called with the lock held, or for a dry run without one.
 fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, dir: &f Dir, name: &s [byte], shown: &s [byte], content: &c [byte], after: &a [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer, buffer.Buffer) {
@@ -212,14 +241,7 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
         } else if bytes.equal(have, after) {
             // Already applied: same final state, nothing to do (D10).
         } else if creating {
-            var w = fail.open(heap, "conflict.exists", "--create was given and the path exists with other content", "read the file, then write with --if-sha256 and its current hash");
-            w = fail.repair_none(heap, w, "the file exists; whether to replace it is a decision, not a retry");
-            w = fail.detail_open(heap, w);
-            w = json.put_key(heap, w, "path");
-            w = text.put(heap, w, shown);
-            w = json.put_key(heap, w, "actual_sha256");
-            w = json.put_string(heap, w, have);
-            e = fail.add(heap, e, w);
+            e = create_refused(heap, e, shown, have);
         } else if !bytes.equal(have, cli.text(args, parsed, table, "if-sha256")) {
             var w = fail.open(heap, "precondition.hash-mismatch", "the file does not hold the content --if-sha256 named", "re-read the file, then decide");
             w = fail.repair_none(heap, w, "the file changed since it was read; re-read, then decide");
@@ -261,14 +283,52 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
         var failed = 0;
         var step = 0;
         borrow temp as &t in {
-            let (errno2, step2) = atomic.replace(dir, name, buffer.bytes(t), content);
-            failed = errno2;
-            step = step2;
+            // A name that must not exist is installed with the kernel's no-replace rename, so a file made
+            // after the look, by a process that takes no lock, is refused and not overwritten.
+            if creating {
+                let (errno2, step2) = atomic.create(dir, name, buffer.bytes(t), content);
+                failed = errno2;
+                step = step2;
+            } else {
+                let (errno2, step2) = atomic.replace(dir, name, buffer.bytes(t), content);
+                failed = errno2;
+                step = step2;
+            }
         }
         buffer.drop(heap, temp);
         if failed != 0 {
             if step == 1 && failed == 17 {
                 e = fail.simple(heap, e, "conflict.locked", "the temporary file could not be created; another writer may hold it", "retry later", "path", shown);
+            } else if creating && step == 4 && failed == 17 {
+                // The path appeared after the look. If it holds exactly this content the create is
+                // already applied (D10); otherwise it is the same refusal as the look's.
+                let (there, there_errno, there_size) = atomic.hash_file(heap, dir_open_read(dir, name));
+                var same = false;
+                borrow there as &tb in {
+                    same = there_errno == 0 && bytes.equal(buffer.bytes(tb), after);
+                    if !same {
+                        var actual = buffer.bytes(tb);
+                        if there_errno != 0 {
+                            actual = "";
+                        }
+                        e = create_refused(heap, e, shown, actual);
+                    }
+                }
+                buffer.drop(heap, there);
+                if same {
+                    o = Outcome { changed: false, created: false, planned: false, bytes: len(content), diff_truncated: false };
+                    buffer.drop(heap, changes);
+                    changes = buffer.append(heap, buffer.empty(heap, 4), "[]");
+                }
+            } else if creating && step == 4 && atomic.rename_unsupported(failed) {
+                var w = fail.open(heap, "io.rename-unsupported", "this filesystem cannot refuse an existing name atomically, so --create did not create the file", "create the file within a filesystem that supports it (ext4, XFS, Btrfs, tmpfs, APFS), or check the name yourself and use --if-sha256 on the file once it exists");
+                w = fail.no_repair(heap, w);
+                w = fail.detail_open(heap, w);
+                w = json.put_key(heap, w, "path");
+                w = text.put(heap, w, shown);
+                w = json.put_key(heap, w, "errno");
+                w = json.put_int(heap, w, failed);
+                e = fail.add(heap, e, w);
             } else {
                 var w = fail.open(heap, fail.io_rule(failed, true), "the replacement could not be written; the file is as it was", "");
                 w = fail.no_repair(heap, w);

@@ -162,6 +162,7 @@
     "parent_of",
     "parse_nat",
     "prefix",
+    "rename_unsupported",
     "repairable_in",
     "role_of",
     "rotr64",
@@ -191,5 +192,5 @@
   ],
   "folded_operators": 25,
   "folded_calls": 0,
-  "functions": 241
+  "functions": 245
 }

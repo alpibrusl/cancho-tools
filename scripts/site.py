@@ -52,7 +52,8 @@ header.site {
   border-bottom: 1px solid var(--rule); padding: 12px 16px;
   display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline;
 }
-header.site a.home { font-weight: 700; color: var(--fg); text-decoration: none; }
+header.site a.home { font-weight: 700; color: var(--fg); text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
+header.site a.home img { border-radius: 6px; }
 header.site nav { display: flex; flex-wrap: wrap; gap: 4px 12px; }
 header.site nav a { color: var(--muted); text-decoration: none; font-family: ui-monospace, monospace; font-size: 14px; }
 header.site nav a:hover, header.site nav a[aria-current] { color: var(--accent); }
@@ -167,6 +168,10 @@ def markdown(text):
         if line.startswith("<!--") and line.rstrip().endswith("-->"):
             i += 1
             continue
+        # The logo line (raw HTML) shows nothing here: the header carries the mark.
+        if line.startswith('<p align="center"><img'):
+            i += 1
+            continue
         # A badge line (an image link) shows nothing: the converter has no images.
         if line.startswith("[![") and line.rstrip().endswith(")"):
             i += 1
@@ -247,10 +252,12 @@ def page(title, body, current=None, description=""):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <meta name="description" content="{html.escape(description)}">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-tools/assets/cancho-tools-logo-256.png">
+<link rel="icon" type="image/png" href="assets/cancho-tools-icon-64.png">
 <style>{CSS}</style>
 </head>
 <body>
-<header class="site"><a class="home" href="index.html">cancho-tools</a><nav>{nav}</nav></header>
+<header class="site"><a class="home" href="index.html"><img src="assets/cancho-tools-icon-64.png" alt="" width="28" height="28">cancho-tools</a><nav>{nav}</nav></header>
 <main>
 {body}
 </main>
@@ -365,6 +372,9 @@ def main():
         (out / f"{name}.SKILL.md").write_bytes(subprocess.run([str(exe), "skill"], check=True, capture_output=True).stdout)
         for schema, body in d["schemas"].items():
             (out / "schemas" / f"{schema}.json").write_text(json.dumps(body, indent=2) + "\n")
+    (out / "assets").mkdir()
+    for f in sorted((ROOT / "docs" / "assets").glob("*.png")):
+        shutil.copy(f, out / "assets" / f.name)
     (out / "index.html").write_text(index_page((ROOT / "README.md").read_text(), tools))
     (out / ".nojekyll").write_text("")
     print(f"site: {len(tools)} tools -> {out}")

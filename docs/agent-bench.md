@@ -6,6 +6,14 @@
 > **designed here and not built**: the design comes first, and nothing in §11
 > runs until its preflight (§11.4) exists and passes.
 
+> **Provenance.** This file and the harness were written before the rename (lex-sys
+> to cancho, `.ls` to `.cho`, `lexsys-tools` to `cancho-tools`) as
+> [cancho-tools#21](https://github.com/alpibrusl/cancho-tools/pull/21), and are
+> ported here onto the renamed `main`. Only names changed; no measured result was
+> edited. The writers' lock sidecar is still called `<file>.lexsys-lock` in the
+> current tools (it is a file name the tools create, not a project name), so §5 and §9
+> keep it. The harness drives eight of the nine tools (`move` came later).
+
 The README claims what the gates measure and says plainly what it does not
 claim: that an agent does better with these tools than with `grep`, `sed`
 and `jq`. `scripts/toolbench.py` measures speed and memory against GNU, which

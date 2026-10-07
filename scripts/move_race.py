@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""The limit docs/next-tools.md §2 states and does not assert: `move` looks at the destination and
-then renames, and POSIX `renameat` replaces silently. Both names are locked, so two *toolbox*
-processes cannot interleave there; a process that takes no lock is not stopped. Is the window real?
+"""The limit docs/next-tools.md §4 measured, and its closing: `move` looked at the destination and
+then renamed with `renameat`, which replaces silently. Both names are locked, so two *toolbox*
+processes cannot interleave there; a process that takes no lock was not stopped (55 of 20,000 random
+arrivals and 100 of 100 delayed ones lost the creator's file). `move` now renames with `dir_rename_new`
+(`renameat2` with `RENAME_NOREPLACE`; `renameatx_np` with `RENAME_EXCL` on macOS), so the kernel refuses
+a name taken after the look. This is the measurement, and it runs against either build: pass `--bin`.
 
     python3 scripts/move_race.py [--trials N] [--bin DIR] [--mode natural|delayed]
 
 Each trial: a source and no destination; `move SRC DEST` runs while a creator in this process makes
 `DEST` with `open(O_CREAT|O_EXCL)`, which takes no lock. `natural`: the creator arrives at a random moment
 (0 to 2.5 ms) after the mover is launched, so the chance it lands in the window is what it would be for a
-careless process. `delayed`: the mover's `renameat` is delayed 30 ms under `strace`, and the creator arrives
+careless process. `delayed`: the mover's `renameat`/`renameat2` is delayed 30 ms under `strace`, and the creator arrives
 at 15 ms: not a rate, a demonstration that the window exists. A trial is LOST when the creator's file was made
 and `move` then reported success with DEST holding the mover's bytes: the creator's file was
 replaced without a word. The answer is counts, not an assertion.
@@ -44,7 +47,7 @@ def main():
             made = []
             cmd = [move, "--root", str(work), "src", "dest"]
             if a.mode == "delayed":
-                cmd = ["strace", "-f", "-qq", "-o", "/dev/null", "-e", "trace=renameat", "-e", "inject=renameat:delay_enter=30ms"] + cmd
+                cmd = ["strace", "-f", "-qq", "-o", "/dev/null", "-e", "trace=renameat,renameat2", "-e", "inject=renameat,renameat2:delay_enter=30ms"] + cmd
                 arrive = 0.015
             else:
                 arrive = random.uniform(0, 0.0025)

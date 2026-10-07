@@ -8,9 +8,13 @@
 * M8, confinement: a link is renamed as itself and its target is never touched; a
   link in a *directory* of the path is refused, never followed.
 
-The open question of §2 is not a gate: whether a process that takes no lock can
-create the destination between the look and the rename is measured by
-`scripts/move_race.py`, and what it found is in the document.
+* the rename itself refuses a name taken after the look (`dir_rename_new`:
+  `RENAME_NOREPLACE`/`RENAME_EXCL`), which `Unlocked` gates: a creator that takes no lock and
+  arrives while the rename is delayed (the 100-of-100 loss of the replacing rename) loses nothing,
+  and the kernel's answers are mapped (`EEXIST` is `conflict.exists`; a filesystem without the
+  flag is `io.rename-unsupported`), the latter by injecting the errno under `strace`, because CI has
+  no filesystem that lacks the flag. The rate of the loss with the replacing rename, at a random
+  arrival, is measured by `scripts/move_race.py`.
 """
 
 import fcntl
@@ -19,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import unittest
 
 from harness import Fixture, binary, sha256
@@ -257,6 +262,134 @@ class Apply(unittest.TestCase):
             if content == b"written\n":
                 self.assertEqual((self.fx.root / "one").read_bytes(), b"moved\n")
         print("\nmove M7: %d mover/writer races, exactly one winner each" % trials)
+
+
+@unittest.skipUnless(shutil.which("strace"), "the delayed-rename and injected-errno checks need strace")
+class Unlocked(unittest.TestCase):
+    """What the kernel does for `move` when something that takes no lock gets there first."""
+
+    def under_strace(self, fx, inject, args):
+        cmd = ["strace", "-f", "-qq", "-o", "/dev/null", "-e", "trace=renameat,renameat2", "-e", "inject=" + inject,
+               binary("move"), "--root", str(fx.root)] + args
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=fx.dir)
+
+    def test_a_creator_that_takes_no_lock_loses_nothing_while_the_rename_is_delayed(self):
+        # The old behaviour (a look, then `renameat`, which replaces) lost the creator's file in 100 of
+        # 100 trials of exactly this. The rename is held 30 ms in the kernel's door, the creator makes
+        # DEST with O_EXCL and no lock at 15 ms, and the mover must be refused, not obeyed.
+        trials = int(os.environ.get("DELAYED_TRIALS", "20"))
+        fx = Fixture()
+        try:
+            for i in range(trials):
+                for n in ("src", "dest"):
+                    if (fx.root / n).exists():
+                        (fx.root / n).unlink()
+                (fx.root / "src").write_bytes(b"mover\n")
+                p = self.under_strace(fx, "renameat,renameat2:delay_enter=30ms", ["src", "dest"])
+                time.sleep(0.015)
+                fd = os.open(fx.root / "dest", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.write(fd, b"creator\n")
+                os.close(fd)
+                out, _ = p.communicate()
+                self.assertEqual(p.returncode, 5, "trial %d: %r" % (i, out[:300]))
+                self.assertEqual(json.loads(out)["error"]["rule"], "conflict.exists")
+                self.assertEqual((fx.root / "dest").read_bytes(), b"creator\n", "trial %d: the creator's file was replaced" % i)
+                self.assertEqual((fx.root / "src").read_bytes(), b"mover\n", "trial %d: the source did not stay" % i)
+            print("\nmove: %d delayed-rename races against a creator without a lock, nothing lost" % trials)
+        finally:
+            fx.cleanup()
+
+    def test_the_kernels_refusal_after_a_free_look_is_the_same_refusal(self):
+        # EEXIST injected for a destination that the look saw free: what a creator that got there
+        # between the two would cause. Same rule, same exit, same detail as the look's refusal.
+        fx = Fixture()
+        try:
+            (fx.root / "src").write_bytes(b"mover\n")
+            p = self.under_strace(fx, "renameat2:error=EEXIST", ["src", "dest"])
+            out, _ = p.communicate()
+            self.assertEqual(p.returncode, 5, out)
+            err = json.loads(out)["error"]
+            self.assertEqual((err["rule"], err["code"]), ("conflict.exists", "CONFLICT"))
+            self.assertEqual(err["detail"], {"path": "src", "to": "dest"})
+            self.assertEqual((fx.root / "src").read_bytes(), b"mover\n")
+            self.assertFalse((fx.root / "dest").exists())
+            # And for the look's own refusal: identical.
+            (fx.root / "dest").write_bytes(b"taken\n")
+            code, doc = run_move(fx, "src", "dest")
+            self.assertEqual((code, doc["error"]["rule"], doc["error"]["detail"]), (5, "conflict.exists", err["detail"]))
+        finally:
+            fx.cleanup()
+
+    def test_a_filesystem_without_the_flag_is_a_refusal_with_its_own_rule(self):
+        # Linux answers EINVAL for a rename flag the filesystem does not implement (NFS, ntfs-3g),
+        # and the compiler's builtin turns that into EOPNOTSUPP (95); macOS answers ENOTSUP (45) itself.
+        # (45 is macOS's ENOTSUP; on Linux the number is EL2NSYNC, which no rename answers, so injecting it
+        # stands in for the macOS answer here. The real one is `UnsupportedFilesystem`, on ExFAT.)
+        for errno_name, shown in (("EINVAL", 95), ("EOPNOTSUPP", 95), ("EL2NSYNC", 45)):
+            with self.subTest(errno=errno_name):
+                fx = Fixture()
+                try:
+                    (fx.root / "src").write_bytes(b"mover\n")
+                    p = self.under_strace(fx, "renameat2:error=" + errno_name, ["src", "dest"])
+                    out, _ = p.communicate()
+                    self.assertEqual(p.returncode, 8, out)
+                    err = json.loads(out)["error"]
+                    self.assertEqual((err["rule"], err["code"]), ("io.rename-unsupported", "PRECONDITION_FAILED"))
+                    self.assertEqual(err["detail"], {"path": "src", "to": "dest", "errno": shown})
+                    self.assertIsNone(err["repair"], "never repairable")
+                    self.assertEqual((fx.root / "src").read_bytes(), b"mover\n")
+                    self.assertFalse((fx.root / "dest").exists(), "nothing was moved")
+                finally:
+                    fx.cleanup()
+
+    def test_any_other_kernel_answer_is_a_failed_write_not_a_success(self):
+        fx = Fixture()
+        try:
+            (fx.root / "src").write_bytes(b"mover\n")
+            p = self.under_strace(fx, "renameat2:error=EIO", ["src", "dest"])
+            out, _ = p.communicate()
+            self.assertEqual(p.returncode, 1, out)
+            err = json.loads(out)["error"]
+            self.assertEqual((err["rule"], err["detail"]["errno"]), ("io.write-failed", 5))
+            self.assertEqual((fx.root / "src").read_bytes(), b"mover\n")
+            self.assertFalse((fx.root / "dest").exists())
+        finally:
+            fx.cleanup()
+
+    def test_a_dry_run_of_a_taken_name_is_still_the_looks_refusal(self):
+        # A dry run makes no mutating call, so only the look can refuse there.
+        fx = Fixture()
+        try:
+            code, doc = run_move(fx, "--dry-run", "plain.txt", "crlf.txt")
+            self.assertEqual((code, doc["error"]["rule"]), (5, "conflict.exists"))
+        finally:
+            fx.cleanup()
+
+
+class UnsupportedFilesystem(unittest.TestCase):
+    """The same refusal on a real filesystem that cannot rename without replacing (NFS, ntfs-3g and ExFAT
+    answer a free name `EINVAL`/`ENOTSUP`). CI has none, so this runs only when
+    `CANCHO_RENAME_UNSUPPORTED_DIR` names a writable directory on one (the variable the compiler's own
+    test reads), and says so when it does not; `Unlocked` covers the Linux errno by injection."""
+
+    def test_a_free_name_is_refused_and_a_taken_one_is_the_same_conflict(self):
+        base = os.environ.get("CANCHO_RENAME_UNSUPPORTED_DIR")
+        if not base:
+            self.skipTest("CANCHO_RENAME_UNSUPPORTED_DIR is not set: no filesystem without RENAME_NOREPLACE here")
+        fx = Fixture(base)
+        try:
+            (fx.root / "src").write_bytes(b"mover\n")
+            code, doc = run_move(fx, "src", "dest")
+            self.assertEqual((code, doc["error"]["rule"]), (8, "io.rename-unsupported"), doc)
+            self.assertIn(doc["error"]["detail"]["errno"], (95, 45))
+            self.assertEqual((fx.root / "src").read_bytes(), b"mover\n")
+            self.assertFalse((fx.root / "dest").exists())
+            (fx.root / "dest").write_bytes(b"taken\n")
+            code, doc = run_move(fx, "src", "dest")
+            self.assertEqual((code, doc["error"]["rule"]), (5, "conflict.exists"))
+            self.assertEqual((fx.root / "dest").read_bytes(), b"taken\n")
+        finally:
+            fx.cleanup()
 
 
 class Remove(unittest.TestCase):

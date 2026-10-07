@@ -17,6 +17,7 @@ import fcntl
 import os
 import re
 import resource
+import shutil
 import signal
 import subprocess
 import unittest
@@ -48,6 +49,9 @@ def small_files():
     signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
     resource.setrlimit(resource.RLIMIT_FSIZE, (16, 16))
 
+
+STRACE = shutil.which("strace") is not None
+INJECT_UNSUPPORTED = ["strace", "-f", "-qq", "-o", "/dev/null", "-e", "trace=renameat2", "-e", "inject=renameat2:error=EINVAL"]
 
 # Near misses of one flag of role `none`, per tool: the repair the parser
 # should suggest, and that must work when applied.
@@ -88,9 +92,9 @@ def fixtures(fx):
     r = str(fx.root)
     out = []
 
-    def add(tool, rule, args, stdin=b"new\n", preexec=None, setup=None, root=True):
+    def add(tool, rule, args, stdin=b"new\n", preexec=None, setup=None, root=True, wrap=()):
         argv = (["--root", r] if root else []) + args
-        out.append((tool, rule, argv, stdin, preexec, setup))
+        out.append((tool, rule, argv, stdin, preexec, setup, list(wrap)))
 
     for tool in TOOLS:
         near, _ = NEAR[tool]
@@ -201,6 +205,11 @@ def fixtures(fx):
     add("write", "conflict.locked", ["--if-sha256", "0" * 64, "--stdin", "plain.txt"], setup=hold_lock)
     add("replace", "conflict.locked", ["--old", "alpha", "--new", "b", "plain.txt"], setup=hold_lock)
     add("move", "conflict.locked", ["plain.txt", "moved.txt"], setup=hold_lock)
+    # `move`'s own rule (extra_rules): a filesystem that cannot rename without replacing. CI has none, so
+    # the kernel's answer for one (EINVAL from renameat2, as on NFS and ntfs-3g) is injected under strace.
+    # Where there is no strace the fixture is not offered and check_rules says so.
+    if STRACE:
+        add("move", "io.rename-unsupported", ["plain.txt", "moved.txt"], wrap=INJECT_UNSUPPORTED)
 
     # Queries.
     add("jsonq", "parse.json", ["bad.json"])
@@ -220,11 +229,11 @@ class Rules(unittest.TestCase):
         # Each fixture runs in a fresh tree, and its arguments name that tree.
         fx = Fixture(base)
         fx.held = None
-        tool, rule, args, stdin, preexec, setup = fixtures(fx)[index]
+        tool, rule, args, stdin, preexec, setup, wrap = fixtures(fx)[index]
         try:
             if setup:
                 setup()
-            argv = [binary(tool)] + args
+            argv = wrap + [binary(tool)] + args
             p = subprocess.run(argv, input=stdin, capture_output=True, cwd=fx.root, preexec_fn=preexec, timeout=60)
             result = run_argv(tool, argv, stdin)
             result.status, result.stdout, result.stderr = p.returncode, p.stdout, p.stderr
@@ -256,7 +265,16 @@ class Rules(unittest.TestCase):
         self.check_rules(base)
 
     def check_rules(self, base):
-        cat = catalogue()
+        shared = catalogue()
+        cat = dict(shared)
+        # A tool's own rules (`extra_rules`) are in its `introspect`, not in the shared catalogue: their
+        # exit codes and repairability are checked against what the tool says of itself.
+        own = set()
+        for tool in TOOLS:
+            for r in introspect(tool)["rules"]:
+                if r["rule"] not in shared:
+                    cat[r["rule"]] = (r["exit"], r["repairable"])
+                    own.add(r["rule"])
         fx = Fixture(base)
         try:
             all_fixtures = fixtures(fx)
@@ -295,9 +313,12 @@ class Rules(unittest.TestCase):
                         failures.append("%s %s: the repair adds %s, whose role is %s" % (tool, rule, added, roles.get(added)))
         self.maxDiff = None
         self.assertEqual(failures, [])
-        self.assertEqual(reached, set(cat), "rules without a fixture: %s" % sorted(set(cat) - reached))
+        self.assertEqual(reached - own, set(shared), "rules without a fixture: %s" % sorted(set(shared) - reached))
         for tool in TOOLS:
             declared = {r["rule"] for r in introspect(tool)["rules"]}
+            if not STRACE:
+                # Without strace the filesystem that lacks the flag cannot be simulated here.
+                declared -= {"io.rename-unsupported"}
             self.assertEqual(declared, per_tool[tool], "%s declares %s; fixtures reach %s" % (
                 tool, sorted(declared - per_tool[tool]), sorted(per_tool[tool] - declared)))
         print("\nM3%s: %d fixtures, %d rules, %d retry repairs applied" % (" on tmpfs" if base else "", len(all_fixtures), len(reached), repaired))

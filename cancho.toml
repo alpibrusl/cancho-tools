@@ -1,6 +1,6 @@
 [package]
 name = "cancho-tools"
-cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"   # the compiler these sources were written for
+cancho = "62c2be5ebad14c068833b92b1dedddb39ba75c5e"   # the compiler these sources were written for
 
 # One program per tool (D17): a program's authority is the union of what its
 # main reaches, so a multi-call binary would report every tool's row for every

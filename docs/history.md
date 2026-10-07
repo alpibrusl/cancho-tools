@@ -204,3 +204,10 @@ around silently.
    see it. There is no `fstat` on a `File`; `place.file_length` asks the
    handle with a one-byte `pread` first, which answers `EISDIR` everywhere,
    and M3 runs a second time with its tree on `/dev/shm` when that is tmpfs.
+6. **`move` could not refuse an existing name atomically.** Its look-then-`dir_rename`
+   lost the file of a process that took no lock in 55 of 20,000 random-arrival
+   trials and 100 of 100 delayed ones (`scripts/move_race.py`). cancho gained
+   `dir_rename_new` (edition 7: `renameat2` `RENAME_NOREPLACE`, `renameatx_np`
+   `RENAME_EXCL`; PR #351), `move` uses it, and the same trials lose nothing.
+   `write --create` has the same look-then-replace shape (`toolbox.atomic` renames
+   its temporary over the name) and is not changed yet.

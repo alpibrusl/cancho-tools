@@ -1,11 +1,11 @@
-# How lexsys-tools got here
+# How cancho-tools got here
 
 The [README](../README.md) says what the tools are and how to use them. This
 file keeps the record: what each gate measured, how performance moved and
 why, how the epic's sub-issues were closed, where the build departs from the
 design, and what building it found in the compiler. Section numbers (§, D, M,
-L, S) refer to lex-sys
-[`docs/agent-toolbox.md`](https://github.com/alpibrusl/lex-sys/blob/main/docs/agent-toolbox.md).
+L, S) refer to cancho
+[`docs/agent-toolbox.md`](https://github.com/alpibrusl/cancho/blob/main/docs/agent-toolbox.md).
 
 ## What the gates measured
 
@@ -20,7 +20,7 @@ On the pinned compiler (`066a810`), Linux x86_64, a shared and noisy sandbox.
 | M5 differential | `seek` = `grep -F -n -b -a [-i]`; `peek` = `sed -n`, `wc -l`; `jsonq` = `jq -c`; `hash` = `sha256sum`/`sha512sum` at every padding boundary and past 64 KiB; `write` = `cp`; `tally` = `sort \| uniq -c \| sort -k1,1nr -k2`: 0 divergences over the seeded and edge corpus |
 | M6 authority | the committed record equals a fresh derivation, the binary prints it, it is within `tools.toml`, the fixed point holds, and D13's bridge table is total for every label held |
 | M7 mutation | `--dry-run` under `strace`: no mutating call, tree unchanged (with a positive control); every write applied twice, the second `changed:false`; 200 two-writer races, exactly one winner each |
-| M8 confinement | `..`, absolute, `//`, `./`, trailing `/`, sibling prefix, empty, 4,097 bytes, non-ASCII, a link to a file and a link to a directory: each a tag or a success, never a trap. **No link reaches outside `--root`**: every tool, readers and writers, through a linked file and a linked directory, is `path.symlink` and leaves the outside untouched (until lex-sys#227 this row asserted the escape); a link in `--root`'s own spelling is followed |
+| M8 confinement | `..`, absolute, `//`, `./`, trailing `/`, sibling prefix, empty, 4,097 bytes, non-ASCII, a link to a file and a link to a directory: each a tag or a success, never a trap. **No link reaches outside `--root`**: every tool, readers and writers, through a linked file and a linked directory, is `path.symlink` and leaves the outside untouched (until cancho#227 this row asserted the escape); a link in `--root`'s own spelling is followed |
 | M9 memory flatness | peak resident memory at 1, 64 and 256 MiB: `seek` 1,724/1,724/1,724 KB, `peek` 1,720/1,656/1,720, `hash` 1,704/1,640/1,704, `tally` 1,728/1,728/1,728 (max/min ≤ 1.10; the gate is 1.5; `/bin/true` measures 1,320 KB the same way). `examples/seek` measured the same way: 4,432 KB at 1 MiB, 197,968 KB at 64 MiB |
 | D14 variant | `seek` and `write` built with the root baked in: the authority names the directory (`fs_read("/srv/work")`, and for `write` `dir_write` with no `fs_write`), and every M8 case is a tag, not a trap, though the narrowed `Fs` would trap on any path the validation missed |
 
@@ -30,7 +30,7 @@ On the pinned compiler (`066a810`), Linux x86_64, a shared and noisy sandbox.
 7 interleaved rounds, minimum, through a pipe (`scripts/toolbench.py`). The
 columns are rounds of work: the first version; the same sources after
 profiling, on the compiler they were written for (`a18e533`); on `8fc3b3f`,
-with lex-sys's `calloc`, `copy_into`, `index_of_byte` and `flush_out` in use;
+with cancho's `calloc`, `copy_into`, `index_of_byte` and `flush_out` in use;
 and now, on the same compiler, with `seek` scanning blocks instead of lines and
 `hash`'s rounds reworked (below). The last three columns and the incumbents
 were measured on one machine on the same day; the incumbents' times are this
@@ -67,22 +67,22 @@ operation; the schedule is now reused and the rounds use wrapping adds and one
 mask per word.
 
 What the profile found that was **not** in this repository, and was fixed in
-lex-sys instead (the third column):
+cancho instead (the third column):
 
 * **`jsonq`'s parse tape was zero-filled byte by byte** (24 bytes per byte of
   input, 43% of the instructions). A zero-filled `box_slice` is now `calloc`
-  (lex-sys#235, `docs/zeroed-slices.md`): the pages the parser never writes
+  (cancho#235, `docs/zeroed-slices.md`): the pages the parser never writes
   are never touched. 0.43 s to 0.15 s, and peak memory from 427,540 KB to
   88,888 KB.
 * **Copying bytes was a loop with a bounds check per byte**, a quarter of a
-  match-heavy `seek`. lex-sys now has `copy_into`, one `memmove`
-  (lex-sys#240, `docs/bulk-copy.md`), and `std.buffer.append` uses it, so
+  match-heavy `seek`. cancho now has `copy_into`, one `memmove`
+  (cancho#240, `docs/bulk-copy.md`), and `std.buffer.append` uses it, so
   this repository's own copy (`text.append_bytes`) is deleted.
 * **Finding the end of a line was a loop** comparing every byte with `\n`.
-  `index_of_byte` is one `memchr` (lex-sys#241, `docs/byte-search.md`); the
+  `index_of_byte` is one `memchr` (cancho#241, `docs/byte-search.md`); the
   line reader, which `peek`, `tally` and `seek` share, uses it. The three
   changes were measured together, not one at a time.
-* **A failed write at exit was invisible.** `flush_out` (lex-sys#232,
+* **A failed write at exit was invisible.** `flush_out` (cancho#232,
   `docs/checked-output.md`) is now called after the last write of every tool;
   it costs nothing measurable.
 
@@ -105,7 +105,7 @@ The fourth column, in this repository again:
   need no escaping is one table load instead of four comparisons, and
   `text.append_nat` writes its digits in one pass instead of two (together
   they were 52% of a match-heavy run).
-* **`hash` rotates without a rotate.** lex-sys has no 32-bit type, so a
+* **`hash` rotates without a rotate.** cancho has no 32-bit type, so a
   32-bit rotation was two shifts, an or and a mask. A word written twice,
   `x << 32 | x`, holds all its rotations: the low 32 bits of `(x << 32 | x) >> n`
   are `x` rotated by `n`, and one doubled word serves all three rotations of a
@@ -126,22 +126,22 @@ Startup: 1.76 ms against 1.70 ms for `/usr/bin/true` (300 spawns each).
 
 | N | Issue | Here |
 |---|---|---|
-| 1 | lex-sys#215 checked stdout writes (L1) | **Done** (lex-sys#232, `flush_out`). Every `write_bytes` is checked against its length, and `toolbox.out.flushed` flushes standard output after the last write and reports a failure at any earlier point; either makes the tool say `io.write-failed` on stderr and exit 1. A stream still ends with an `end` record, because a killed process flushes nothing |
-| 2 | lex-sys#216 S0 the contract package | **Done**: `contract/`, unit tests in `tests/*.ls` |
-| 3 | lex-sys#217 S1a `seek` v1 | **Done** |
-| 4 | lex-sys#218 S1b `write` / `replace` | **Done** |
-| 5 | lex-sys#219 incremental SHA-256 (L4) | **In-package half done** (`contract/sha.ls`, SHA-256 and SHA-512, checked against `std.crypto` for every length 0-300 in three chunkings and against `sha256sum` past 64 KiB). The `std.crypto` half is a compiler change, not done |
-| 6 | lex-sys#220 S2a manifest export and CI gate | **Done**: `scripts/manifest.py`, `tools.toml`, `manifests/`, `generated/` |
+| 1 | cancho#215 checked stdout writes (L1) | **Done** (cancho#232, `flush_out`). Every `write_bytes` is checked against its length, and `toolbox.out.flushed` flushes standard output after the last write and reports a failure at any earlier point; either makes the tool say `io.write-failed` on stderr and exit 1. A stream still ends with an `end` record, because a killed process flushes nothing |
+| 2 | cancho#216 S0 the contract package | **Done**: `contract/`, unit tests in `tests/*.cho` |
+| 3 | cancho#217 S1a `seek` v1 | **Done** |
+| 4 | cancho#218 S1b `write` / `replace` | **Done** |
+| 5 | cancho#219 incremental SHA-256 (L4) | **In-package half done** (`contract/sha.cho`, SHA-256 and SHA-512, checked against `std.crypto` for every length 0-300 in three chunkings and against `sha256sum` past 64 KiB). The `std.crypto` half is a compiler change, not done |
+| 6 | cancho#220 S2a manifest export and CI gate | **Done**: `scripts/manifest.py`, `tools.toml`, `manifests/`, `generated/` |
 | 7 | lex-os#122 S2b fail-closed bridge | **Not done** (lex-os). `test_authority.py` checks that D13's table is total for the labels these tools hold |
 | 8 | lex-os#123 `diff` path-prefix narrowing | **Not done** (lex-os) |
-| 9 | lex-sys#221 S3 toolbench | **Done**: `scripts/toolbench.py`, self-test in CI |
-| 10 | lex-sys#222 `fs_list` / `fs_stat` (L2/L3) | **Not done** (compiler; decision D16 pending) |
-| 11 | lex-sys#223 B1 `peek`, `jsonq`, `tally` | **Done** |
-| 12 | lex-sys#224 B2 `list` and `hash` | **`hash` done**; `list` waits on #222 |
-| 13 | lex-sys#225 D14 variant transform | **Built and tested, no variant shipped**, as D14 recommends: `scripts/variant.py`, `tests/conformance/test_variant.py` |
-| 14 | lex-sys#226 canary job in lex-sys CI | **Not done** (lex-sys CI) |
-| 15 | lex-sys#227 no-follow open (L6) | **Done** (lex-sys#250 and #254, directory handles). Every tool opens a path under `--root` beneath it with `toolbox.place`; `write` and `replace` create, rename, lock and sync beneath the parent `Dir` and hold no `fs_write`; M8 asserts the refusal |
-| 16 | lex-sys#228 S-last agent-in-the-loop evaluation | **Not run**: it needs a model in a loop and a frozen protocol, which this environment does not have |
+| 9 | cancho#221 S3 toolbench | **Done**: `scripts/toolbench.py`, self-test in CI |
+| 10 | cancho#222 `fs_list` / `fs_stat` (L2/L3) | **Not done** (compiler; decision D16 pending) |
+| 11 | cancho#223 B1 `peek`, `jsonq`, `tally` | **Done** |
+| 12 | cancho#224 B2 `list` and `hash` | **`hash` done**; `list` waits on #222 |
+| 13 | cancho#225 D14 variant transform | **Built and tested, no variant shipped**, as D14 recommends: `scripts/variant.py`, `tests/conformance/test_variant.py` |
+| 14 | cancho#226 canary job in cancho CI | **Not done** (cancho CI) |
+| 15 | cancho#227 no-follow open (L6) | **Done** (cancho#250 and #254, directory handles). Every tool opens a path under `--root` beneath it with `toolbox.place`; `write` and `replace` create, rename, lock and sync beneath the parent `Dir` and hold no `fs_write`; M8 asserts the refusal |
+| 16 | cancho#228 S-last agent-in-the-loop evaluation | **Not run**: it needs a model in a loop and a frozen protocol, which this environment does not have |
 
 ## Where this differs from the design, and why
 
@@ -174,9 +174,9 @@ Startup: 1.76 ms against 1.70 ms for `/usr/bin/true` (300 spawns each).
   is no `getcwd`), so it is `path.outside-root`.
 * **`seek` does not read standard input**, so its row has no `io_read`.
 
-## What building it found in lex-sys
+## What building it found in cancho
 
-Each is reproducible from the commit pinned in `lex-sys.toml`; none is worked
+Each is reproducible from the commit pinned in `cancho.toml`; none is worked
 around silently.
 
 1. **`Vec[&static [byte]]` does not compile on the LLVM backend**: the
@@ -187,11 +187,11 @@ around silently.
    `var size = 0; size = buffer.size(r);` is refused with "`size` is a local
    binding, not a function"; so are `failed = lines.failed(r)`,
    `next = json.at(…)` after `let at`, and others. Met in five source files
-   here (`contract/path.ls`, `seek`, `peek`, `jsonq`, `tally`); the locals were
+   here (`contract/path.cho`, `seek`, `peek`, `jsonq`, `tally`); the locals were
    renamed.
 3. **Two root-module test files that each `import std.test` cannot be one
    `[[test]]` set**: "`test` is already bound to another import". Each test
-   file is its own set in `lex-sys.toml`.
+   file is its own set in `cancho.toml`.
 4. **The design's own probe pitfall, met in this repository's M9**: a child
    forked from the test runner inherits the runner's resident high-water
    mark across `exec`, so every peak first read 24,448 KB. `maxrss.c`

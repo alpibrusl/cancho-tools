@@ -1,0 +1,46 @@
+{
+  "entries": {
+    "074a602ec928ffdde48b937e87c1f4138358163df23f92c945547850c0b033ee": {
+      "name": "prefix",
+      "stage_id": "e1d35c02c5b1109f3d8bd8c71f5e9b520904d54ca5ba97b947dbbd6c0022f1cb",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    },
+    "189136d542615208dd473650f287426a7461a716ec374daa8527ab047bd56438": {
+      "name": "budget",
+      "stage_id": "ad5b887619f5cae29c830e8140737863f4c5049554cef70f36025932ee225acf",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    },
+    "4ae62b0ca9e545fa926ae7a70a7b9996772e0aa79ad225543d260ef23f5b5765": {
+      "name": "put_lines",
+      "stage_id": "aa4f7c2786f7e8aa0cdcce0aae15edb0426079c6977f6b0221fd66da0d317801",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    },
+    "4b3228c5dc8b8011c5c7dca7bd9e4673d32b820ae43adee60852edc06ee48834": {
+      "name": "suffix",
+      "stage_id": "050b0df64b6ac3c3a2db500cf4b0d553550b820abd1b189875740b5b8affec1a",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    },
+    "783f38b45b6ee62903dfc357005bf3f54480cc646a215a398e65e0311de97925": {
+      "name": "hunks",
+      "stage_id": "f10ddd46f3de672538d73bc46622bef855f214e82f14bbb20590732c1a18cd32",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    },
+    "b2ddd80cc4407e6fd75b7b47ef7a815e80250029202334f4600a1f90885c7d94": {
+      "name": "line_count",
+      "stage_id": "0abf522e90a5b3a0c17667ea7faa0e30b8349d8fbfee99adc23decc62a9d1257",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    },
+    "ed04c8330cff492bf8c5f085618b556c5fb837c7166c0e11a3488107bb2f2d9e": {
+      "name": "starts_line",
+      "stage_id": "71a26ce175f04146deba9e2c6b2c1e3e3623fd83dddff0acc19090b917045e83",
+      "source_hash": "3e8e5577db49723e5cd7cce58cded30cfde0b66a496567dbff0ce847d7148ce1",
+      "uses_std": true
+    }
+  }
+}

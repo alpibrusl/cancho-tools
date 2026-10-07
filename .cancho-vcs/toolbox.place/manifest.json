@@ -1,0 +1,76 @@
+{
+  "entries": {
+    "105cb25b27415811fbca6ad1b7c6d15427008967f2c79155f10689e01f064811": {
+      "name": "leaf",
+      "stage_id": "eed755d449e23873ac0f3fe87bcc2a4a37b8617585dc0172bd408d0171ccf55a",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "18318fd2aa726243b4f84ce45d846c6720620411f236cb23c6fc596609b0798f": {
+      "name": "file_length",
+      "stage_id": "a7db68af5b1869a05765327a558770b3b29ff1de649d13623e4e6d6d0aff8634",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "2002b01bf60ff189eef8f28a46e968531bc434cb2bd1ac64f82ca7a8f0d5e05b": {
+      "name": "open_file",
+      "stage_id": "eaab41e0d439763c634c99f1c47710db8501787f600d3babb70151cc15af52da",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "248d432cbfd49f54835d16cbea89a97e3bf4b6612c76ee16f67cafd4386ae50d": {
+      "name": "step",
+      "stage_id": "dfa41b4fb2d980b82f9e31b4835361b790e7cdbcc1b6133d93de01e2390ea91c",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "34f6553bef4f8f40df30c5a2aa752abb6611eeacd4f3f2c0090f662f633a3942": {
+      "name": "parent",
+      "stage_id": "ef50b6c1cec2357aca08b511b8df5ec275c6c533da99680c4b5f548b6fd22410",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "4a7bcd6b08ac976adfda3969f73842492d3df31b1040c5268ecc6e4eed86af18": {
+      "name": "is_directory_name",
+      "stage_id": "58fded4a1aa00858e6b0c7e666ba80ab22ad9a9afe6447a4cbf6af7f3d1e4f52",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "6d9a8081fcdb0a10a5261c739f67b031e2071d7a84262f0238339a94d43f169b": {
+      "name": "is_loop",
+      "stage_id": "0af8fe295511fcf2feb4caeb8733aaed395df40d7331b52387b90aa86e89ad98",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "7d9b4d9b05fa9060918865901395047ac1a2a80addfc701b2dad2f0a4f11696b": {
+      "name": "enter",
+      "stage_id": "0d938081d6e4c1251f5c838f3c281e423e87233f60002b37ea783cf13e23fd70",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "9e6da9d86aa2867134617fbc6263a2427a47f2f38f6459c8eb2f4257b7757f3f": {
+      "name": "parent_of",
+      "stage_id": "79d58497352d93e7ecc7b1c8bbd78748f29bb0595bd3c4ff7b9dc11aa8d3ad59",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "aace0bacb696c3b98a14476cbcf885ca3b24f8c1456c121873e080e05b4ba2a1": {
+      "name": "enotdir",
+      "stage_id": "2c2560ec8440f55cfa2e5b21ea48074839f05afb06895f7527889568ab32849f",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "c848df083d4b62187669eef9457d4268f3ecefb6cdf662a6eee1abdcea16e152": {
+      "name": "open_operand",
+      "stage_id": "23256d54bf9852af63fa34dfeb3bdcc63e8ca5fee0203dd7fde287e58abd688c",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    },
+    "d3a4d8273b308d39b76caa734a7be22e53f1e94550ce79ba34952e3fb0074239": {
+      "name": "open_directory",
+      "stage_id": "79374b9880ea3b2656baf5d31590cbe3aa9f011f341295d27b4f3fac5441b4dc",
+      "source_hash": "990a6ba777f987f432798cd9e3ed8d87f316ba24041239a92b561cba0f4dcb74",
+      "uses_std": true
+    }
+  }
+}

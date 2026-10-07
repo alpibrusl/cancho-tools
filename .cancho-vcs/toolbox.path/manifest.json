@@ -1,0 +1,100 @@
+{
+  "entries": {
+    "12d487ade50810f5ccc471b57540991508a8491dc5c2a89dcb4fa6fcf906a1cd": {
+      "name": "has_dotdot",
+      "stage_id": "2b50f7a0ae588af7e8aa930e8367bfe3eb82b1d92469f90fe9aafbfa3116dbaf",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "3d85d9a5923359c3ecf55c6821fc245290fb8c519b22a90cbaeb9c4bfd6ad4a4": {
+      "name": "root",
+      "stage_id": "5818eb54f574b9bc02fa5d098571ab65c4193d777ff16f5ac9f6acec08b2e2c8",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "415c5acdc502be274f20a3d7a405e1842aeecd9fadbeca1b4b3cd494dc78ec74": {
+      "name": "under",
+      "stage_id": "d4190fa9e8ae471f8594618a59558647bb2d7e492cd35e4de1465c10c5c28893",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "4ea635bcffe63b5a863c00e94fcc214f25810dd8bac709ad32e6fa2b05026e14": {
+      "name": "longest",
+      "stage_id": "4243821a1968d4004fb7425b4b5f6f5eb59f28f49abe97f08e238f8b69509d0d",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "5617d96aff6de31221bfa077d71848152573dc1c8c0cf3087ca3f6acbceb35e8": {
+      "name": "path_error",
+      "stage_id": "a9c49facf5346c3e0fd0e4e7d2d661d4efd41056401a1b4f0df31ef2c14d0ae7",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "6398d9296db3963f24d91d9d2163514ff829c1664dc374b8d75e4f82878084a9": {
+      "name": "operand",
+      "stage_id": "4bdd0f51c78a0bd8a974affe5404b99560d7956d2122be9d970372e6f1b930d5",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "739dd1b1db6b91d9152e2adaa178dd2d7e114b6ae59129eb541a43f7334cc43c": {
+      "name": "drop",
+      "stage_id": "11b1d0b2bc698f4c9cb1a977f6d228093ccac548551aa97181fa17cba7c03f6a",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "7a86910cc59eed2f359c5a245943a4101b823f2b678b321a4ea417b05fa5d6ef": {
+      "name": "normalise",
+      "stage_id": "8cf970647910d65269ff082a1f57ad46c7540489000a5206dac50fdb3c496dc7",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "7e1f070aa04af057bbae58585cf346c8e9d797980e5fb7f914b5601367a3f2d3": {
+      "name": "ok",
+      "stage_id": "e11809c7b169f260296db6115041b42f5b8b902d0f0946a42221af13af00f37f",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "957e19b48b52b87c1bc2d103f7b35486d2e024a6156ead482453e1070531fc0b": {
+      "name": "lexical",
+      "stage_id": "9471b2f2d7317d13d36cfe5a1ea36bdc1046c64b580830484ccc1e35cd43ea1a",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "9bfa0bb8219cc89b5eb0be9408334a7ace71ff9395f2d9e4ae151d41ae03fb78": {
+      "name": "refused",
+      "stage_id": "1ca69ad660c00f7df2aff7ca0442e274e7f7189a9cbe91be194dd3885636d30a",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "a1d3e55f723d902ab820d74402733101f0dbac554b2cd46ce2a32b7c0970332f": {
+      "name": "trim_to",
+      "stage_id": "bc9ffc3ed00b3179a8c125dec1170f550430d0a657a162058de69e365fe62e8c",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "ab552dcedcbdf495916dea26abbf2d39d810356177c75a2ec257509acfb43781": {
+      "name": "slash",
+      "stage_id": "076eb3e8d3676298ee8475234b61895a9ad46f419790a6b3ec20514a60f2b641",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "e2f4863f0b34782d2c80454a329f6ffef3289c7645e3a1388cb495cd4afdf97d": {
+      "name": "full",
+      "stage_id": "0760fee7c72019decb31a4bd5bea3bd25e11b33af844f1e9f29ddfe342477d6d",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "e5c74c54ccb81d127b2c49c6d3ae01e6b3de3928308976df6b8a73c06963dced": {
+      "name": "shown",
+      "stage_id": "4adc96577a4539c85aa5c462a3d6e8a9dc7e44bea6ac42ece93d73111b059843",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    },
+    "ea9f0d9585ffff6979f9dbb37445a4d4f3b3a9320f8b609a7b4f24ef4cfb7715": {
+      "name": "baked",
+      "stage_id": "8cf8df11dd17f12f44b174df2a0b626e54722320c7d6dcd23a1230549706bdbe",
+      "source_hash": "bc7da7ff7b69d25ad31bc098f68662fcfb1ce051e735687f5524b3563f8af442",
+      "uses_std": true
+    }
+  }
+}

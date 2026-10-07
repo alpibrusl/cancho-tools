@@ -1,0 +1,167 @@
+edition 5;
+
+module toolbox.sort;
+
+// `toolbox.sort` -- a stable merge sort over a `[int]` of indices.
+//
+// What is sorted is an array of numbers (entry numbers of a map, group
+// numbers, row numbers) and what orders them is a function the caller names.
+// A comparator is a *function value* (cancho `docs/function-values.md`):
+// captureless, so it cannot close over anything. The context it needs is passed
+// beside it, once, borrowed, and handed back to it at every comparison:
+//
+//     fn before[&m](m: &m map.Map[int], a: int, b: int) -> [] bool { ... }
+//     sort.by_map(m, order, spare, n, before);
+//
+// Three contexts are offered, because the language cannot offer one that is
+// generic: a function that is generic over the context's type is not something
+// `cancho vcs publish` can write into the package (the compiler pinned in
+// `cancho.toml` stops at "has an identity but no lowered function"), so each
+// context is a concrete type:
+//
+// * `by_keys`: a number per entry, in a `[int]` the caller has filled; no
+//   comparator to write.
+// * `by`: a comparator over a borrowed `[int]` (a table of keys, counts, ranks,
+//   a few parameters in its first slots).
+// * `by_map`: a comparator over a borrowed `map.Map[int]`, for entries that are a
+//   map's (`map.value_at`, `map.key_at`), such as `tally`'s.
+//
+// What cannot be done: a context that is a type of the caller's own (a struct, a
+// table of its own), and a comparator that is itself generic. A caller with such
+// a context copies what the comparator reads into one of the three.
+//
+// The sort is a bottom-up merge sort through `spare`: stable, O(n log n)
+// comparisons, no recursion, no allocation of its own (the caller gives
+// `order` and `spare`, each with room for `n`). The comparator `before(context, a, b)` answers
+// whether `a` must come strictly before `b`; equal entries keep the order
+// they had. A comparator that is not a strict weak order gives some order,
+// never a trap: every index is in `0..n` and the loops are bounded by `n`.
+
+import std.map;
+
+// `order[i] = i` for `i` in `0..n`.
+pub fn identity[&o](order: &!o [int], n: int) -> [] int {
+    var i = 0;
+    while i < n && i < len(order) {
+        order[i] = i;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// Sort `order[0..n]` stably by `before(table, a, b)`. `n` is clamped to what `order` and
+// `spare` hold, so a wrong `n` sorts less, never reads outside.
+pub fn by[&c, &o, &s](table: &c [int], order: &!o [int], spare: &!s [int], n: int, before: fn(&c [int], int, int) -> [] bool) -> [] int {
+    var total = n;
+    if total > len(order) {
+        total = len(order);
+    }
+    if total > len(spare) {
+        total = len(spare);
+    }
+    var width = 1;
+    while width < total {
+        var lo = 0;
+        while lo < total {
+            // `mid` may pass `total`: then `j >= hi` holds from the start and `order[j]` is never read.
+            let mid = lo + width;
+            var hi = lo + 2 * width;
+            if hi > total {
+                hi = total;
+            }
+            var i = lo;
+            var j = mid;
+            var k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || !before(table, order[j], order[i])) {
+                    spare[k] = order[i];
+                    i = i + 1;
+                } else {
+                    spare[k] = order[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            lo = hi;
+        }
+        var c = 0;
+        while c < total {
+            order[c] = spare[c];
+            c = c + 1;
+        }
+        width = width * 2;
+    }
+    return 0;
+}
+
+// `by` for a comparator over a map: `before(m, a, b)` for entries `a` and `b`. `n` is clamped to what `order` and
+// `spare` hold, so a wrong `n` sorts less, never reads outside.
+pub fn by_map[&c, &o, &s](m: &c map.Map[int], order: &!o [int], spare: &!s [int], n: int, before: fn(&c map.Map[int], int, int) -> [] bool) -> [] int {
+    var total = n;
+    if total > len(order) {
+        total = len(order);
+    }
+    if total > len(spare) {
+        total = len(spare);
+    }
+    var width = 1;
+    while width < total {
+        var lo = 0;
+        while lo < total {
+            // `mid` may pass `total`: then `j >= hi` holds from the start and `order[j]` is never read.
+            let mid = lo + width;
+            var hi = lo + 2 * width;
+            if hi > total {
+                hi = total;
+            }
+            var i = lo;
+            var j = mid;
+            var k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || !before(m, order[j], order[i])) {
+                    spare[k] = order[i];
+                    i = i + 1;
+                } else {
+                    spare[k] = order[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            lo = hi;
+        }
+        var c = 0;
+        while c < total {
+            order[c] = spare[c];
+            c = c + 1;
+        }
+        width = width * 2;
+    }
+    return 0;
+}
+
+// The comparator of `by_keys`: `keys[a]` against `keys[b]`, ascending.
+fn key_at[&k](keys: &k [int], i: int) -> [] int {
+    if i < 0 || i >= len(keys) {
+        return 0;
+    }
+    return keys[i];
+}
+
+fn key_before[&k](keys: &k [int], a: int, b: int) -> [] bool {
+    return key_at(keys, a) < key_at(keys, b);
+}
+
+fn key_after[&k](keys: &k [int], a: int, b: int) -> [] bool {
+    return key_at(keys, a) > key_at(keys, b);
+}
+
+// Sort `order[0..n]` stably by `keys[order[i]]`: the common case, where the
+// ordering is a number per entry the caller has already computed, with no
+// comparator to write. `descending` puts the larger key first; equal keys keep
+// their order either way. An index outside `keys` counts as key 0, never a trap.
+pub fn by_keys[&k, &o, &s](keys: &k [int], order: &!o [int], spare: &!s [int], n: int, descending: bool) -> [] int {
+    if descending {
+        return by(keys, order, spare, n, key_after);
+    }
+    return by(keys, order, spare, n, key_before);
+}

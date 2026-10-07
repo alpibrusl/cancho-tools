@@ -1,0 +1,92 @@
+[package]
+name = "cancho-tools"
+cancho = "a4572ea3b506e4bcec1c4be43deda1043c11ba9f"   # the compiler these sources were written for
+
+# One program per tool (D17): a program's authority is the union of what its
+# main reaches, so a multi-call binary would report every tool's row for every
+# invocation. `contract` is the shared package; `generated/<tool>` is the
+# manifest the build embeds (D12, scripts/manifest.py).
+
+[[bin]]
+name = "seek"
+sources = ["contract", "tools/seek", "generated/seek"]
+std = true
+out = "build/seek"
+
+[[bin]]
+name = "write"
+sources = ["contract", "tools/write", "generated/write"]
+std = true
+out = "build/write"
+
+[[bin]]
+name = "replace"
+sources = ["contract", "tools/replace", "generated/replace"]
+std = true
+out = "build/replace"
+
+[[bin]]
+name = "peek"
+sources = ["contract", "tools/peek", "generated/peek"]
+std = true
+out = "build/peek"
+
+[[bin]]
+name = "jsonq"
+sources = ["contract", "tools/jsonq", "generated/jsonq"]
+std = true
+out = "build/jsonq"
+
+[[bin]]
+name = "tally"
+sources = ["contract", "tools/tally", "generated/tally"]
+std = true
+out = "build/tally"
+
+[[bin]]
+name = "hash"
+sources = ["contract", "tools/hash", "generated/hash"]
+std = true
+out = "build/hash"
+
+[[bin]]
+name = "move"
+sources = ["contract", "tools/move", "generated/move"]
+std = true
+out = "build/move"
+
+[[bin]]
+name = "list"
+sources = ["contract", "tools/list", "generated/list"]
+std = true
+out = "build/list"
+
+[[test]]
+name = "sha"
+sources = ["contract", "tests/sha_test.cho"]
+std = true
+
+[[test]]
+name = "cli"
+sources = ["contract", "tests/cli_test.cho"]
+std = true
+
+[[test]]
+name = "path"
+sources = ["contract", "tests/path_test.cho"]
+std = true
+
+[[test]]
+name = "lines"
+sources = ["contract", "tests/lines_test.cho"]
+std = true
+
+[[test]]
+name = "diff"
+sources = ["contract", "tests/diff_test.cho"]
+std = true
+
+[[test]]
+name = "sort"
+sources = ["contract", "tests/sort_test.cho"]
+std = true

@@ -283,9 +283,9 @@ class Server(unittest.TestCase):
     def test_the_authority_is_the_bin_directory_and_nothing_else(self):
         with tempfile.TemporaryDirectory() as scratch:
             src = pathlib.Path(scratch)
-            (src / "tools.ls").write_text(mcp.generated(str(BIN), mcp.DEFAULT_BIN))
-            (src / "mcp.ls").write_text(mcp.SERVER.read_text())
-            out = subprocess.run([manifest.compiler(), "authority", str(src / "mcp.ls"), str(src / "tools.ls"),
+            (src / "tools.cho").write_text(mcp.generated(str(BIN), mcp.DEFAULT_BIN))
+            (src / "mcp.cho").write_text(mcp.SERVER.read_text())
+            out = subprocess.run([manifest.compiler(), "authority", str(src / "mcp.cho"), str(src / "tools.cho"),
                                   "--std", "--output", "json"], check=True, capture_output=True).stdout
         d = json.loads(out)
         self.assertTrue(d["bounded"])

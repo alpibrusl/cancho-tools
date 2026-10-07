@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """`contract/` as a package: the store a consumer pins (docs/next-tools.md §5).
 
-`lex-sys vcs publish --std --dir contract` writes one store per module, each
-under `.lex-sys-vcs/<module>`, and the result is committed. A repository that
+`cancho vcs publish --std --dir contract` writes one store per module, each
+under `.cancho-vcs/<module>`, and the result is committed. A repository that
 builds on this contract names the modules it imports:
 
     [dependencies.cli]
-    git = "https://github.com/alpibrusl/lexsys-tools"
+    git = "https://github.com/alpibrusl/cancho-tools"
     rev = "<a full commit hash>"
-    path = ".lex-sys-vcs/toolbox.cli"
+    path = ".cancho-vcs/toolbox.cli"
 
 The store is generated, not edited, and publishing is deterministic (the same
 sources write the same bytes), so the committed store can be checked against
@@ -17,7 +17,7 @@ the sources. `toolbox.built` is not here: each tool generates its own.
     python3 scripts/package.py           # regenerate the store
     python3 scripts/package.py --check   # change nothing; exit 1 on drift
 
-The compiler is $LEX_SYS, or `lex-sys` on PATH.
+The compiler is $CANCHO, or `cancho` on PATH.
 """
 
 import filecmp
@@ -29,11 +29,11 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-STORE = ROOT / ".lex-sys-vcs"
+STORE = ROOT / ".cancho-vcs"
 
 
 def publish(into):
-    out = subprocess.run([os.environ.get("LEX_SYS", "lex-sys"), "vcs", "publish", "--std", "--store", str(into),
+    out = subprocess.run([os.environ.get("CANCHO", "cancho"), "vcs", "publish", "--std", "--store", str(into),
                           "--dir", str(ROOT / "contract")], capture_output=True, text=True)
     if out.returncode != 0:
         sys.exit("package: publish refused:\n" + out.stdout + out.stderr)
@@ -57,8 +57,8 @@ def main():
         publish(fresh)
         if check:
             if not STORE.is_dir() or not same(fresh, STORE):
-                sys.exit("package: .lex-sys-vcs is not what `vcs publish --dir contract` writes; run scripts/package.py")
-            print("package: .lex-sys-vcs matches contract/")
+                sys.exit("package: .cancho-vcs is not what `vcs publish --dir contract` writes; run scripts/package.py")
+            print("package: .cancho-vcs matches contract/")
             return
         if STORE.exists():
             shutil.rmtree(STORE)

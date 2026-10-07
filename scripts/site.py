@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move"]
-REPO = "https://github.com/alpibrusl/lexsys-tools"
+REPO = "https://github.com/alpibrusl/cancho-tools"
 
 CSS = """
 :root {
@@ -246,7 +246,7 @@ def page(title, body, current=None, description=""):
 <style>{CSS}</style>
 </head>
 <body>
-<header class="site"><a class="home" href="index.html">lexsys-tools</a><nav>{nav}</nav></header>
+<header class="site"><a class="home" href="index.html">cancho-tools</a><nav>{nav}</nav></header>
 <main>
 {body}
 </main>
@@ -290,13 +290,13 @@ def tool_page(d):
                  ("confinement", f"{code(d['confinement'])}: {html.escape(d['confinement_note'])}"),
                  ("reads the environment", "no" if not d["reads_environment"] else "yes"),
                  ("reads the clock", "no" if not d["reads_clock"] else "yes"),
-                 ("compiler", f'<a href="https://github.com/alpibrusl/lex-sys/commit/{d["compiler"]}">{d["compiler"][:12]}</a>'),
+                 ("compiler", f'<a href="https://github.com/alpibrusl/cancho/commit/{d["compiler"]}">{d["compiler"][:12]}</a>'),
                  ("for an agent", f'<a href="{name}.SKILL.md">SKILL.md</a> (<code>{name} skill</code>)')]:
         b.append(f"<dt>{k}</dt><dd>{v}</dd>")
     b.append("</dl>")
 
     b.append("<h2>Authority</h2>")
-    b.append("<p>Derived by <code>lex-sys authority</code> from the source, embedded in the binary, "
+    b.append("<p>Derived by <code>cancho authority</code> from the source, embedded in the binary, "
              "and checked against <code>tools.toml</code>'s ceiling in CI. Every label is bounded.</p>")
     b.append('<ul class="chips">' + "".join(f"<li>{html.escape(label(x))}</li>" for x in d["authority"]["labels"]) + "</ul>")
     b.append("<p>What the row cannot say:</p><ul>" + "".join(f"<li>{html.escape(x)}</li>" for x in d["not_narrowable"]) + "</ul>")
@@ -326,7 +326,7 @@ def tool_page(d):
     b.append("<p>" + html.escape(ev["offline_note"]) + ":</p>")
     b.append('<ul class="chips">' + "".join(f"<li>{html.escape(x)}</li>" for x in ev["offline"]) + "</ul>")
     b.append("<p><strong>Agent in the loop:</strong> " + html.escape(ev["agent_in_the_loop"]) + ".</p>")
-    return page(f"{name} — lexsys-tools", "\n".join(b), current=name, description=d["summary"])
+    return page(f"{name} — cancho-tools", "\n".join(b), current=name, description=d["summary"])
 
 
 def index_page(readme, tools):
@@ -338,7 +338,7 @@ def index_page(readme, tools):
     # The README's own tool table stays; the cards come first, as the way in.
     first_h2 = body.find("<h2")
     body = body[:first_h2] + f'<h2 id="tools-at-a-glance">The tools at a glance</h2><div class="cards">{cards}</div>' + body[first_h2:]
-    return page("lexsys-tools", body, description="An agent toolbox in lex-sys: nine unix-like tools with a JSON contract.")
+    return page("cancho-tools", body, description="An agent toolbox in cancho: nine unix-like tools with a JSON contract.")
 
 
 def main():
@@ -354,7 +354,7 @@ def main():
     for name in TOOLS:
         exe = build / name
         if not exe.exists():
-            sys.exit(f"site: {exe} is missing; run `lex-sys build` first")
+            sys.exit(f"site: {exe} is missing; run `cancho build` first")
         d = json.loads(subprocess.run([str(exe), "introspect"], check=True, capture_output=True).stdout)
         tools.append(d)
         (out / f"{name}.html").write_text(tool_page(d))

@@ -1,7 +1,7 @@
 """M8 -- `--root` holds, every refusal is a tag and none a trap, and a
 symlink inside the root cannot reach outside it: a path is checked
 lexically (`toolbox.path`) and then opened beneath the root one component
-at a time, following no link (`toolbox.place`, lex-sys #227). Until #227
+at a time, following no link (`toolbox.place`, cancho #227). Until #227
 this file asserted the escape; the test that did is now the one that
 asserts the refusal."""
 

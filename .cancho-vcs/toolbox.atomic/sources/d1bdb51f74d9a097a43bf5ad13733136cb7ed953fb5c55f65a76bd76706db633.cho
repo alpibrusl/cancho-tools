@@ -1,0 +1,403 @@
+edition 6;
+
+module toolbox.atomic;
+
+// `toolbox.atomic` -- the write side of D10: read what is there, lock,
+// replace atomically.
+//
+// A replacement is a sibling temporary file created with `dir_open_new`
+// (`O_EXCL`), written, `file_sync`ed, closed, and `dir_rename`d over the
+// destination, all beneath the directory that holds it (`toolbox.place`'s
+// `parent`), so no step resolves a path string and none follows a link --
+// cancho `docs/directory-handles.md` slice 2, which turned A.8's
+// `fs_write("")` into `dir_write`. The temporary's name is derived from the
+// destination and the content's hash, so two runs of one write collide on
+// one name rather than litter.
+//
+// The lock is `flock` on a sidecar, `<path>.lexsys-lock`, held from before
+// the precondition is checked until after the rename, because a bare
+// check-then-rename has a window in which two writers both pass. It is
+// advisory (cancho `docs/file-writes.md` §7): it defends against two
+// toolbox processes, not against a writer that does not lock. The sidecar
+// is left in place -- removing a lock file another process may be about to
+// lock is how lock files race -- and it is empty.
+
+import std.buffer;
+import std.bytes;
+import toolbox.sha;
+import toolbox.text;
+
+// `EWOULDBLOCK`: 11 on Linux, 35 on macOS (cancho
+// `docs/file-writes.md` §10.1).
+pub fn would_block(errno: int) -> [] bool {
+    return errno == 11 || errno == 35;
+}
+
+// Read the whole of an opened file into `into`, refusing past `most` bytes.
+// Answers the buffer, an errno (0 for none), and whether the file was
+// longer than `most` (then the buffer holds a prefix and must not be
+// used). Memory is the file, which is the job: a replace has to hold the
+// whole new content to write it.
+pub fn read_all[&h](heap: &!h Heap, opened: Opened, most: int, into: buffer.Buffer) -> [heap, file_read] (buffer.Buffer, int, bool) {
+    var out = into;
+    var errno = 0;
+    var too_big = false;
+    match opened {
+        Opened::Failed(reason) => {
+            errno = reason;
+            if errno == 0 {
+                errno = 5;
+            }
+        }
+        Opened::Ok(handle_in) => {
+            var file = handle_in;
+            var chunk = buffer.empty(heap, 65536);
+            borrow mut file as &!handle in {
+                var going = true;
+                while going {
+                    var got = 0;
+                    borrow mut chunk as &!c in {
+                        buffer.clear(c);
+                        match file_read(handle, buffer.room(c)) {
+                            Read::Got(n) => {
+                                buffer.filled(c, n);
+                                got = n;
+                            }
+                            Read::End => {
+                                going = false;
+                            }
+                            Read::Failed(reason) => {
+                                going = false;
+                                errno = reason;
+                                if errno == 0 {
+                                    errno = 5;
+                                }
+                            }
+                        }
+                    }
+                    if got > 0 {
+                        var held = 0;
+                        borrow out as &o in {
+                            held = buffer.size(o);
+                        }
+                        if held + got > most {
+                            too_big = true;
+                            going = false;
+                        } else {
+                            borrow chunk as &c in {
+                                out = buffer.append(heap, out, buffer.bytes(c));
+                            }
+                        }
+                    }
+                }
+            }
+            file_close(file);
+            buffer.drop(heap, chunk);
+        }
+    }
+    return (out, errno, too_big);
+}
+
+// Standard input, whole, refusing past `most` bytes.
+pub fn read_stdin[&h, &i](heap: &!h Heap, io: &!i Io, most: int, into: buffer.Buffer) -> [heap, io_read] (buffer.Buffer, bool) {
+    var out = into;
+    var n = 0;
+    var c = getchar(io);
+    while c >= 0 && n < most {
+        out = buffer.push(heap, out, byte_of(c));
+        n = n + 1;
+        c = getchar(io);
+    }
+    return (out, c >= 0);
+}
+
+// SHA-256 of `data`, as 64 hex digits in a new buffer.
+pub fn sha256_hex[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] buffer.Buffer {
+    var s = sha.sha256(heap);
+    s = sha.update(s, data);
+    var hex = buffer.empty(heap, 64);
+    region a {
+        let digest = alloc_slice[a](32, byte_of(0));
+        sha.finish(heap, s, digest);
+        let text = alloc_slice[a](64, byte_of(0));
+        sha.hex_into(digest, 32, text);
+        hex = buffer.append(heap, hex, text);
+    }
+    return hex;
+}
+
+// `<name>.lexsys-lock`.
+pub fn lock_path[&h, &p](heap: &!h Heap, path: &p [byte]) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, len(path) + 13);
+    b = buffer.append(heap, b, path);
+    return buffer.append(heap, b, ".lexsys-lock");
+}
+
+// The temporary for `path` and a content hash: `<dir>/.<name>.<hash16>.lexsys-tmp`.
+// A writer passes the leaf, so it is `.<name>.<hash16>.lexsys-tmp`.
+pub fn temp_path[&h, &p, &x](heap: &!h Heap, path: &p [byte], hex: &x [byte]) -> [heap] buffer.Buffer {
+    var cut = len(path);
+    while cut > 0 && int_of(path[cut - 1]) != '/' {
+        cut = cut - 1;
+    }
+    var b = buffer.empty(heap, len(path) + 32);
+    b = buffer.append(heap, b, path[0..cut]);
+    b = buffer.push(heap, b, byte_of('.'));
+    b = buffer.append(heap, b, path[cut..len(path)]);
+    b = buffer.push(heap, b, byte_of('.'));
+    b = buffer.append(heap, b, hex[0..16]);
+    return buffer.append(heap, b, ".lexsys-tmp");
+}
+
+// Write all of `data` to `file`, one `write(2)` at a time; an errno or 0.
+fn write_all[&f, &d](file: &!f File, data: &d [byte]) -> [file_write] int {
+    var at = 0;
+    while at < len(data) {
+        match file_write(file, data[at..len(data)]) {
+            Done::Ok(n) => {
+                if n <= 0 {
+                    return 5;
+                }
+                at = at + n;
+            }
+            Done::Failed(reason) => {
+                if reason == 0 {
+                    return 5;
+                }
+                return reason;
+            }
+        }
+    }
+    return 0;
+}
+
+// Replace `name` beneath `dir` with `data` atomically, through `temp`. Answers 0, or the
+// errno of the step that failed and which step it was (1 create the
+// temporary, 2 write it, 3 sync it, 4 rename it). A temporary that exists
+// already is stale -- the caller holds the lock, so no live writer owns it
+// -- and is removed once before giving up.
+pub fn replace[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte]) -> [dir_write, file_write] (int, int) {
+    var opened_ok = false;
+    var errno = 0;
+    var step = 0;
+    var attempts = 0;
+    while !opened_ok && attempts < 2 {
+        attempts = attempts + 1;
+        match dir_open_new(dir, temp) {
+            Opened::Failed(reason) => {
+                errno = reason;
+                step = 1;
+                if reason == 17 && attempts == 1 {
+                    dir_remove(dir, temp);
+                }
+            }
+            Opened::Ok(opened) => {
+                opened_ok = true;
+                errno = 0;
+                step = 0;
+                var file = opened;
+                borrow mut file as &!handle in {
+                    errno = write_all(handle, data);
+                    if errno != 0 {
+                        step = 2;
+                    } else {
+                        match file_sync(handle) {
+                            Done::Ok(n) => {
+                            }
+                            Done::Failed(reason) => {
+                                errno = reason;
+                                step = 3;
+                            }
+                        }
+                    }
+                }
+                file_close(file);
+            }
+        }
+    }
+    if errno != 0 {
+        if step > 1 {
+            dir_remove(dir, temp);
+        }
+        return (errno, step);
+    }
+    match dir_rename(dir, temp, name) {
+        Done::Ok(n) => {
+        }
+        Done::Failed(reason) => {
+            dir_remove(dir, temp);
+            return (reason, 4);
+        }
+    }
+    return (0, 0);
+}
+
+// Sync the directory a replacement was renamed in, so the rename survives
+// a crash (cancho `docs/file-writes.md` §5.2). Best effort: the rename has
+// happened, and a sync that fails is reported by nothing a caller could act
+// on.
+pub fn sync_parent[&f](dir: &f Dir) -> [dir_write] int {
+    match dir_sync(dir) {
+        Done::Ok(n) => {
+            return 0;
+        }
+        Done::Failed(reason) => {
+            return reason;
+        }
+    }
+}
+
+// SHA-256 of an opened file, streamed: memory is one chunk whatever the
+// file's size. Answers the hex digest (empty on failure), an errno (0 for
+// none) and the size.
+pub fn hash_file[&h](heap: &!h Heap, opened: Opened) -> [heap, file_read] (buffer.Buffer, int, int) {
+    var hex = buffer.empty(heap, 64);
+    var errno = 0;
+    var size = 0;
+    match opened {
+        Opened::Failed(reason) => {
+            errno = reason;
+            if errno == 0 {
+                errno = 5;
+            }
+        }
+        Opened::Ok(handle_in) => {
+            var file = handle_in;
+            var chunk = buffer.empty(heap, 65536);
+            var s = sha.sha256(heap);
+            borrow mut file as &!handle in {
+                var going = true;
+                while going {
+                    var got = 0;
+                    borrow mut chunk as &!c in {
+                        buffer.clear(c);
+                        match file_read(handle, buffer.room(c)) {
+                            Read::Got(n) => {
+                                buffer.filled(c, n);
+                                got = n;
+                            }
+                            Read::End => {
+                                going = false;
+                            }
+                            Read::Failed(reason) => {
+                                going = false;
+                                errno = reason;
+                                if errno == 0 {
+                                    errno = 5;
+                                }
+                            }
+                        }
+                    }
+                    if got > 0 {
+                        borrow chunk as &c in {
+                            s = sha.update(s, buffer.bytes(c));
+                        }
+                        size = size + got;
+                    }
+                }
+            }
+            file_close(file);
+            buffer.drop(heap, chunk);
+            region a {
+                let digest = alloc_slice[a](32, byte_of(0));
+                sha.finish(heap, s, digest);
+                if errno == 0 {
+                    let text = alloc_slice[a](64, byte_of(0));
+                    sha.hex_into(digest, 32, text);
+                    hex = buffer.append(heap, hex, text);
+                }
+            }
+        }
+    }
+    return (hex, errno, size);
+}
+
+// Open `<name>.lexsys-lock` beneath `dir` and take its lock. `Opened::Ok` holds the
+// lock until the file is closed; `Opened::Failed` carries the errno of
+// the open or of the lock (`would_block` for another holder).
+// End an `Opened` that is not wanted.
+fn discard(o: Opened) -> [] int {
+    match o {
+        Opened::Failed(reason) => {
+        }
+        Opened::Ok(file) => {
+            file_close(file);
+        }
+    }
+    return 0;
+}
+
+pub fn acquire[&h, &f, &p](heap: &!h Heap, dir: &f Dir, name: &p [byte]) -> [heap, dir_write, file_write] Opened {
+    let lock = lock_path(heap, name);
+    var result = Opened::Failed(5);
+    borrow lock as &l in {
+        match dir_open_append(dir, buffer.bytes(l)) {
+            Opened::Failed(reason) => {
+                discard(result);
+                result = Opened::Failed(reason);
+            }
+            Opened::Ok(opened) => {
+                var file = opened;
+                var errno = 0;
+                borrow mut file as &!handle in {
+                    match file_lock(handle) {
+                        Done::Ok(n) => {
+                        }
+                        Done::Failed(reason) => {
+                            errno = reason;
+                            if errno == 0 {
+                                errno = 5;
+                            }
+                        }
+                    }
+                }
+                discard(result);
+                if errno == 0 {
+                    result = Opened::Ok(file);
+                } else {
+                    file_close(file);
+                    result = Opened::Failed(errno);
+                }
+            }
+        }
+    }
+    buffer.drop(heap, lock);
+    return result;
+}
+
+// Occurrences of `needle` in `text`, left to right and not overlapping.
+pub fn occurrences[&t, &n](text: &t [byte], needle: &n [byte]) -> [] int {
+    if len(needle) == 0 {
+        return 0;
+    }
+    var count = 0;
+    var at = 0;
+    while at + len(needle) <= len(text) {
+        let found = bytes.find(text[at..len(text)], needle);
+        if found < 0 {
+            return count;
+        }
+        count = count + 1;
+        at = at + found + len(needle);
+    }
+    return count;
+}
+
+// `text` with every occurrence of `old` replaced by `new`, by the same
+// left-to-right walk `occurrences` counts.
+pub fn replaced[&h, &t, &o, &n](heap: &!h Heap, text: &t [byte], old: &o [byte], new: &n [byte]) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, len(text) + 16);
+    var at = 0;
+    while at < len(text) {
+        let found = bytes.find(text[at..len(text)], old);
+        if found < 0 || len(old) == 0 {
+            out = buffer.append(heap, out, text[at..len(text)]);
+            at = len(text);
+        } else {
+            out = buffer.append(heap, out, text[at..at + found]);
+            out = buffer.append(heap, out, new);
+            at = at + found + len(old);
+        }
+    }
+    return out;
+}

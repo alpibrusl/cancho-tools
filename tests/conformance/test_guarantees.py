@@ -1,6 +1,6 @@
 """The guarantees `introspect` claims are the ones the gates check.
 
-Each tool's `introspect` carries a `guarantees` object (contract/describe.ls).
+Each tool's `introspect` carries a `guarantees` object (contract/describe.cho).
 A guarantee is a promise an agent or a supervisor will act on, so none may be
 claimed without the gate that tests it, and this file is where the two are
 tied together:

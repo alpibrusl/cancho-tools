@@ -1,9 +1,9 @@
 # An MCP server for the tools (#10): the design
 
-> **Status: built** (`server/mcp.ls`, `scripts/mcp.py`,
-> `tests/conformance/test_mcp.py`), on lex-sys edition 7 with
-> `std.process` (lex-sys `docs/processes.md` §7.1, merged as lex-sys#276,
-> `fe32ac2`; `lex-sys.toml` now pins `f8ebe98`, lex-sys#299, which only adds statics in
+> **Status: built** (`server/mcp.cho`, `scripts/mcp.py`,
+> `tests/conformance/test_mcp.py`), on cancho edition 7 with
+> `std.process` (cancho `docs/processes.md` §7.1, merged as cancho#276,
+> `fe32ac2`; `cancho.toml` now pins `f8ebe98`, cancho#299, which only adds statics in
 > packages). Every claim below was measured on
 > macOS 26.2 arm64 and Linux 7.0 x86_64, unless it says otherwise. §8 is what
 > building it found.
@@ -11,7 +11,7 @@
 An agent runtime adopts tools most easily over MCP (#10). Every tool here
 already describes itself (`introspect`, the schemas), so the server derives
 its tool definitions from that and has no description of its own to drift.
-The server is a lex-sys program, because what it may do should be what the
+The server is a cancho program, because what it may do should be what the
 compiler derives, as for each tool: **start the eight binaries, under a
 fixed `--root`, and nothing else.**
 
@@ -22,8 +22,8 @@ a fixed argv, runs the binary with `std.process.capture`, and answers with
 what the binary printed.
 
 ```
-tools/call {"name": "seek", "arguments": {"pattern": "TODO", "files": ["src/a.ls"], "max-count": 5}}
-    -> <bin>/seek --root=<ROOT> --max-count=5 -- TODO src/a.ls
+tools/call {"name": "seek", "arguments": {"pattern": "TODO", "files": ["src/a.cho"], "max-count": 5}}
+    -> <bin>/seek --root=<ROOT> --max-count=5 -- TODO src/a.cho
 ```
 
 * **The binary is one of eight, by name.** The name is matched against the
@@ -82,7 +82,7 @@ result with `isError`, and a protocol failure is a JSON-RPC error.
 `introspect` gives each tool's flags (name, kind, role, default, help),
 operands (name, role, help, `...` for one or more), `output` (`document`
 or `stream`), summary and schema. At build time `scripts/mcp.py` turns that
-into `generated/mcp/tools.ls`: the `tools/list` result as one literal, and
+into `generated/mcp/tools.cho`: the `tools/list` result as one literal, and
 the table each call is checked against. `--check` fails when it differs
 from a fresh derivation, as `manifest.py --check` does for authority.
 
@@ -115,7 +115,7 @@ the schema is the whole of what a model can pass.
 ## 4. The protocol, as much as it needs
 
 * **stdio**, newline-delimited JSON-RPC 2.0. A line is read with
-  `getchar` up to `\n` (lex-sys has no buffered read, and libc's buffer is
+  `getchar` up to `\n` (cancho has no buffered read, and libc's buffer is
   underneath; `docs/standard-input.md`). A line over 4 MiB is refused,
   and nothing but responses goes to standard output.
 * **`initialize`**: answers `protocolVersion` with the client's if it is
@@ -138,8 +138,8 @@ The server holds `Exec` narrowed to the directory of the eight binaries,
 and no `Fs` or `Net`. It reads nothing itself; the tools read, under
 `--root`. ~~The row it should derive is `args`, `clock`, `err_write`,
 `exec("<bin>")`, `heap`, `io_read`, `io_write` and `poll`.~~ **Measured**
-(`lex-sys authority`): bounded, and `args`, `child_signal`, `clock`,
-`err_write`, `exec("/opt/lexsys-tools/bin")`, `heap`, `io_read`,
+(`cancho authority`): bounded, and `args`, `child_signal`, `clock`,
+`err_write`, `exec("/opt/cancho-tools/bin")`, `heap`, `io_read`,
 `io_write`, `pipe_read`, `pipe_write` and `poll`. The three the design left
 out are what it does with the children and channels it owns, so they reach
 nothing beyond them. `test_mcp.py` holds the row to exactly this set.
@@ -147,12 +147,12 @@ nothing beyond them. `test_mcp.py` holds the row to exactly this set.
 **The bound is baked in at build time.** `narrow` takes a literal ("`narrow`
 takes a literal, so the refinement can be checked where it is written",
 measured with an argument as the prefix). A library cannot take an `Exec`
-of any prefix either (lex-sys `processes.md` §7.1). So the bound is a
+of any prefix either (cancho `processes.md` §7.1). So the bound is a
 source substitution, as D14's variant bakes `--root` into `seek`:
-`scripts/mcp.py build --bin /opt/lexsys-tools/bin` writes the literal into
+`scripts/mcp.py build --bin /opt/cancho-tools/bin` writes the literal into
 `main`, and the authority report of that binary says
-`exec("/opt/lexsys-tools/bin")`. A deployment that moves the tools rebuilds
-the server. That is the cost of a bound the compiler can see, and lex-sys
+`exec("/opt/cancho-tools/bin")`. A deployment that moves the tools rebuilds
+the server. That is the cost of a bound the compiler can see, and cancho
 `processes.md` §9 keeps the general question open.
 
 ## 6. How it will be checked
@@ -200,10 +200,10 @@ the server. That is the cost of a bound the compiler can see, and lex-sys
   with no trap, and the server answers the `ping` after them.
 * **A local binding hides a qualified call.** `tools.name(k)` with a local
   `name` in scope, and `process.list(l)` with a local `list`, are refused as
-  "a local binding, not a function". It is lex-sys's (found while building
+  "a local binding, not a function". It is cancho's (found while building
   `std.process`), and the server names its locals otherwise.
-* **The project pin.** `lex-sys build` refuses a compiler other than the one
-  `lex-sys.toml` names, which is right. The pin moved to `fe32ac2` (#276
+* **The project pin.** `cancho build` refuses a compiler other than the one
+  `cancho.toml` names, which is right. The pin moved to `fe32ac2` (#276
   merged): the eight tools' authorities and the generated definitions are
   unchanged under it, and only the embedded compiler revision moved.
 * **Mutants.** Nine, one choice each undone: no flush, no `--` fence,
@@ -228,7 +228,7 @@ the server. That is the cost of a bound the compiler can see, and lex-sys
 One task, run once by each route, with Claude Code 2.1.289 headless
 (`claude -p`) on Linux x86_64, the tools and server built at the pinned
 compiler. It is a smoke test of the integration, not the agent-in-the-loop
-evaluation the README does not claim (lex-sys#228).
+evaluation the README does not claim (cancho#228).
 
 **The task**, in a five-file project (two Python files holding three `TODO`
 comments, `notes.txt`, `package.json`, `docs/README.md`): list every file,

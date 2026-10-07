@@ -1,7 +1,7 @@
-# The authority ceiling of each tool (lex-sys docs/agent-toolbox.md D12).
+# The authority ceiling of each tool (cancho docs/agent-toolbox.md D12).
 #
 # This file is what a person writes and reviews. It is a *ceiling*, never the
-# authority: the authority is whatever `lex-sys authority` derives from the
+# authority: the authority is whatever `cancho authority` derives from the
 # source (manifests/<tool>.authority.json, embedded in the binary and printed by
 # `<tool> introspect`), and scripts/manifest.py --check fails when a derived
 # label is not allowed here. Widening a tool is therefore an edit to this file:

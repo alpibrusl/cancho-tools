@@ -2,10 +2,10 @@
 authority, and still answers every path case with a tag, never a trap.
 
 The variant's `Fs` is narrowed, so the builtins trap on any path outside the
-prefix, on a relative path and on `..` (lex-sys docs/agent-toolbox.md A.4).
+prefix, on a relative path and on `..` (cancho docs/agent-toolbox.md A.4).
 That makes D9's in-tool validation load-bearing here: this test is the M8
 case list run against a variant, where a hole in the validation would be a
-dead process. The transform needs the compiler (LEX_SYS or lex-sys on PATH).
+dead process. The transform needs the compiler (CANCHO or cancho on PATH).
 """
 
 import json
@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import variant  # noqa: E402
 
 
-@unittest.skipUnless(shutil.which(os.environ.get("LEX_SYS", "lex-sys")), "the variant transform needs the compiler")
+@unittest.skipUnless(shutil.which(os.environ.get("CANCHO", "cancho")), "the variant transform needs the compiler")
 class Variant(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

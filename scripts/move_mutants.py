@@ -5,7 +5,10 @@ killed when a test fails. The file is restored after every mutant, whatever happ
 
     python3 scripts/move_mutants.py [name-substring ...]
 
-Run where the pinned compiler is (`cancho` on PATH, or CANCHO). Exit status 1 if one survives.
+Run where the pinned compiler is (`cancho` on PATH, or CANCHO), on Linux with strace: the replacing
+rename, the unmapped EEXIST and the unmapped 95 are killed by tests that inject the kernel's answer or
+delay the rename under strace, and the unmapped 45 (macOS's ENOTSUP) only by `UnsupportedFilesystem`,
+with CANCHO_RENAME_UNSUPPORTED_DIR naming a directory on ExFAT (a disk image on a Mac). Exit status 1 if one survives.
 """
 import os
 import pathlib
@@ -38,6 +41,14 @@ MUTANTS = [
     ("a dry run names its plan a move", "op = \"remove\";", "op = \"move\";"),
     ("a too-long tombstone name is allowed", "                            if bad_name(buffer.bytes(cb)) {", "                            if false && bad_name(buffer.bytes(cb)) {"),
     ("the parent directory is not synced", "            atomic.sync_parent(dir);\n            o = Outcome { changed: true, planned: false, found: o.found };", "            o = Outcome { changed: true, planned: false, found: o.found };"),
+    # The kernel closes the race (`dir_rename_new`): each of these puts a hole back.
+    ("the rename is the replacing one (dir_rename)", "match dir_rename_new(dir, name, newname) {", "match dir_rename(dir, name, newname) {"),
+    ("the kernel's EEXIST is taken for a success", "            Done::Failed(reason) => {\n                failed = reason;\n                if failed == 0 {", "            Done::Failed(reason) => {\n                failed = reason;\n                if reason == 17 {\n                    failed = 0;\n                }\n                if failed == 0 {"),
+    ("the kernel's EEXIST is not the conflict", "        if failed == 17 {", "        if failed == 99 {"),
+    ("an unsupported filesystem's errno 95 is not mapped", "        } else if failed == 95 || failed == 45 {", "        } else if failed == 99 || failed == 45 {"),
+    ("an unsupported filesystem's errno 45 is not mapped", "        } else if failed == 95 || failed == 45 {", "        } else if failed == 95 || failed == 99 {"),
+    ("an unsupported filesystem is taken for a success", "            Done::Failed(reason) => {\n                failed = reason;\n                if failed == 0 {", "            Done::Failed(reason) => {\n                failed = reason;\n                if reason == 95 {\n                    failed = 0;\n                }\n                if failed == 0 {"),
+    ("the unsupported refusal has the wrong exit code", "io.rename-unsupported|8|never", "io.rename-unsupported|1|never"),
 ]
 
 original = SOURCE.read_text()

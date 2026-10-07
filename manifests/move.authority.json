@@ -101,6 +101,7 @@
     "exit_in_entry",
     "exit_of_in",
     "expected",
+    "extra_rules",
     "field",
     "find",
     "find_in",
@@ -184,5 +185,5 @@
   ],
   "folded_operators": 27,
   "folded_calls": 0,
-  "functions": 239
+  "functions": 241
 }

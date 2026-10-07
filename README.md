@@ -359,7 +359,9 @@ source is gone and the destination holds exactly that content, the move had
 landed, and the answer is `changed: false`. A directory or a link is renamed
 as itself and never followed; a link in a directory of the path is
 `path.symlink`. Both names are locked (the `.lexsys-lock` sidecar `write`
-uses), the rename is one `renameat`, and `--dry-run` makes no mutating call.
+uses), the rename is one `renameat2` (`RENAME_NOREPLACE`; on macOS `renameatx_np`
+with `RENAME_EXCL`) that the kernel refuses when the name is taken, and `--dry-run`
+makes no mutating call.
 
 **Removing, without deleting.** `move --remove --if-sha256 HEX PATH` is the
 toolbox's only way to take a file away, and it deletes nothing: the file is
@@ -371,11 +373,23 @@ tombstone that already exists is `conflict.exists`; a retry that had landed is
 tombstone, so `move .NAME.removed-… NAME` undoes it. Reclaiming the space is
 a shell's job.
 
-**The limit, measured.** The lock stops other toolbox processes, not one that
-takes no lock: a process creating the destination at a random moment during
-the move lost its file in 55 of 20,000 trials (0.28%), and in 100 of 100 when
-the rename was delayed (`scripts/move_race.py`). Closing it needs a no-replace
-rename the language does not have yet.
+**The limit, closed.** The lock stops other toolbox processes, not one that
+takes no lock. With a look and then a replacing `renameat`, a process creating
+the destination at a random moment during the move lost its file in 55 of
+20,000 trials (0.28%; 34 of 20,000 on the Linux x86-64 box), and in 100 of 100
+when the rename was delayed (`scripts/move_race.py`). The rename is now
+`dir_rename_new`, which makes the check and the rename one kernel call: the
+same script finds 0 lost files in 20,000 random-arrival trials on both
+machines and 0 of 100 delayed (the creator's file is intact and `move` answers
+`conflict.exists`), and the delayed case is a regression test that fails on the
+old behaviour. The look under the lock stays only to refuse before anything is
+attempted (`--dry-run` makes no call) and to recognise a retry that had landed.
+What is left: a filesystem that cannot refuse atomically (NFS, ntfs-3g, ExFAT
+answer a *free* name with `EINVAL`/`ENOTSUP`) is `io.rename-unsupported` (exit
+8, never repairable), not a fallback to the replacing rename; and the lock
+remains advisory, so a process that takes no lock can still *move or delete the
+source* between the look and the rename (the rename then fails `io.not-found`
+and nothing is replaced).
 
 ## Errors you can act on
 

@@ -1,4 +1,4 @@
-edition 6;
+edition 7;
 
 // `move` -- rename a file or directory in place, and never over anything.
 //
@@ -10,28 +10,33 @@ edition 6;
 // word.
 //
 // * **One directory.** NEWNAME is one component (`path.bad-name` otherwise):
-//   `dir_rename` is `renameat` on one directory handle, so a move to another
+//   `dir_rename_new` works on one directory handle, so a move to another
 //   directory is not something this tool can do, and it does not pretend to
 //   (cancho `docs/directory-handles.md`).
-// * **Never over anything, against the tools.** An existing destination is
+// * **Never over anything, by the kernel.** An existing destination is
 //   `conflict.exists` and nothing changes. POSIX `renameat` would replace it
-//   silently, so the tool looks first, under the lock below. Two toolbox
-//   processes cannot interleave there (200 races of each kind in
-//   `tests/conformance/test_move.py`). **A process that takes no lock is not
-//   stopped, and that is measured, not assumed** (`scripts/move_race.py`): a
-//   creator arriving at a random moment during the move lost its file in 55
-//   of 20,000 trials (0.28%), and in 100 of 100 when the rename was delayed.
-//   Closing it needs a no-replace rename the language does not have yet.
+//   silently, so the rename is `dir_rename_new` (Linux `renameat2` with
+//   `RENAME_NOREPLACE`, macOS `renameatx_np` with `RENAME_EXCL`): the check
+//   and the rename are one call, so a process that takes no lock and creates
+//   the destination at any moment is refused by the kernel, not overwritten
+//   (`scripts/move_race.py`: 55 of 20,000 random-arrival trials and 100 of 100
+//   delayed ones lost the creator's file with `dir_rename`; none with this).
+//   The look under the lock stays, but only for what the kernel cannot give:
+//   the refusal before anything is attempted (`--dry-run` makes no mutating
+//   call), and the landed-retry of `--if-sha256`. Two toolbox processes also
+//   cannot interleave there (`tests/conformance/test_move.py`). A filesystem
+//   that cannot refuse atomically (NFS, ntfs-3g and ExFAT answer so for a free
+//   name) is `io.rename-unsupported`: the tool never falls back to a replacing rename.
 // * **`--if-sha256`** says the file is what the caller read
 //   (`precondition.hash-mismatch`), and makes a retry safe: when the source is
 //   gone and the destination holds exactly that content, the move had landed,
 //   and the answer is `changed: false`, exit 0.
 // * **Locked, atomic.** Both names are locked (`<name>.lexsys-lock`, as
 //   `write`'s) from before the look until after the rename; the rename is one
-//   `renameat`. `--dry-run` takes no lock and makes no mutating call.
+//   `renameat2`/`renameatx_np` that refuses an existing name. `--dry-run` takes no lock and makes no mutating call.
 // * **No link is followed.** The directory holding the file is opened
 //   beneath --root with no link followed (`toolbox.place`), and a link is
-//   renamed as itself, never its target (`dir_rename` takes the entry).
+//   renamed as itself, never its target (`dir_rename_new` takes the entry).
 //
 // * **`--remove`** is the one deletion the toolbox offers, and it deletes nothing:
 //   `move --remove --if-sha256 HEX PATH` renames the file to its tombstone,
@@ -62,8 +67,13 @@ fn flag_table() -> [] &static [byte] {
     return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;if-sha256||hex64|guard||the file's current content must hash to this SHA-256, and a retry that already landed then answers changed: false;remove||bool|guard||remove the file by renaming it to its tombstone .NAME.removed-HASH8 (needs --if-sha256, takes no NEWNAME, and nothing is deleted);dry-run||bool|guard||check everything and report planned_actions, exit 9, change nothing;format||choice:json/text|none|json|json for a program, text for a person";
 }
 
+// The one rule only `move` has (`describe.Tool.extra_rules`): the filesystem cannot rename without replacing.
+fn extra_rules() -> [] &static [byte] {
+    return "io.rename-unsupported|8|never|the filesystem cannot refuse an existing name atomically, so move did not rename";
+}
+
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name; locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered. With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked", extra_rules: "", limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
+    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name (the kernel refuses it, even if another process creates it mid-move); locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered. With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked;io.rename-unsupported", extra_rules: extra_rules(), limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -205,6 +215,29 @@ fn planned[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [
     return inner;
 }
 
+// The new name is taken: the look found it, or the kernel refused the rename (`EEXIST`). One refusal, either way.
+fn name_taken[&h, &p, &z](heap: &!h Heap, e: fail.Errors, from_shown: &p [byte], to_shown: &z [byte]) -> [heap] fail.Errors {
+    var w = fail.open_in(heap, extra_rules(), "conflict.exists", "the new name is taken, and move never replaces a name", "choose another name, or look at what is there first");
+    w = fail.repair_none(heap, w, "whether to replace what is there is a decision, not a retry");
+    w = fail.detail_open(heap, w);
+    w = fail.detail_text(heap, w, "path", from_shown);
+    w = fail.detail_text(heap, w, "to", to_shown);
+    return fail.add(heap, e, w);
+}
+
+// The filesystem answered `EOPNOTSUPP` (Linux, 95) or `ENOTSUP` (macOS, 45): it cannot rename without
+// replacing, and `dir_rename_new` has no fallback. The kernel answers a taken name `EEXIST` first, so this is
+// only ever a name that was free.
+fn rename_unsupported[&h, &p, &z](heap: &!h Heap, e: fail.Errors, from_shown: &p [byte], to_shown: &z [byte], errno: int) -> [heap] fail.Errors {
+    var w = fail.open_in(heap, extra_rules(), "io.rename-unsupported", "this filesystem cannot rename without replacing, and move never replaces a name; nothing was moved", "rename within a filesystem that supports it (ext4, XFS, Btrfs, tmpfs, APFS), or check the name yourself and use a shell");
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = fail.detail_text(heap, w, "path", from_shown);
+    w = fail.detail_text(heap, w, "to", to_shown);
+    w = fail.detail_int(heap, w, "errno", errno);
+    return fail.add(heap, e, w);
+}
+
 // What `dir_stat` said about a name: its kind, or -1 and the errno.
 fn look[&f, &n](dir: &f Dir, name: &n [byte]) -> [dir_read] (int, int) {
     match dir_stat(dir, name) {
@@ -302,12 +335,7 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
             if bytes.equal(name, newname) {
                 // Already where it is to be: nothing to do.
             } else if dst_errno == 0 {
-                var w = fail.open(heap, "conflict.exists", "the new name is taken, and move never replaces a name", "choose another name, or look at what is there first");
-                w = fail.repair_none(heap, w, "whether to replace what is there is a decision, not a retry");
-                w = fail.detail_open(heap, w);
-                w = fail.detail_text(heap, w, "path", from_shown);
-                w = fail.detail_text(heap, w, "to", to_shown);
-                e = fail.add(heap, e, w);
+                e = name_taken(heap, e, from_shown, to_shown);
             } else if dst_errno != 2 {
                 e = fail.io_error(heap, e, dst_errno, true, to_shown);
             } else {
@@ -320,7 +348,7 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
         o = Outcome { changed: false, planned: true, found: o.found };
     } else if go {
         var failed = 0;
-        match dir_rename(dir, name, newname) {
+        match dir_rename_new(dir, name, newname) {
             Done::Ok(n) => {
             }
             Done::Failed(reason) => {
@@ -330,7 +358,13 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
                 }
             }
         }
-        if failed != 0 {
+        if failed == 17 {
+            // The destination appeared after the look: made by a process that takes no lock. The kernel
+            // refused, and the name and the source are as they were.
+            e = name_taken(heap, e, from_shown, to_shown);
+        } else if failed == 95 || failed == 45 {
+            e = rename_unsupported(heap, e, from_shown, to_shown, failed);
+        } else if failed != 0 {
             var w = fail.open(heap, fail.io_rule(failed, true), "the rename failed; nothing was moved", "");
             w = fail.no_repair(heap, w);
             w = fail.detail_open(heap, w);
@@ -604,7 +638,7 @@ fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io)
     if which != 0 {
         return describe.answer(heap, io, which, tool(), built());
     }
-    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty(heap));
+    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty_in(heap, extra_rules()));
     var status = 0;
     borrow parsed as &p in {
         status = body(heap, args, p, fs, io, e);
@@ -614,12 +648,13 @@ fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io)
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock, signals } = split(world);
-    // No foreign code, no network, no clock, no signals.
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    // No foreign code, no network, no clock, no signals, no programs started.
     release(ffi);
     release(net);
     release(clock);
     release(signals);
+    release(exec);
     var status = 0;
     borrow mut heap as &!h in {
         borrow args as &g in {

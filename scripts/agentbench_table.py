@@ -106,8 +106,11 @@ def agent_run(arm, ws, prompt, model, timeout, log, cache):
            "XDG_CACHE_HOME": str(xdg / "cache"), "SHELL": "/bin/bash", "PYTHONDONTWRITEBYTECODE": "1", "TERM": "dumb"}
     exe = shutil.which("opencode")
     if arm in PATHS:
+        # Only the shell's PATH is the arm's (BASH_ENV sets it at the start of every command). The agent process keeps
+        # the real PATH: with a restricted one opencode's skill tool failed with "ripgrep execution failed" in every
+        # run of the first attempt at the `table-skill` arm (the model then read SKILL.md with cat), and those runs
+        # were discarded.
         d = arm_dir(arm, cache)
-        env["PATH"] = str(d)
         env["BASH_ENV"] = str(d / "env.sh")
     if arm == "table-skill":
         d = ws / ".opencode" / "skills" / "table"

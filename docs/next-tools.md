@@ -215,6 +215,16 @@ under the cap and a deadline each end the child and leave no zombie; and `--dry-
 8. **Where the programs directory comes from.** A literal baked at build (the server's way) means each
    deployment builds `run`. Wait for cancho's "bound chosen at deployment", or accept the build?
 
+**Answered by the maintainer (2026-10-07).**
+
+* **Question 2, accepted:** `run` may hold `clock`, as an explicit exception in `tools.toml` with its
+  reason, for the deadline. No other tool may; the manifest policy for every other tool is unchanged.
+* **Question 3, accepted:** an opt-in tool that declares `irreversible-consequential` honestly is the
+  intended resolution of "no process spawning". D15's text is amended with the PR that builds `run`.
+* **Question 1 and the status of `run`: held.** `run` is **not** to be built yet. It waits for a second
+  asker (question 1); until then it stays a design. Questions 4 to 8 are not decided and are asked
+  again when `run` is taken up.
+
 ### 3.5 What it does to the benchmark
 
 * **Tasks first, frozen before any run:** a "run the tests and tell me what failed" (and the two
@@ -380,7 +390,7 @@ RFC 4180 quoting, embedded newlines and BOM, correctness before speed.
 2. **`move`** here, with no compiler change: **done** (#24, #25), then closed against the rename race with
    one compiler builtin (`dir_rename_new`, cancho#351; cancho-tools#32), and `write --create` the same way (#34).
 3. **The `contract/` spike**, then the `table` repository: **done** (§5.1; cancho-table#1 onward).
-4. **`run`** here: **next, but not started**, on the answers to §3.4.
+4. **`run`** here: **held** (maintainer, 2026-10-07): questions 2 and 3 of §3.4 are accepted, and it waits for a second asker (question 1).
 
 The D15 amendments (§0): "no tool deletes" gained "a tombstone is a rename" (**merged, cancho#298**). "No
 process spawning" gains `run` as an opt-in tool of the `irreversible-consequential` class **with the PR
@@ -401,7 +411,7 @@ and the authority row derived and held by a test.
 
 In this order of value to cost, the first being the only new tool:
 
-1. **`run`** (§3), after the maintainer answers §3.4 (questions 1 to 3 at least).
+1. **`run`** (§3): **held** until there is a second asker (§3.4, question 1); questions 2 and 3 are accepted.
 2. **Share the MCP server with cancho-table's copy.** `server/mcp.cho` is 1,022 lines here; cancho-table's
    `server/mcp.cho` is a copy with one tool in place of nine (1,094 lines there). By the measure taken
    when this was written, about 700 of 1,000 lines are generic (JSON-RPC framing, schema walking, the

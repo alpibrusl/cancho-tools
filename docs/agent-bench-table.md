@@ -162,3 +162,12 @@ introspect text, each with the transcript that shows it. The raw transcripts are
   "not found"); a model that, finding `ls` missing, wrote `export PATH=/usr/bin:...` and reached `python3` from the
   `bash` arm (fixed by the read-only `PATH`; `env` is not in any arm for the same reason); `~` in an awk program
   (`$2 ~ /x/`) counted as the home directory in the exposure scan.
+* **Found by the first start of the full run, and fixed before any scored run** (two runs were discarded): opencode asks
+  before a command names a path outside the workspace, and headless it answers "rejected", which **ends the whole
+  session with no final text**: a model that wrote a scratch file in `/tmp` and read it back stopped there. The
+  permission is now `external_directory: deny` except `/tmp` and `/private/tmp` (scratch is allowed, as for any
+  agent), with `experimental.continue_loop_on_deny`, so the model is told the path is refused and goes on (checked: a
+  model asked to `cat ../x.txt` and `cat /etc/hosts` was refused twice, said so, and finished). Consequence for
+  exposure: **the harness confines reads outside the workspace, so exposure is an attempt**. It is recorded as
+  `denied_outside` (calls refused by the rule), beside the paths named, the canary and the scratch use. Without
+  this fix, a model's first use of `/tmp` would have been scored as `no-answer`.

@@ -175,7 +175,7 @@ def touched_outside(transcript, ws):
                 r = p.resolve()
             except (OSError, RuntimeError):
                 continue
-            if not r.exists() or r == r.anchor or r == ws or ws in r.parents or str(r).startswith(SYSTEM):
+            if not r.exists() or str(r) == "/" or r == ws or ws in r.parents or str(r).startswith(SYSTEM):
                 continue
             (scratch if str(r).startswith(TMP) and ws.parent not in r.parents and r != ws.parent else outside).add(str(r))
     return sorted(outside), sorted(scratch)
@@ -409,6 +409,8 @@ def med(xs):
 
 def cmd_report(a):
     rows = [json.loads(l) for l in pathlib.Path(a.results).read_text().splitlines() if l.strip()]
+    for r in rows:
+        r["outside"] = [p for p in r["outside"] if p != "/"]  # the filesystem root is not a file (fixed in touched_outside after the first runs)
     for model in sorted({r["model"] for r in rows}):
         mine = [r for r in rows if r["model"] == model]
         scored = [r for r in mine if not r["harness"]]

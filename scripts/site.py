@@ -167,6 +167,10 @@ def markdown(text):
         if line.startswith("<!--") and line.rstrip().endswith("-->"):
             i += 1
             continue
+        # A badge line (an image link) shows nothing: the converter has no images.
+        if line.startswith("[![") and line.rstrip().endswith(")"):
+            i += 1
+            continue
         if line.startswith("```"):
             j = i + 1
             while j < len(lines) and not lines[j].startswith("```"):

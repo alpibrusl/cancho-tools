@@ -1,87 +1,105 @@
 {
   "entries": {
+    "0c1d1f50139652ef94bb3ce5fca722dedcc4789ae870139dbb3e1010057f1594": {
+      "name": "install",
+      "stage_id": "2a78aae71673e860f81e749d5b688872909223fe9cfc7b2956527e9bb89e5148",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
+      "uses_std": true
+    },
     "0ee1485ff4f02274450ab830a34a852e83e76c35e2517cf4771d593c1d5b6e4a": {
       "name": "read_all",
       "stage_id": "544058800670333054d05e00c27de4557dddbc57e421c140a57fae42f522c21d",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "0fd7242ad0545bba58cfc16d3de934ef5f662fb5eef14c36c68706e56dc9083d": {
       "name": "would_block",
       "stage_id": "ce844c95791a55467980f5ca6c39d409235be8c9bfb50aecd2add6609810c38d",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "1683e11ac04cf12b7eeb9a8032d6853a2d480cc4b0846ef4c27dd69e25667547": {
       "name": "read_stdin",
       "stage_id": "49731e2dbaa934c22c31e12094298889eddd5dca7768233b530cb03b179a195e",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
+      "uses_std": true
+    },
+    "51fede1ced2f89eaf96309d1c50f0c0afc4d9e9b3abc627ebded83d444d38c4b": {
+      "name": "create",
+      "stage_id": "69638da2f2b7161bc63479517f7cc4c57ccd8d8730126dc0ca68cc4abc773810",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "5ec98ad0488422870ba1656363fe6a17b34f5046aac50b0e79f387dc6ccc8292": {
       "name": "discard",
       "stage_id": "0fd6da3b4004415bf8e29edc83eaa8675d8f7a6652f565f52b8bbff2938bd4e0",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "64d6b253863039928b45dc5b8815c7dcc647cdd1fada9d1b3dfa89abae7391e0": {
       "name": "temp_path",
       "stage_id": "cc472f4696291b705dd849d6fdb21c407665a38e76cb5f964bbe212c8635a989",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "667ebbb9f4f55dc628efd194e096dd7acad54f0078abb5e5977427d463e5d40d": {
       "name": "acquire",
       "stage_id": "c99f4c1ffae818948a53b7146de258be7f9ae32f67f8e2f35796870e45089896",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "79e405e32054d0949d659ab20ec229f5127f67a0370c6f9913d19e1c3a8467d1": {
       "name": "hash_file",
       "stage_id": "4c850fedbb442c51e1b1a9f902dff45504c8953246a146ccef202e42a6973da0",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "a00e124ad903075388407923c1ac034c41dafcf0e86a2be394b7db1d817122d5": {
       "name": "sha256_hex",
       "stage_id": "d0a19c7a51feb2499700eb0d7143a26f841163eaf6a717c1bd25a077480e9338",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "b8694c0abdef7c60608d77575c41feb1e0706bcea488c716b1cb564376c52aaa": {
       "name": "write_all",
       "stage_id": "2439f58a09b71567f306f3a139353590bdcbb39be89d120f9a5439963265503e",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "b9e77ac7a97e8a05dee97f7f02582e0d025236e6aa6bbc6bad1fb7acde831b7f": {
       "name": "occurrences",
       "stage_id": "e2fd81953ddb63ab9e20c8611f36c84efc79064d0d1dd1a7e0c7a6b93b5258f9",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
+      "uses_std": true
+    },
+    "c1e8539c73b5f5a091dd79da85e6d4973e30ef0918d77507b9c059ca13f248db": {
+      "name": "rename_unsupported",
+      "stage_id": "6339f175f45ac8e0c2e6998bd3ad19163572b4a3c49aa1446dd44fda3b90487a",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "c449b2fbcfe967f4b9fc1f268f790c2753c80206c851b5c9ab514f6722e76222": {
       "name": "sync_parent",
       "stage_id": "faf173acfb086cae97953112736723ed66ab392096c5887ef2147057d79ed7c9",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "f322fc6265a5278b1cfac719a1070e8c51980f496e64405d772a91968b63c00a": {
       "name": "lock_path",
       "stage_id": "c8c20cf061c61a81cae6a91608c5a5621e2e3db0f8dc7db4bf036d07051659ba",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "f6b9e723f150c5b1ddf9c30558a44775211b80d4ac5e5781dd603b8127377ef8": {
       "name": "replaced",
       "stage_id": "af2a64ee5443aba2058e4d55d98e661af9d2ccef38791334c3d7fcd718b2939c",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     },
     "fa482ef86d83a4cb51e6ca1eb2ff327430657b34e18cc41f363a535a6d111f5f": {
       "name": "replace",
-      "stage_id": "73c46ec84ca3efa8dca978ad41d2c0007839cd99f2dda3203353021b0088f04f",
-      "source_hash": "d1bdb51f74d9a097a43bf5ad13733136cb7ed953fb5c55f65a76bd76706db633",
+      "stage_id": "995e53f7e63208aca757a416ef50fd3eb7d2642d3527d9158bed4568080d1942",
+      "source_hash": "fc1b08b81fee34407f140224836ab7eea1a023e2071431cc551163e79eaca0db",
       "uses_std": true
     }
   }

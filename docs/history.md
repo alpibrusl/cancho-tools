@@ -211,3 +211,10 @@ around silently.
    `RENAME_EXCL`; PR #351), `move` uses it, and the same trials lose nothing.
    `write --create` has the same look-then-replace shape (`toolbox.atomic` renames
    its temporary over the name) and is not changed yet.
+7. **`write --create` had the same hole as `move`.** Its look-then-`dir_rename` of the temporary over the
+   path lost the file of a process that took no lock in 411 of 20,000 random arrivals on macOS, 107 on Linux
+   x86-64 and 100 of 100 delayed ones (`scripts/write_race.py`). `toolbox.atomic` gained `create`
+   (`dir_rename_new`), `--create` uses it, the same trials lose nothing, and `io.rename-unsupported` moved from
+   `move`'s own rules into the shared catalogue (39 rules) because two tools now raise it. `atomic.cho` is
+   edition 7 for that, so the published `toolbox.atomic` needs a compiler with `dir_rename_new`.
+

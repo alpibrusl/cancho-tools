@@ -1,4 +1,4 @@
-edition 6;
+edition 7;
 
 module toolbox.atomic;
 
@@ -7,7 +7,9 @@ module toolbox.atomic;
 //
 // A replacement is a sibling temporary file created with `dir_open_new`
 // (`O_EXCL`), written, `file_sync`ed, closed, and `dir_rename`d over the
-// destination, all beneath the directory that holds it (`toolbox.place`'s
+// destination (`replace`) or, for a name that must not exist, `dir_rename_new`d to it
+// (`create`: the kernel refuses a taken name, so a creator that takes no lock cannot be
+// overwritten), all beneath the directory that holds it (`toolbox.place`'s
 // `parent`), so no step resolves a path string and none follows a link --
 // cancho `docs/directory-handles.md` slice 2, which turned A.8's
 // `fs_write("")` into `dir_write`. The temporary's name is derived from the
@@ -177,6 +179,24 @@ fn write_all[&f, &d](file: &!f File, data: &d [byte]) -> [file_write] int {
 // already is stale -- the caller holds the lock, so no live writer owns it
 // -- and is removed once before giving up.
 pub fn replace[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte]) -> [dir_write, file_write] (int, int) {
+    return install(dir, name, temp, data, false);
+}
+
+// The same for a name that must not exist: the last step is `dir_rename_new`, so a file made at `name`
+// by anything -- a process that takes no lock too -- since the caller looked is refused by the kernel,
+// not replaced. Step 4 then answers `EEXIST` (17), or, on a filesystem that cannot refuse atomically
+// (NFS, ntfs-3g, ExFAT), `EOPNOTSUPP` (95, Linux) / `ENOTSUP` (45, macOS); the temporary is removed
+// in every case and `name` is as it was. There is no fallback to a replacing rename.
+pub fn create[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte]) -> [dir_write, file_write] (int, int) {
+    return install(dir, name, temp, data, true);
+}
+
+// Whether a step-4 errno of `create` says the filesystem cannot refuse a taken name atomically.
+pub fn rename_unsupported(errno: int) -> [] bool {
+    return errno == 95 || errno == 45;
+}
+
+fn install[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte], fresh: bool) -> [dir_write, file_write] (int, int) {
     var opened_ok = false;
     var errno = 0;
     var step = 0;
@@ -221,13 +241,33 @@ pub fn replace[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], da
         }
         return (errno, step);
     }
-    match dir_rename(dir, temp, name) {
-        Done::Ok(n) => {
+    var renamed = 0;
+    if fresh {
+        match dir_rename_new(dir, temp, name) {
+            Done::Ok(n) => {
+            }
+            Done::Failed(reason) => {
+                renamed = reason;
+                if renamed == 0 {
+                    renamed = 5;
+                }
+            }
         }
-        Done::Failed(reason) => {
-            dir_remove(dir, temp);
-            return (reason, 4);
+    } else {
+        match dir_rename(dir, temp, name) {
+            Done::Ok(n) => {
+            }
+            Done::Failed(reason) => {
+                renamed = reason;
+                if renamed == 0 {
+                    renamed = 5;
+                }
+            }
         }
+    }
+    if renamed != 0 {
+        dir_remove(dir, temp);
+        return (renamed, 4);
     }
     return (0, 0);
 }

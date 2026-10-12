@@ -166,6 +166,7 @@
     "second_range",
     "seed",
     "sentences",
+    "shell_builtin",
     "short_of",
     "shown",
     "shr33",
@@ -190,5 +191,5 @@
   ],
   "folded_operators": 35,
   "folded_calls": 0,
-  "functions": 243
+  "functions": 244
 }

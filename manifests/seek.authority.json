@@ -152,6 +152,7 @@
     "searched",
     "second_range",
     "sentences",
+    "shell_builtin",
     "short_of",
     "shown",
     "size",
@@ -173,5 +174,5 @@
   ],
   "folded_operators": 31,
   "folded_calls": 0,
-  "functions": 225
+  "functions": 226
 }

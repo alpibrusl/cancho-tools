@@ -263,9 +263,13 @@ from the tools' own descriptions: the prompt said what it wanted, not how.
   only bare names allowed, the model stopped before the append and said why,
   rather than reach for `sha256sum`; the run above allowed the absolute path.
   Over MCP the name is only an identifier and nothing is in the way. Two
-  remedies are open: rename the binary (`digest`, say) and keep `hash` as
-  the MCP tool's name, or keep it and have its `SKILL.md` say to call it by
-  absolute path.
+  remedies were open: rename the binary (`digest`, say), or keep it and have
+  its `SKILL.md` say to call it by absolute path. ~~Open.~~ **Done, the
+  second:** a rename changes a public name and the `hash.v1` schema id, so
+  the generated skill of a tool a shell reserves gains a "Calling it"
+  section (`hash` only, `test_schema.py`). A prompt that said nothing about
+  it still meets the first refusal once, but the skill it loaded says why and
+  what to do.
 * **The skills route costs more turns**: each skill is loaded before use,
   and a Bash line that chains several commands is held for approval as a
   whole. Neither applies to MCP, which is the route to prefer for Claude

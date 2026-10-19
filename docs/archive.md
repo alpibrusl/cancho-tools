@@ -357,7 +357,12 @@ and on a 400 KB tree (100 KB of noise, 300 KB of repeated text) `archive create`
 makes 101,291. A million zero bytes compress to about 6.3 KB where a dynamic code gets under 1 KB (`tests/flate_test.cho`
 holds the bound).
 
-**Mutants (G10)** are in `scripts/archive_mutants.py`: MUTANT_TALLY.
+**Mutants (G10)**, `scripts/archive_mutants.py`: **29 of 29 killed** on the committed code. The first run killed 20: nine survived, and each
+survivor was a test that could not have failed (the execute bit, the gzip length, a pax size, the end marker, the header
+time, a tar size past the data, a code that is not a code, a stored block past the cap, the bound on the header counts), so a
+test was written for each and the runner now also runs the cancho unit tests. One survivor was equivalent at the command line
+(a stored block cannot out-grow the file that holds it) and is killed by a unit test that passes the limit directly. A
+mutant that looked like it survived once was a stale binary left by the previous mutant; the runner now rebuilds the real one at the end.
 
 **Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); a dynamic-Huffman writer; any `zip`, `xz`,
 `bzip2`, `zstd`; restoring modes and times; a second asker (§1).

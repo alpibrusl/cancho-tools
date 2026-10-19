@@ -101,7 +101,7 @@ def document(tool, data, extra=None):
     }
 
 
-def stream(tool, records, end_counts):
+def stream(tool, records, end_counts, optional=()):
     """NDJSON: each line one of `records`, an error record, or the end record."""
     defs = common_defs()
     end = {
@@ -112,7 +112,7 @@ def stream(tool, records, end_counts):
         "complete": {"type": "boolean"},
     }
     end.update(end_counts)
-    defs["end"] = obj(end)
+    defs["end"] = obj(end, required=[k for k in end if k not in optional])
     defs["error_record"] = obj({"type": {"const": "error"}, "error": {"$ref": "#/$defs/error"}})
     one_of = [{"$ref": "#/$defs/" + name} for name in records] + [
         {"$ref": "#/$defs/error_record"}, {"$ref": "#/$defs/end"}]
@@ -150,6 +150,19 @@ SCHEMAS = {
         "files": NAT, "matches": NAT, "errors": NAT, "truncated": {"type": "boolean"},
         "next": {"oneOf": [{"type": "null"}, obj({"skip": NAT})]},
     }),
+    "archive": stream("archive", {
+        "entry": obj({"type": {"const": "entry"}, "path": TB,
+                      "kind": {"enum": ["file", "directory", "hardlink", "symlink", "device", "fifo", "sparse", "other"]},
+                      "size": NAT, "mode": NAT, "unsafe": {"type": "boolean"}},
+                     required=["type", "path", "kind", "size", "unsafe"]),
+        "file": obj({"type": {"const": "file"}, "path": TB, "bytes": NAT, "sha256": HEX64}),
+        "dir": obj({"type": {"const": "dir"}, "path": TB}),
+    }, {
+        "op": {"enum": ["list", "extract", "create"]},
+        "format": {"enum": ["tar", "tgz", "gz", "none"]},
+        "entries": NAT, "bytes": NAT, "errors": NAT, "dry_run": {"type": "boolean"},
+        "archive_sha256": HEX64,
+    }, optional=("archive_sha256",)),
     "hash": stream("hash", {
         "hash": obj({"type": {"const": "hash"}, "path": TB, "algo": {"enum": ["sha256", "sha512"]},
                      "hex": {"type": "string", "pattern": "^([0-9a-f]{64}|[0-9a-f]{128})$"},
@@ -233,6 +246,15 @@ SCHEMAS = {
             obj({"pointer": TB, "kind": {"enum": ["string", "array", "object"]}, "length": NAT}),
         ]
     }),
+    "run": document("run", obj({
+        "program": TB,
+        "exit": {"oneOf": [{"type": "null"}, NAT]},
+        "signal": {"oneOf": [{"type": "null"}, NAT]},
+        "timed_out": {"type": "boolean"},
+        "truncated": obj({"stdout": {"type": "boolean"}, "stderr": {"type": "boolean"}}),
+        "stdout": TB, "stderr": TB,
+        "milliseconds": NAT,
+    })),
     "tally": document("tally", obj({
         "total": NAT, "distinct": NAT, "skipped": NAT,
         "top": {"type": "array", "items": obj({"key": TB, "count": {"type": "integer", "minimum": 1}})},

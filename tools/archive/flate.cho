@@ -1,0 +1,820 @@
+edition 7;
+
+module archive.flate;
+
+// `archive.flate` -- DEFLATE (RFC 1951), gzip (RFC 1952) and CRC-32, in memory.
+//
+// cancho's `std` has none of these (docs/archive.md section 2), so they are
+// written here and move into `std` when a second program wants them. The reader
+// is `puff`'s algorithm (zlib's reference decoder): canonical Huffman codes
+// decoded a bit at a time from a count-and-symbol table, simple enough to check
+// against the RFC line by line and slow enough that its speed is reported, not
+// claimed. The writer is a greedy LZ77 (a 32 KiB window, a hash chain of at most
+// 16 candidates) coded with the fixed Huffman code of the RFC, one block, so its
+// output is a function of its input alone.
+//
+// Everything is bounded by what the caller passes: `inflate` stops at `limit`
+// bytes of output, and answers a status instead of trapping on any input.
+//
+// Statuses of `inflate` and `gunzip` (the tool maps them to rules):
+//   0 ok
+//   1 the DEFLATE stream is invalid
+//   2 the input ended inside the stream
+//   3 the output would pass the limit
+//  10 not a gzip stream (no magic)
+//  11 a gzip header that cannot be read (method, reserved flags)
+//  12 the input ended inside the gzip header or trailer
+//  13 the CRC-32 of the data is not the trailer's
+//  14 the length of the data is not the trailer's
+//  15 bytes follow the one gzip member
+
+import std.buffer;
+
+// ---- CRC-32 (IEEE, reflected polynomial 0xEDB88320) -----------------------------
+
+pub fn crc_fill[&t](table: &!t [int]) -> [] int {
+    var n = 0;
+    while n < 256 {
+        var c = n;
+        var k = 0;
+        while k < 8 {
+            if c & 1 == 1 {
+                c = 0xedb88320 ^ c >> 1;
+            } else {
+                c = c >> 1;
+            }
+            k = k + 1;
+        }
+        table[n] = c;
+        n = n + 1;
+    }
+    return 0;
+}
+
+// Fold `data` into a running CRC, which starts at 0xffffffff and ends xor 0xffffffff.
+pub fn crc_update[&t, &d](table: &t [int], crc: int, data: &d [byte]) -> [] int {
+    var c = crc;
+    var i = 0;
+    while i < len(data) {
+        c = table[(c ^ int_of(data[i])) & 255] ^ c >> 8;
+        i = i + 1;
+    }
+    return c;
+}
+
+// The CRC-32 of `data`, finished.
+pub fn crc32[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] int {
+    let table = box_slice(heap, 256, 0);
+    var done = 0;
+    borrow mut table as &!w in {
+        crc_fill(contents(w));
+    }
+    borrow table as &r in {
+        done = crc_update(contents(r), 0xffffffff, data) ^ 0xffffffff;
+    }
+    unbox_slice(heap, table);
+    return done;
+}
+
+// ---- the bit reader --------------------------------------------------------------
+
+struct Bits {
+    at: int,
+    buf: int,
+    count: int,
+    short: bool,
+}
+
+// `n` bits (at most 16), least significant first. `short` is set, and stays set,
+// when the input ends first.
+fn take[&s](src: &s [byte], end: int, b: Bits, n: int) -> [] (Bits, int) {
+    var at = b.at;
+    var buf = b.buf;
+    var count = b.count;
+    while count < n && at < end {
+        buf = buf | int_of(src[at]) << count;
+        count = count + 8;
+        at = at + 1;
+    }
+    if count < n {
+        return (Bits { at: at, buf: buf, count: count, short: true }, 0);
+    }
+    let value = buf & (1 << n) - 1;
+    return (Bits { at: at, buf: buf >> n, count: count - n, short: b.short }, value);
+}
+
+// ---- Huffman tables ----------------------------------------------------------------
+//
+// One `[int]` of 320: counts of each code length at 0..16, offsets at 16..32, and the
+// symbols in code order from 32.
+
+fn table_size() -> [] int {
+    return 320;
+}
+
+// Build the table for `n` symbols whose code lengths are `lengths[at..at + n]`. Answers 0
+// for a complete code, a negative number for an over-subscribed one and a positive one
+// for an incomplete one.
+fn construct[&t, &l](table: &!t [int], lengths: &l [int], at: int, n: int) -> [] int {
+    var i = 0;
+    while i < 32 {
+        table[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        let length = lengths[at + i];
+        table[length] = table[length] + 1;
+        i = i + 1;
+    }
+    if table[0] == n {
+        return 0;
+    }
+    var left = 1;
+    var length = 1;
+    while length <= 15 {
+        left = (left << 1) - table[length];
+        if left < 0 {
+            return left;
+        }
+        length = length + 1;
+    }
+    table[17] = 0;
+    length = 1;
+    while length < 15 {
+        table[17 + length] = table[16 + length] + table[length];
+        length = length + 1;
+    }
+    i = 0;
+    while i < n {
+        let l = lengths[at + i];
+        if l != 0 {
+            table[32 + table[16 + l]] = i;
+            table[16 + l] = table[16 + l] + 1;
+        }
+        i = i + 1;
+    }
+    return left;
+}
+
+// Whether `construct`'s answer is usable: a complete code, or the one incomplete
+// code the RFC allows, a single code of length one.
+fn usable[&t](table: &t [int], n: int, answer: int) -> [] bool {
+    if answer == 0 {
+        return true;
+    }
+    return answer > 0 && n - table[0] - table[1] == 0;
+}
+
+// The next symbol, or -1 when the bits run out or are not a code of the table.
+fn decode[&s, &t](src: &s [byte], end: int, b: Bits, table: &t [int]) -> [] (Bits, int) {
+    var cur = b;
+    var code = 0;
+    var first = 0;
+    var index = 0;
+    var length = 1;
+    var symbol = 0 - 1;
+    while length <= 15 && symbol < 0 && !cur.short {
+        let (next, bit) = take(src, end, cur, 1);
+        cur = next;
+        code = code | bit;
+        let count = table[length];
+        if code - count < first {
+            symbol = table[32 + index + (code - first)];
+        } else {
+            index = index + count;
+            first = first + count << 1;
+            code = code << 1;
+            length = length + 1;
+        }
+    }
+    return (cur, symbol);
+}
+
+// Length and distance codes (RFC 1951 3.2.5): base at 0, extra bits at 32 for lengths of
+// codes 257..285 (index 0..28), and the same at 64 and 96 for the 30 distance codes.
+fn fill_codes[&c](codes: &!c [int]) -> [] int {
+    var i = 0;
+    var base = 3;
+    while i < 28 {
+        var extra = 0;
+        if i >= 8 {
+            extra = (i - 4) / 4;
+        }
+        codes[i] = base;
+        codes[32 + i] = extra;
+        base = base + (1 << extra);
+        i = i + 1;
+    }
+    codes[28] = 258;
+    codes[60] = 0;
+    i = 0;
+    base = 1;
+    while i < 30 {
+        var extra = 0;
+        if i >= 4 {
+            extra = (i - 2) / 2;
+        }
+        codes[64 + i] = base;
+        codes[96 + i] = extra;
+        base = base + (1 << extra);
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---- inflate ------------------------------------------------------------------------------
+
+struct Block {
+    bits: Bits,
+    produced: int,
+    status: int,
+}
+
+// The symbols of one compressed block, into `out`.
+fn codes[&h, &s, &a, &t, &d](heap: &!h Heap, src: &s [byte], end: int, bits: Bits, lit: &a [int], dist: &t [int], consts: &d [int], out: buffer.Buffer, produced: int, limit: int) -> [heap] (buffer.Buffer, Block) {
+    var o = out;
+    var b = bits;
+    var made = produced;
+    var status = 0;
+    var going = true;
+    while going {
+        let (after, symbol) = decode(src, end, b, lit);
+        b = after;
+        if symbol < 0 {
+            going = false;
+            if b.short {
+                status = 2;
+            } else {
+                status = 1;
+            }
+        } else if symbol < 256 {
+            if made >= limit {
+                going = false;
+                status = 3;
+            } else {
+                o = buffer.push(heap, o, byte_of(symbol));
+                made = made + 1;
+            }
+        } else if symbol == 256 {
+            going = false;
+        } else if symbol > 285 {
+            going = false;
+            status = 1;
+        } else {
+            let k = symbol - 257;
+            let (a1, extra) = take(src, end, b, consts[32 + k]);
+            b = a1;
+            let length = consts[k] + extra;
+            let (a2, far) = decode(src, end, b, dist);
+            b = a2;
+            if far < 0 || far >= 30 {
+                going = false;
+                if b.short {
+                    status = 2;
+                } else {
+                    status = 1;
+                }
+            } else {
+                let (a3, more) = take(src, end, b, consts[96 + far]);
+                b = a3;
+                let distance = consts[64 + far] + more;
+                if b.short {
+                    going = false;
+                    status = 2;
+                } else if distance > made {
+                    going = false;
+                    status = 1;
+                } else if made + length > limit {
+                    going = false;
+                    status = 3;
+                } else {
+                    var n = 0;
+                    while n < length {
+                        var c = byte_of(0);
+                        borrow o as &r in {
+                            c = buffer.bytes(r)[made - distance];
+                        }
+                        o = buffer.push(heap, o, c);
+                        made = made + 1;
+                        n = n + 1;
+                    }
+                }
+            }
+        }
+    }
+    return (o, Block { bits: b, produced: made, status: status });
+}
+
+fn fixed_lengths[&l](lengths: &!l [int]) -> [] int {
+    var i = 0;
+    while i < 288 {
+        if i < 144 {
+            lengths[i] = 8;
+        } else if i < 256 {
+            lengths[i] = 9;
+        } else if i < 280 {
+            lengths[i] = 7;
+        } else {
+            lengths[i] = 8;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < 30 {
+        lengths[288 + i] = 5;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The order of the code length code's own lengths (RFC 1951 3.2.7), as letters: 'A' is 0.
+fn order_of(i: int) -> [] int {
+    return int_of("QRSAIHJGKFLEMDNCOBP"[i]) - 65;
+}
+
+// A dynamic block's tables, read into `lit` and `dist`. Answers 0, or a status.
+fn dynamic_tables[&s, &a, &t, &l](src: &s [byte], end: int, bits: Bits, lit: &!a [int], dist: &!t [int], lengths: &!l [int]) -> [] (Bits, int) {
+    var b = bits;
+    let (a1, hlit) = take(src, end, b, 5);
+    let (a2, hdist) = take(src, end, a1, 5);
+    let (a3, hclen) = take(src, end, a2, 4);
+    b = a3;
+    if b.short {
+        return (b, 2);
+    }
+    let nlen = hlit + 257;
+    let ndist = hdist + 1;
+    let ncode = hclen + 4;
+    if nlen > 286 || ndist > 30 {
+        return (b, 1);
+    }
+    var i = 0;
+    while i < 19 {
+        lengths[i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < ncode {
+        let (next, value) = take(src, end, b, 3);
+        b = next;
+        lengths[order_of(i)] = value;
+        i = i + 1;
+    }
+    if b.short {
+        return (b, 2);
+    }
+    // The code length code goes into `dist`'s table for the moment.
+    let answer = construct(dist, lengths, 0, 19);
+    if !usable(dist, 19, answer) {
+        return (b, 1);
+    }
+    var index = 0;
+    var status = 0;
+    while index < nlen + ndist && status == 0 {
+        let (next, symbol) = decode(src, end, b, dist);
+        b = next;
+        if symbol < 0 {
+            if b.short {
+                status = 2;
+            } else {
+                status = 1;
+            }
+        } else if symbol < 16 {
+            lengths[19 + index] = symbol;
+            index = index + 1;
+        } else {
+            var previous = 0;
+            var repeat = 0;
+            if symbol == 16 {
+                if index == 0 {
+                    status = 1;
+                } else {
+                    previous = lengths[19 + index - 1];
+                }
+                let (n2, extra) = take(src, end, b, 2);
+                b = n2;
+                repeat = 3 + extra;
+            } else if symbol == 17 {
+                let (n2, extra) = take(src, end, b, 3);
+                b = n2;
+                repeat = 3 + extra;
+            } else {
+                let (n2, extra) = take(src, end, b, 7);
+                b = n2;
+                repeat = 11 + extra;
+            }
+            if b.short {
+                status = 2;
+            } else if status == 0 {
+                if index + repeat > nlen + ndist {
+                    status = 1;
+                } else {
+                    var k = 0;
+                    while k < repeat {
+                        lengths[19 + index] = previous;
+                        index = index + 1;
+                        k = k + 1;
+                    }
+                }
+            }
+        }
+    }
+    if status != 0 {
+        return (b, status);
+    }
+    // The end-of-block code must have a length.
+    if lengths[19 + 256] == 0 {
+        return (b, 1);
+    }
+    let a_lit = construct(lit, lengths, 19, nlen);
+    if !usable(lit, nlen, a_lit) {
+        return (b, 1);
+    }
+    let a_dist = construct(dist, lengths, 19 + nlen, ndist);
+    if !usable(dist, ndist, a_dist) {
+        return (b, 1);
+    }
+    return (b, 0);
+}
+
+// Inflate the DEFLATE stream `src[start..end]`, producing at most `limit` bytes. Answers
+// the output, a status, and the offset in `src` just after the stream.
+pub fn inflate[&h, &s](heap: &!h Heap, src: &s [byte], start: int, end: int, limit: int) -> [heap] (buffer.Buffer, int, int) {
+    var out = buffer.empty(heap, 4096);
+    var b = Bits { at: start, buf: 0, count: 0, short: false };
+    var made = 0;
+    var status = 0;
+    var last = false;
+    let lit = box_slice(heap, table_size(), 0);
+    let dist = box_slice(heap, table_size(), 0);
+    let lengths = box_slice(heap, 400, 0);
+    let consts = box_slice(heap, 128, 0);
+    borrow mut consts as &!cw in {
+        fill_codes(contents(cw));
+    }
+    borrow mut lit as &!lw in {
+        borrow mut dist as &!dw in {
+            borrow mut lengths as &!gw in {
+                borrow consts as &cr in {
+                    while !last && status == 0 {
+                        let (n1, is_final) = take(src, end, b, 1);
+                        let (n2, kind) = take(src, end, n1, 2);
+                        b = n2;
+                        last = is_final == 1;
+                        if b.short {
+                            status = 2;
+                        } else if kind == 0 {
+                            // Stored: drop the bits of the current byte, give back whole
+                            // bytes the reader took ahead, and copy.
+                            let spare = b.count / 8;
+                            var at = b.at - spare;
+                            b = Bits { at: at, buf: 0, count: 0, short: false };
+                            if at + 4 > end {
+                                status = 2;
+                            } else {
+                                let size = int_of(src[at]) | int_of(src[at + 1]) << 8;
+                                let inverse = int_of(src[at + 2]) | int_of(src[at + 3]) << 8;
+                                at = at + 4;
+                                if size ^ inverse != 0xffff {
+                                    status = 1;
+                                } else if at + size > end {
+                                    status = 2;
+                                } else if made + size > limit {
+                                    status = 3;
+                                } else {
+                                    out = buffer.append(heap, out, src[at..at + size]);
+                                    made = made + size;
+                                    b = Bits { at: at + size, buf: 0, count: 0, short: false };
+                                }
+                            }
+                        } else if kind == 3 {
+                            status = 1;
+                        } else {
+                            var ready = true;
+                            if kind == 1 {
+                                fixed_lengths(contents(gw));
+                                construct(contents(lw), contents(gw), 0, 288);
+                                construct(contents(dw), contents(gw), 288, 30);
+                            } else {
+                                let (after, why) = dynamic_tables(src, end, b, contents(lw), contents(dw), contents(gw));
+                                b = after;
+                                if why != 0 {
+                                    status = why;
+                                    ready = false;
+                                }
+                            }
+                            if ready {
+                                let (grown, block) = codes(heap, src, end, b, contents(lw), contents(dw), contents(cr), out, made, limit);
+                                out = grown;
+                                b = block.bits;
+                                made = block.produced;
+                                status = block.status;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, lit);
+    unbox_slice(heap, dist);
+    unbox_slice(heap, lengths);
+    unbox_slice(heap, consts);
+    // Whole bytes taken ahead but not used are not part of the stream.
+    return (out, status, b.at - b.count / 8);
+}
+
+// ---- gunzip ---------------------------------------------------------------------------------
+
+pub res struct Gunzipped {
+    data: buffer.Buffer,
+    status: int,
+    // The name in the header (FNAME) as a range of the input, or 0 and 0.
+    name_at: int,
+    name_len: int,
+}
+
+fn le32[&s](src: &s [byte], at: int) -> [] int {
+    return int_of(src[at]) | int_of(src[at + 1]) << 8 | int_of(src[at + 2]) << 16 | int_of(src[at + 3]) << 24;
+}
+
+// Whether `src` starts like a gzip stream.
+pub fn is_gzip[&s](src: &s [byte]) -> [] bool {
+    return len(src) >= 2 && int_of(src[0]) == 0x1f && int_of(src[1]) == 0x8b;
+}
+
+// Read one gzip member that is all of `src`, producing at most `limit` bytes.
+pub fn gunzip[&h, &s](heap: &!h Heap, src: &s [byte], limit: int) -> [heap] Gunzipped {
+    let n = len(src);
+    if !is_gzip(src) {
+        return Gunzipped { data: buffer.empty(heap, 1), status: 10, name_at: 0, name_len: 0 };
+    }
+    if n < 18 {
+        return Gunzipped { data: buffer.empty(heap, 1), status: 12, name_at: 0, name_len: 0 };
+    }
+    let flags = int_of(src[3]);
+    if int_of(src[2]) != 8 || flags & 0xe0 != 0 {
+        return Gunzipped { data: buffer.empty(heap, 1), status: 11, name_at: 0, name_len: 0 };
+    }
+    var at = 10;
+    var short = false;
+    if flags & 4 != 0 {
+        if at + 2 > n {
+            short = true;
+        } else {
+            at = at + 2 + (int_of(src[at]) | int_of(src[at + 1]) << 8);
+        }
+    }
+    var name_at = 0;
+    var name_len = 0;
+    if flags & 8 != 0 && !short {
+        name_at = at;
+        while at < n && int_of(src[at]) != 0 {
+            at = at + 1;
+        }
+        name_len = at - name_at;
+        at = at + 1;
+    }
+    if flags & 16 != 0 && !short {
+        while at < n && int_of(src[at]) != 0 {
+            at = at + 1;
+        }
+        at = at + 1;
+    }
+    if flags & 2 != 0 && !short {
+        at = at + 2;
+    }
+    if short || at + 8 > n {
+        return Gunzipped { data: buffer.empty(heap, 1), status: 12, name_at: 0, name_len: 0 };
+    }
+    let (out, status, next) = inflate(heap, src, at, n - 8, limit);
+    if status != 0 {
+        return Gunzipped { data: out, status: status, name_at: 0, name_len: 0 };
+    }
+    // The trailer follows the stream, and nothing follows the trailer.
+    if next + 8 > n {
+        return Gunzipped { data: out, status: 12, name_at: 0, name_len: 0 };
+    }
+    if next + 8 < n {
+        return Gunzipped { data: out, status: 15, name_at: 0, name_len: 0 };
+    }
+    var crc = 0;
+    borrow out as &o in {
+        crc = crc32(heap, buffer.bytes(o));
+    }
+    var size = 0;
+    borrow out as &o in {
+        size = buffer.size(o);
+    }
+    if crc != le32(src, next) {
+        return Gunzipped { data: out, status: 13, name_at: 0, name_len: 0 };
+    }
+    if size & 0xffffffff != le32(src, next + 4) {
+        return Gunzipped { data: out, status: 14, name_at: 0, name_len: 0 };
+    }
+    return Gunzipped { data: out, status: 0, name_at: name_at, name_len: name_len };
+}
+
+// `gunzip`'s answer as a tuple: the data, the status, and the header name's range.
+pub fn gunzip_parts[&h, &s](heap: &!h Heap, src: &s [byte], limit: int) -> [heap] (buffer.Buffer, int, int, int) {
+    let Gunzipped { data, status, name_at, name_len } = gunzip(heap, src, limit);
+    return (data, status, name_at, name_len);
+}
+
+// ---- deflate --------------------------------------------------------------------------------------
+
+struct Sink {
+    acc: int,
+    used: int,
+}
+
+fn reversed(code: int, n: int) -> [] int {
+    var r = 0;
+    var i = 0;
+    var c = code;
+    while i < n {
+        r = r << 1 | c & 1;
+        c = c >> 1;
+        i = i + 1;
+    }
+    return r;
+}
+
+// Append `n` bits of `value` (at most 16), least significant first.
+fn put[&h](heap: &!h Heap, out: buffer.Buffer, sink: Sink, value: int, n: int) -> [heap] (buffer.Buffer, Sink) {
+    var o = out;
+    var acc = sink.acc | value << sink.used;
+    var used = sink.used + n;
+    while used >= 8 {
+        o = buffer.push(heap, o, byte_of(acc & 255));
+        acc = acc >> 8;
+        used = used - 8;
+    }
+    return (o, Sink { acc: acc, used: used });
+}
+
+// A literal or length symbol in the fixed code.
+fn put_symbol[&h](heap: &!h Heap, out: buffer.Buffer, sink: Sink, symbol: int) -> [heap] (buffer.Buffer, Sink) {
+    if symbol < 144 {
+        return put(heap, out, sink, reversed(0x30 + symbol, 8), 8);
+    }
+    if symbol < 256 {
+        return put(heap, out, sink, reversed(0x190 + symbol - 144, 9), 9);
+    }
+    if symbol < 280 {
+        return put(heap, out, sink, reversed(symbol - 256, 7), 7);
+    }
+    return put(heap, out, sink, reversed(0xc0 + symbol - 280, 8), 8);
+}
+
+fn hash3[&s](src: &s [byte], at: int) -> [] int {
+    return (int_of(src[at]) << 10 ^ int_of(src[at + 1]) << 5 ^ int_of(src[at + 2])) & 0x7fff;
+}
+
+// Insert position `at` in the hash chains.
+fn insert[&s, &x, &y](src: &s [byte], head: &!x [int], prev: &!y [int], at: int) -> [] int {
+    if at + 2 < len(src) {
+        let h = hash3(src, at);
+        prev[at & 32767] = head[h];
+        head[h] = at + 1;
+    }
+    return 0;
+}
+
+// The longest earlier match of `src[at..]` within the window, as (length, distance); length 0
+// when there is none of at least 3.
+fn longest[&s, &x, &y](src: &s [byte], head: &x [int], prev: &y [int], at: int) -> [] (int, int) {
+    var best = 0;
+    var far = 0;
+    if at + 2 >= len(src) {
+        return (0, 0);
+    }
+    let most = min_of(258, len(src) - at);
+    var candidate = head[hash3(src, at)] - 1;
+    var depth = 0;
+    while candidate >= 0 && at - candidate <= 32768 && depth < 16 {
+        var l = 0;
+        while l < most && src[candidate + l] == src[at + l] {
+            l = l + 1;
+        }
+        if l > best {
+            best = l;
+            far = at - candidate;
+        }
+        let next = prev[candidate & 32767] - 1;
+        if next >= candidate {
+            candidate = 0 - 1;
+        } else {
+            candidate = next;
+        }
+        depth = depth + 1;
+    }
+    if best < 3 {
+        return (0, 0);
+    }
+    return (best, far);
+}
+
+fn min_of(a: int, b: int) -> [] int {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+// The raw DEFLATE stream of `src`: one final block in the fixed code.
+pub fn deflate[&h, &s](heap: &!h Heap, src: &s [byte]) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, len(src) / 2 + 64);
+    var sink = Sink { acc: 0, used: 0 };
+    let consts = box_slice(heap, 128, 0);
+    let head = box_slice(heap, 32768, 0);
+    let prev = box_slice(heap, 32768, 0);
+    borrow mut consts as &!cw in {
+        fill_codes(contents(cw));
+    }
+    // BFINAL = 1, BTYPE = 01.
+    let (o1, s1) = put(heap, out, sink, 3, 3);
+    out = o1;
+    sink = s1;
+    borrow consts as &cr in {
+        borrow mut head as &!hw in {
+            borrow mut prev as &!pw in {
+                var at = 0;
+                while at < len(src) {
+                    let (length, far) = longest(src, contents(hw), contents(pw), at);
+                    if length == 0 {
+                        let (o2, s2) = put_symbol(heap, out, sink, int_of(src[at]));
+                        out = o2;
+                        sink = s2;
+                        insert(src, contents(hw), contents(pw), at);
+                        at = at + 1;
+                    } else {
+                        var code = 28;
+                        while contents(cr)[code] > length {
+                            code = code - 1;
+                        }
+                        let (o2, s2) = put_symbol(heap, out, sink, 257 + code);
+                        let (o3, s3) = put(heap, o2, s2, length - contents(cr)[code], contents(cr)[32 + code]);
+                        var dcode = 29;
+                        while contents(cr)[64 + dcode] > far {
+                            dcode = dcode - 1;
+                        }
+                        let (o4, s4) = put(heap, o3, s3, reversed(dcode, 5), 5);
+                        let (o5, s5) = put(heap, o4, s4, far - contents(cr)[64 + dcode], contents(cr)[96 + dcode]);
+                        out = o5;
+                        sink = s5;
+                        var k = 0;
+                        while k < length {
+                            insert(src, contents(hw), contents(pw), at + k);
+                            k = k + 1;
+                        }
+                        at = at + length;
+                    }
+                }
+            }
+        }
+    }
+    let (o6, s6) = put_symbol(heap, out, sink, 256);
+    out = o6;
+    sink = s6;
+    if sink.used > 0 {
+        out = buffer.push(heap, out, byte_of(sink.acc & 255));
+    }
+    unbox_slice(heap, consts);
+    unbox_slice(heap, head);
+    unbox_slice(heap, prev);
+    return out;
+}
+
+fn put_le32[&h](heap: &!h Heap, b: buffer.Buffer, value: int) -> [heap] buffer.Buffer {
+    var o = b;
+    o = buffer.push(heap, o, byte_of(value & 255));
+    o = buffer.push(heap, o, byte_of(value >> 8 & 255));
+    o = buffer.push(heap, o, byte_of(value >> 16 & 255));
+    return buffer.push(heap, o, byte_of(value >> 24 & 255));
+}
+
+// `src` as one gzip member: no name, mtime 0, OS 255 (unknown), so the header carries no
+// fact of the machine and the same data gives the same bytes.
+pub fn gzip[&h, &s](heap: &!h Heap, src: &s [byte]) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, len(src) / 2 + 64);
+    // Magic, deflate, no flags, mtime 0, no extra flags, OS 255.
+    out = buffer.push(heap, out, byte_of(0x1f));
+    out = buffer.push(heap, out, byte_of(0x8b));
+    out = buffer.push(heap, out, byte_of(8));
+    var zeros = 0;
+    while zeros < 6 {
+        out = buffer.push(heap, out, byte_of(0));
+        zeros = zeros + 1;
+    }
+    out = buffer.push(heap, out, byte_of(0xff));
+    let body = deflate(heap, src);
+    borrow body as &r in {
+        out = buffer.append(heap, out, buffer.bytes(r));
+    }
+    buffer.drop(heap, body);
+    out = put_le32(heap, out, crc32(heap, src));
+    out = put_le32(heap, out, len(src) & 0xffffffff);
+    return out;
+}

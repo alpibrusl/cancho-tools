@@ -20,6 +20,12 @@ import jsonschema
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BIN = pathlib.Path(os.environ.get("TOOLBOX_BIN", ROOT / "build"))
 TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move"]
+# The tools added after the shared gates were written. They are held to the gates that are about authority
+# (test_authority.py) and have a conformance file of their own for the rest (test_archive.py, test_run.py):
+# several shared gates (M2 determinism of an answer, M7 mutation, M8 confinement of writes, M9 flat memory)
+# are claims `run` deliberately does not make and `archive` makes in a different form.
+ADDED = ["archive", "run"]
+EVERY = TOOLS + ADDED
 STREAMS = {"seek", "hash", "list"}
 TRAPS = {132, 134, 136, 139, -4, -6, -8, -11}
 
@@ -200,3 +206,20 @@ class Fixture:
 
 def rng(seed=1):
     return random.Random(seed)
+
+
+_launcher = {}
+
+
+def peak_rss(argv, cwd=None, timeout=120):
+    """(exit status, peak resident KiB) of `argv`, read by maxrss.c, a launcher small enough that the
+    high-water mark a forked child inherits is not the test runner's (see its header). A Python
+    process measured with os.wait4 reports Python's own tens of megabytes, whatever the tool does."""
+    if "path" not in _launcher:
+        _launcher["dir"] = tempfile.mkdtemp(prefix="maxrss-")
+        _launcher["path"] = os.path.join(_launcher["dir"], "maxrss")
+        subprocess.run(["cc", "-O2", "-o", _launcher["path"], str(pathlib.Path(__file__).with_name("maxrss.c"))], check=True)
+    p = subprocess.run([_launcher["path"], *map(str, argv)], capture_output=True, cwd=cwd, timeout=timeout,
+                       stdin=subprocess.DEVNULL, check=True)
+    kb, status = p.stdout.split()
+    return int(status), int(kb)

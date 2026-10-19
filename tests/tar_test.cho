@@ -1,0 +1,327 @@
+edition 7;
+
+import std.buffer;
+import std.bytes;
+import std.test;
+import archive.tar;
+
+// A tar of: `a.txt` ("hello"), the directory `d/`, and `d/b.txt` ("world!").
+fn sample[&h](heap: &!h Heap) -> [heap] buffer.Buffer {
+    var t = buffer.empty(heap, 4096);
+    let (t1, w1) = tar.header(heap, t, "a.txt", 5, false, 420);
+    t = tar.body_of(heap, t1, "hello");
+    let (t2, w2) = tar.header(heap, t, "d", 0, true, 493);
+    let (t3, w3) = tar.header(heap, t2, "d/b.txt", 6, false, 493);
+    t = tar.body_of(heap, t3, "world!");
+    return tar.finish(heap, t);
+}
+
+fn count_of[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] int {
+    let e = tar.parse(heap, data, 1000);
+    var n = 0;
+    borrow e as &r in {
+        n = tar.count(r);
+    }
+    tar.drop(heap, e);
+    return n;
+}
+
+fn failure_of[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] int {
+    let e = tar.parse(heap, data, 1000);
+    var f = 0;
+    borrow e as &r in {
+        f = tar.failure(r);
+    }
+    tar.drop(heap, e);
+    return f;
+}
+
+pub fn test_what_the_writer_writes_the_reader_reads[&h](heap: &!h Heap) -> [heap] int {
+    let t = sample(heap);
+    borrow t as &d in {
+        test.assert_eq(buffer.size(d) % 512, 0);
+        let e = tar.parse(heap, buffer.bytes(d), 100);
+        borrow e as &r in {
+            test.assert_eq(tar.failure(r), 0);
+            test.assert_eq(tar.count(r), 3);
+            test.assert(bytes.equal(tar.name(r, 0), "a.txt"));
+            test.assert(bytes.equal(tar.name(r, 1), "d"));
+            test.assert(bytes.equal(tar.name(r, 2), "d/b.txt"));
+            test.assert_eq(tar.kind(r, 0), 1);
+            test.assert_eq(tar.kind(r, 1), 2);
+            test.assert_eq(tar.size(r, 0), 5);
+            test.assert_eq(tar.size(r, 1), 0);
+            test.assert_eq(tar.size(r, 2), 6);
+            test.assert_eq(tar.mode(r, 0), 420);
+            test.assert_eq(tar.mode(r, 2), 493);
+            let at = tar.body(r, 2);
+            test.assert(bytes.equal(buffer.bytes(d)[at..at + 6], "world!"));
+            test.assert(!tar.unsafe_at(r, 0));
+        }
+        tar.drop(heap, e);
+        test.assert(tar.looks_like_tar(buffer.bytes(d)));
+    }
+    buffer.drop(heap, t);
+    return 0;
+}
+
+pub fn test_the_bytes_are_a_function_of_the_arguments[&h](heap: &!h Heap) -> [heap] int {
+    let a = sample(heap);
+    let b = sample(heap);
+    borrow a as &x in {
+        borrow b as &y in {
+            test.assert(bytes.equal(buffer.bytes(x), buffer.bytes(y)));
+            // Owner 0, mtime 0, the ustar magic, and the checksum field "NNNNNN\0 ".
+            test.assert(bytes.equal(buffer.bytes(x)[257..262], "ustar"));
+            test.assert_eq(int_of(buffer.bytes(x)[155]), ' ');
+            test.assert_eq(int_of(buffer.bytes(x)[154]), 0);
+        }
+    }
+    buffer.drop(heap, a);
+    buffer.drop(heap, b);
+    return 0;
+}
+
+pub fn test_a_long_name_is_split_into_prefix_and_name[&h](heap: &!h Heap) -> [heap] int {
+    // 60 + 1 + 60 + 1 + 40 = 162 bytes: too long for the name field, fine with a prefix.
+    let long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cccccccccccccccccccccccccccccccccccccccc";
+    test.assert_eq(len(long), 162);
+    test.assert(tar.split_point(long) > 0);
+    var t = buffer.empty(heap, 2048);
+    let (t1, why) = tar.header(heap, t, long, 0, false, 420);
+    test.assert_eq(why, 0);
+    t = tar.finish(heap, t1);
+    borrow t as &d in {
+        let e = tar.parse(heap, buffer.bytes(d), 100);
+        borrow e as &r in {
+            test.assert_eq(tar.count(r), 1);
+            test.assert(bytes.equal(tar.name(r, 0), long));
+        }
+        tar.drop(heap, e);
+    }
+    buffer.drop(heap, t);
+    // One component of 101 bytes cannot be split anywhere.
+    var one = buffer.empty(heap, 128);
+    var i = 0;
+    while i < 101 {
+        one = buffer.push(heap, one, byte_of('x'));
+        i = i + 1;
+    }
+    borrow one as &o in {
+        test.assert_eq(tar.split_point(buffer.bytes(o)), 0 - 2);
+        let (u, no) = tar.header(heap, buffer.empty(heap, 1), buffer.bytes(o), 0, false, 420);
+        test.assert_eq(no, 1);
+        buffer.drop(heap, u);
+    }
+    buffer.drop(heap, one);
+    return 0;
+}
+
+pub fn test_names_are_normalised_and_the_unsafe_are_flagged[&h](heap: &!h Heap) -> [heap] int {
+    test.assert(tar.unsafe_name("/etc/passwd"));
+    test.assert(tar.unsafe_name("../x"));
+    test.assert(tar.unsafe_name("a/../../x"));
+    test.assert(tar.unsafe_name("a/.."));
+    test.assert(!tar.unsafe_name("a/..b"));
+    test.assert(!tar.unsafe_name("..a/b"));
+    test.assert(!tar.unsafe_name("./a//b/"));
+    test.assert(!tar.unsafe_name("a.b/c..d"));
+    let n1 = tar.normalised(heap, "./a//b/./c/");
+    borrow n1 as &a in {
+        test.assert(bytes.equal(buffer.bytes(a), "a/b/c"));
+    }
+    buffer.drop(heap, n1);
+    let n2 = tar.normalised(heap, "./");
+    borrow n2 as &b in {
+        test.assert(bytes.equal(buffer.bytes(b), "."));
+    }
+    buffer.drop(heap, n2);
+    // A hostile name is carried through the writer and flagged by the reader.
+    var t = buffer.empty(heap, 2048);
+    let (t1, why) = tar.header(heap, t, "../escape", 1, false, 420);
+    t = tar.body_of(heap, t1, "x");
+    t = tar.finish(heap, t);
+    borrow t as &d in {
+        let e = tar.parse(heap, buffer.bytes(d), 100);
+        borrow e as &r in {
+            test.assert_eq(tar.count(r), 1);
+            test.assert(tar.unsafe_at(r, 0));
+        }
+        tar.drop(heap, e);
+    }
+    buffer.drop(heap, t);
+    return 0;
+}
+
+pub fn test_damage_is_a_failure_never_a_trap[&h](heap: &!h Heap) -> [heap] int {
+    let t = sample(heap);
+    borrow t as &d in {
+        let all = buffer.bytes(d);
+        test.assert_eq(failure_of(heap, all), 0);
+        // Cut at every offset (stepping by 37): never a trap, and a cut that loses the end marker is a failure.
+        var cut = 0;
+        while cut < len(all) {
+            let f = failure_of(heap, all[0..cut]);
+            test.assert(f == 0 || f == 1 || f == 2 || f == 3);
+            if cut < len(all) - 1024 {
+                test.assert(f != 0);
+            }
+            cut = cut + 37;
+        }
+        // A byte of the first header changed: its checksum no longer matches.
+        var copy = buffer.empty(heap, len(all));
+        copy = buffer.append(heap, copy, all);
+        let loose = box_slice(heap, len(all), byte_of(0));
+        borrow mut loose as &!w in {
+            var i = 0;
+            while i < len(all) {
+                contents(w)[i] = all[i];
+                i = i + 1;
+            }
+            contents(w)[3] = byte_of(int_of(all[3]) ^ 1);
+        }
+        borrow loose as &l in {
+            test.assert_eq(failure_of(heap, contents(l)), 2);
+        }
+        unbox_slice(heap, loose);
+        buffer.drop(heap, copy);
+        // Every single-byte change of the whole archive is a status.
+        let flip = box_slice(heap, len(all), byte_of(0));
+        var at = 0;
+        while at < len(all) {
+            borrow mut flip as &!w in {
+                var i = 0;
+                while i < len(all) {
+                    contents(w)[i] = all[i];
+                    i = i + 1;
+                }
+                contents(w)[at] = byte_of(int_of(all[at]) ^ 0x5a);
+            }
+            borrow flip as &f in {
+                let status = failure_of(heap, contents(f));
+                test.assert(status >= 0 && status <= 4);
+            }
+            at = at + 13;
+        }
+        unbox_slice(heap, flip);
+    }
+    buffer.drop(heap, t);
+    return 0;
+}
+
+pub fn test_the_entry_limit_is_a_failure[&h](heap: &!h Heap) -> [heap] int {
+    let t = sample(heap);
+    borrow t as &d in {
+        let e = tar.parse(heap, buffer.bytes(d), 2);
+        borrow e as &r in {
+            test.assert_eq(tar.failure(r), 4);
+            test.assert_eq(tar.count(r), 2);
+        }
+        tar.drop(heap, e);
+    }
+    buffer.drop(heap, t);
+    return 0;
+}
+
+pub fn test_a_size_that_cannot_fit_is_truncated_not_a_trap[&h](heap: &!h Heap) -> [heap] int {
+    // A header that claims 2^40 bytes of body.
+    var t = buffer.empty(heap, 1024);
+    let (t1, why) = tar.header(heap, t, "big", 5, false, 420);
+    t = t1;
+    borrow t as &d in {
+        let loose = box_slice(heap, 512, byte_of(0));
+        borrow mut loose as &!w in {
+            var i = 0;
+            while i < 512 {
+                contents(w)[i] = buffer.bytes(d)[i];
+                i = i + 1;
+            }
+            // size "17777777777" (octal, 11 digits = 2^33 - 1), then the checksum fixed up.
+            var k = 0;
+            while k < 11 {
+                contents(w)[124 + k] = byte_of('7');
+                k = k + 1;
+            }
+            contents(w)[135] = byte_of(0);
+            var sum = 0;
+            i = 0;
+            while i < 512 {
+                if i >= 148 && i < 156 {
+                    sum = sum + 32;
+                } else {
+                    sum = sum + int_of(contents(w)[i]);
+                }
+                i = i + 1;
+            }
+            var shift = 15;
+            var j = 0;
+            while j < 6 {
+                contents(w)[148 + j] = byte_of('0' + (sum >> shift & 7));
+                shift = shift - 3;
+                j = j + 1;
+            }
+        }
+        borrow loose as &l in {
+            test.assert_eq(failure_of(heap, contents(l)), 1);
+        }
+        unbox_slice(heap, loose);
+    }
+    buffer.drop(heap, t);
+    return 0;
+}
+
+// A GNU long-name header whose body is read to a NUL: with a size it claims past the data and a body
+// that has no NUL to the end, a reader that trusts the claim reads off the end.
+pub fn test_a_long_name_that_claims_more_than_the_data_is_truncated_not_a_trap[&h](heap: &!h Heap) -> [heap] int {
+    var claim = 600;
+    while claim <= 1300 {
+        var t = buffer.empty(heap, 2048);
+        let (t1, why) = tar.header(heap, t, "header", 5, false, 420);
+        t = t1;
+        let loose = box_slice(heap, 1212, byte_of('A'));
+        borrow t as &d in {
+            borrow mut loose as &!w in {
+                var i = 0;
+                while i < 512 {
+                    contents(w)[i] = buffer.bytes(d)[i];
+                    i = i + 1;
+                }
+                contents(w)[156] = byte_of('L');
+                // size: eleven octal digits of `claim`
+                var digits = 0;
+                var rest = claim;
+                var at = 134;
+                while digits < 11 {
+                    contents(w)[at] = byte_of('0' + rest % 8);
+                    rest = rest / 8;
+                    at = at - 1;
+                    digits = digits + 1;
+                }
+                var sum = 0;
+                i = 0;
+                while i < 512 {
+                    if i >= 148 && i < 156 {
+                        sum = sum + 32;
+                    } else {
+                        sum = sum + int_of(contents(w)[i]);
+                    }
+                    i = i + 1;
+                }
+                var shift = 15;
+                var j = 0;
+                while j < 6 {
+                    contents(w)[148 + j] = byte_of('0' + (sum >> shift & 7));
+                    shift = shift - 3;
+                    j = j + 1;
+                }
+            }
+            borrow loose as &l in {
+                test.assert_eq(failure_of(heap, contents(l)), 1);
+            }
+        }
+        unbox_slice(heap, loose);
+        buffer.drop(heap, t);
+        claim = claim + 71;
+    }
+    return 0;
+}

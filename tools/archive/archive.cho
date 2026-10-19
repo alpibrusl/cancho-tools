@@ -1,0 +1,1189 @@
+edition 7;
+
+// `archive` -- list, extract and create tar archives, gzip-compressed or not, and gzip or
+// gunzip one file.
+//
+//     archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz]
+//             [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]
+//
+// docs/archive.md is the design, the gates and the limits. In short:
+//
+// * Everything is beneath --root (the working directory when it is omitted), following no link.
+// * The archive is read whole (at most --max-bytes, before and after inflating), checked whole, and
+//   only then is anything written: an archive with one bad entry extracts nothing.
+// * `extract` writes regular files only, never over an existing name, and every directory an entry
+//   needs must exist already, because cancho has no `mkdir` (docs/archive.md section 2). A link, a
+//   device and a name that climbs are refused by rule.
+// * `create` writes the same bytes for the same files: sorted entries, owner 0, time 0, a gzip header
+//   with no name and no time.
+
+import std.buffer;
+import std.bytes;
+import std.dirs;
+import std.json;
+import std.map;
+import archive.flate;
+import archive.tar;
+import toolbox.atomic;
+import toolbox.built;
+import toolbox.cli;
+import toolbox.describe;
+import toolbox.fail;
+import toolbox.out;
+import toolbox.path;
+import toolbox.place;
+import toolbox.text;
+
+fn extra() -> [] &static [byte] {
+    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|a directory an entry needs does not exist, and cancho has no mkdir;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
+}
+
+fn flag_table() -> [] &static [byte] {
+    return "root||path|root||resolve every path relative to this directory (default: the working directory) and refuse paths outside it;op||choice:list/extract/create|none|list|list shows the entries, extract writes them beneath --into, create writes an archive of the PATHs;into||path|path-write||extract beneath this directory, which must exist (default: the root);as|a|choice:tar/tgz/gz|none|tgz|what create writes: a tar, a gzip-compressed tar, or one file gzipped;dry-run||bool|guard||check everything and report what would be written, exit 9, write nothing;max-bytes||nat|none|67108864|the largest archive read, expanded size included, and the largest archive written (ceiling 1073741824);max-entries||nat|none|10000|the most entries read or written (ceiling 1000000)";
+}
+
+fn tool() -> [] describe.Tool {
+    return describe.Tool { name: "archive", version: "0.1.0", summary: "List, extract and create tar archives, gzip-compressed or not, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted)", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
+}
+
+fn built() -> [] describe.Built {
+    return describe.Built { authority: built.authority(), schema: built.schema(), compiler: built.compiler() };
+}
+
+fn bytes_ceiling() -> [] int {
+    return 1073741824;
+}
+
+fn entries_ceiling() -> [] int {
+    return 1000000;
+}
+
+fn depth_ceiling() -> [] int {
+    return 64;
+}
+
+// ---- errors -------------------------------------------------------------------------------
+
+fn flag_problem[&h](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], flags: &static [byte]) -> [heap] fail.Errors {
+    var w = fail.open(heap, rule, message, hint);
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, "flags");
+    w = json.put_string(heap, w, flags);
+    return fail.add(heap, e, w);
+}
+
+// A refusal of this tool's own: its rule, a sentence, and the path (and one number) it is about.
+fn refuse[&h, &p](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], shown: &p [byte], key: &static [byte], value: int) -> [heap] fail.Errors {
+    var w = fail.open_in(heap, extra(), rule, message, hint);
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    if len(shown) > 0 {
+        w = json.put_key(heap, w, "path");
+        w = text.put(heap, w, shown);
+    }
+    if len(key) > 0 {
+        w = json.put_key(heap, w, key);
+        w = json.put_int(heap, w, value);
+    }
+    return fail.add(heap, e, w);
+}
+
+fn too_large[&h, &p](heap: &!h Heap, e: fail.Errors, shown: &p [byte], most: int) -> [heap] fail.Errors {
+    return refuse(heap, e, "limit.archive-too-large", "the archive, expanded, is larger than --max-bytes", "raise --max-bytes, up to 1073741824", shown, "max_bytes", most);
+}
+
+// What a gunzip status (archive.flate) is, as a rule.
+fn gzip_error[&h, &p](heap: &!h Heap, e: fail.Errors, status: int, shown: &p [byte], most: int) -> [heap] fail.Errors {
+    if status == 3 {
+        return too_large(heap, e, shown, most);
+    }
+    if status == 1 || status == 2 {
+        return refuse(heap, e, "archive.bad-deflate", "the compressed data is not a valid DEFLATE stream", "", shown, "", 0);
+    }
+    if status == 13 || status == 14 {
+        return refuse(heap, e, "archive.crc-mismatch", "the data does not match the gzip trailer's CRC-32 or length", "the archive is damaged", shown, "", 0);
+    }
+    return refuse(heap, e, "archive.bad-gzip", "the gzip header or trailer cannot be read, or bytes follow the one member", "a concatenation of gzip files is not one archive: unpack each", shown, "", 0);
+}
+
+fn tar_error[&h, &p](heap: &!h Heap, e: fail.Errors, failure: int, at: int, shown: &p [byte], most: int) -> [heap] fail.Errors {
+    if failure == 1 {
+        return refuse(heap, e, "archive.truncated", "the archive ends inside a header or body, or before its end marker", "", shown, "offset", at);
+    }
+    if failure == 2 {
+        return refuse(heap, e, "archive.bad-checksum", "a tar header's checksum is not its bytes'", "", shown, "offset", at);
+    }
+    if failure == 3 {
+        return refuse(heap, e, "archive.bad-header", "a tar header has a size or mode that is not octal", "", shown, "offset", at);
+    }
+    return refuse(heap, e, "limit.too-many-entries", "the archive has more entries than --max-entries", "raise --max-entries, up to 1000000", shown, "max_entries", most);
+}
+
+// ---- reading an archive --------------------------------------------------------------------------
+
+// format: 1 tar, 2 gzip-compressed tar, 3 one file gzipped; 0 when it could not be read.
+pub res struct Loaded {
+    data: buffer.Buffer,
+    label: buffer.Buffer,
+    format: int,
+}
+
+fn format_name(format: int) -> [] &static [byte] {
+    if format == 1 {
+        return "tar";
+    }
+    if format == 2 {
+        return "tgz";
+    }
+    if format == 3 {
+        return "gz";
+    }
+    return "none";
+}
+
+// The name of the single file inside a gzip that holds no tar: the header's, else the archive's own
+// name without `.gz`, else `data`.
+fn gz_label[&h, &s, &p](heap: &!h Heap, header: &s [byte], shown: &p [byte]) -> [heap] buffer.Buffer {
+    var label = buffer.empty(heap, 32);
+    if len(header) > 0 {
+        let leaf = place.leaf(header);
+        if len(leaf) > 0 && !bytes.equal(leaf, ".") && !bytes.equal(leaf, "..") {
+            label = buffer.append(heap, label, leaf);
+            return label;
+        }
+    }
+    let leaf = place.leaf(shown);
+    if bytes.ends_with(leaf, ".gz") && len(leaf) > 3 {
+        label = buffer.append(heap, label, leaf[0..len(leaf) - 3]);
+    } else {
+        label = buffer.append(heap, label, "data");
+    }
+    return label;
+}
+
+// Read operand `at` whole, inflate it when it is gzip, and say what it is.
+fn load[&h, &g, &f, &r](heap: &!h Heap, args: &g Args, fs: &f Fs(""), root: &r [byte], at: int, most: int, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read] (fail.Errors, Loaded) {
+    var e = errs;
+    let (resolved, checked) = path.operand(heap, args, root, at, e);
+    e = checked;
+    var data = buffer.empty(heap, 1);
+    var label = buffer.empty(heap, 1);
+    var format = 0;
+    borrow resolved as &rp in {
+        if path.ok(rp) {
+            let (read, errno, big) = atomic.read_all(heap, place.open_operand(fs, root, path.shown(rp), path.full(rp)), most, buffer.empty(heap, 4096));
+            buffer.drop(heap, data);
+            data = read;
+            if errno != 0 {
+                e = fail.io_error(heap, e, errno, false, path.shown(rp));
+            } else if big {
+                e = too_large(heap, e, path.shown(rp), most);
+            } else {
+                var inner = buffer.empty(heap, 1);
+                var gz_status = 0;
+                var zipped = false;
+                var header_name = buffer.empty(heap, 1);
+                borrow data as &dr in {
+                    if flate.is_gzip(buffer.bytes(dr)) {
+                        zipped = true;
+                        let (expanded, status, name_at, name_len) = flate.gunzip_parts(heap, buffer.bytes(dr), most);
+                        buffer.drop(heap, inner);
+                        inner = expanded;
+                        gz_status = status;
+                        if status == 0 {
+                            buffer.drop(heap, header_name);
+                            header_name = buffer.append(heap, buffer.empty(heap, name_len + 1), buffer.bytes(dr)[name_at..name_at + name_len]);
+                        }
+                    }
+                }
+                if zipped {
+                    if gz_status != 0 {
+                        e = gzip_error(heap, e, gz_status, path.shown(rp), most);
+                        buffer.drop(heap, inner);
+                    } else {
+                        var is_tar = false;
+                        borrow inner as &ir in {
+                            is_tar = tar.looks_like_tar(buffer.bytes(ir));
+                        }
+                        buffer.drop(heap, data);
+                        data = inner;
+                        if is_tar {
+                            format = 2;
+                        } else {
+                            format = 3;
+                            buffer.drop(heap, label);
+                            borrow header_name as &hn in {
+                                label = gz_label(heap, buffer.bytes(hn), path.shown(rp));
+                            }
+                        }
+                    }
+                } else {
+                    buffer.drop(heap, inner);
+                    var is_tar = false;
+                    borrow data as &dr in {
+                        is_tar = tar.looks_like_tar(buffer.bytes(dr));
+                    }
+                    if is_tar {
+                        format = 1;
+                    } else {
+                        e = refuse(heap, e, "archive.not-an-archive", "the file is neither gzip nor a tar", "name a .tar, .tar.gz or .gz file", path.shown(rp), "", 0);
+                    }
+                }
+                buffer.drop(heap, header_name);
+            }
+        }
+    }
+    path.drop(heap, resolved);
+    return (e, Loaded { data: data, label: label, format: format });
+}
+
+fn drop_loaded[&h](heap: &!h Heap, l: Loaded) -> [heap] int {
+    let Loaded { data, label, format } = l;
+    buffer.drop(heap, data);
+    buffer.drop(heap, label);
+    return format;
+}
+
+// ---- records -------------------------------------------------------------------------------------------
+
+fn put_entry[&h, &i, &p](heap: &!h Heap, io: &!i Io, shown: &p [byte], kind: &static [byte], size: int, mode: int, flagged: bool) -> [heap, io_write] bool {
+    var w = json.writer(heap, 160 + len(shown));
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "type");
+    w = json.put_string(heap, w, "entry");
+    w = json.put_key(heap, w, "path");
+    w = text.put(heap, w, shown);
+    w = json.put_key(heap, w, "kind");
+    w = json.put_string(heap, w, kind);
+    w = json.put_key(heap, w, "size");
+    w = json.put_int(heap, w, size);
+    if mode >= 0 {
+        w = json.put_key(heap, w, "mode");
+        w = json.put_int(heap, w, mode);
+    }
+    w = json.put_key(heap, w, "unsafe");
+    w = json.put_bool(heap, w, flagged);
+    return out.close_line(heap, io, w);
+}
+
+fn put_file[&h, &i, &p, &x](heap: &!h Heap, io: &!i Io, shown: &p [byte], size: int, digest: &x [byte]) -> [heap, io_write] bool {
+    var w = json.writer(heap, 160 + len(shown));
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "type");
+    w = json.put_string(heap, w, "file");
+    w = json.put_key(heap, w, "path");
+    w = text.put(heap, w, shown);
+    w = json.put_key(heap, w, "bytes");
+    w = json.put_int(heap, w, size);
+    w = json.put_key(heap, w, "sha256");
+    w = json.put_string(heap, w, digest);
+    return out.close_line(heap, io, w);
+}
+
+fn put_dir[&h, &i, &p](heap: &!h Heap, io: &!i Io, shown: &p [byte]) -> [heap, io_write] bool {
+    var w = json.writer(heap, 96 + len(shown));
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "type");
+    w = json.put_string(heap, w, "dir");
+    w = json.put_key(heap, w, "path");
+    w = text.put(heap, w, shown);
+    return out.close_line(heap, io, w);
+}
+
+// `prefix/name`, or `name` when the prefix is `.` or empty.
+fn joined[&h, &p, &n](heap: &!h Heap, prefix: &p [byte], name: &n [byte]) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, len(prefix) + len(name) + 2);
+    if len(prefix) > 0 && !bytes.equal(prefix, ".") {
+        b = buffer.append(heap, b, prefix);
+        b = buffer.push(heap, b, byte_of('/'));
+    }
+    return buffer.append(heap, b, name);
+}
+
+// A new file: the temporary is created exclusively and renamed into place with the kernel refusing a
+// taken name, so a file made at the name by anything since the plan was checked is not replaced
+// (cancho-tools#34). Unlike `toolbox.atomic.create` a temporary that is already there is not removed:
+// it may be another extract's, in the middle of its write, and a lock file per extracted file is more
+// than an extract should leave. The step that failed is 1 (temporary exists, or cannot be made), 2 (write),
+// 3 (sync) or 4 (rename).
+fn place_file[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte]) -> [dir_write, file_write] (int, int) {
+    match dir_open_new(dir, temp) {
+        Opened::Failed(reason) => {
+            return (reason, 1);
+        }
+        Opened::Ok(opened) => {
+            var file = opened;
+            var errno = 0;
+            var step = 0;
+            var at = 0;
+            borrow mut file as &!handle in {
+                while at < len(data) && errno == 0 {
+                    match file_write(handle, data[at..len(data)]) {
+                        Done::Ok(n) => {
+                            if n <= 0 {
+                                errno = 5;
+                                step = 2;
+                            } else {
+                                at = at + n;
+                            }
+                        }
+                        Done::Failed(reason) => {
+                            errno = reason;
+                            if errno == 0 {
+                                errno = 5;
+                            }
+                            step = 2;
+                        }
+                    }
+                }
+                if errno == 0 {
+                    match file_sync(handle) {
+                        Done::Ok(n) => {
+                        }
+                        Done::Failed(reason) => {
+                            errno = reason;
+                            step = 3;
+                        }
+                    }
+                }
+            }
+            file_close(file);
+            if errno != 0 {
+                dir_remove(dir, temp);
+                return (errno, step);
+            }
+            match dir_rename_new(dir, temp, name) {
+                Done::Ok(n) => {
+                    return (0, 0);
+                }
+                Done::Failed(reason) => {
+                    dir_remove(dir, temp);
+                    var code = reason;
+                    if code == 0 {
+                        code = 5;
+                    }
+                    return (code, 4);
+                }
+            }
+        }
+    }
+}
+
+// A failure of `place_file` as a rule.
+fn placing_error[&h, &p](heap: &!h Heap, e: fail.Errors, errno: int, step: int, shown: &p [byte]) -> [heap] fail.Errors {
+    if step == 1 && errno == 17 {
+        return fail.simple(heap, e, "conflict.locked", "a temporary file of this write is already there: another writer is at work, or an earlier one died", "wait and retry; if it persists, the stale file is the one named .<name>.<hash>.lexsys-tmp beside the target", "path", shown);
+    }
+    if step == 4 && errno == 17 {
+        return fail.simple(heap, e, "conflict.exists", "the file exists already; archive never replaces a file", "move it aside with `move`, or write elsewhere", "path", shown);
+    }
+    if step == 4 && atomic.rename_unsupported(errno) {
+        return fail.simple(heap, e, "io.rename-unsupported", "this filesystem cannot refuse an existing name atomically, so nothing was written", "write on a filesystem that supports renameat2 with RENAME_NOREPLACE", "path", shown);
+    }
+    return fail.io_error(heap, e, errno, true, shown);
+}
+
+// Write `data` as the new file `shown` beneath `root`. True when it was written.
+fn put_new[&h, &f, &r, &p, &d](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool, buffer.Buffer) {
+    var e = errs;
+    var digest = atomic.sha256_hex(heap, data);
+    var ok = false;
+    match place.parent(fs, root, shown, shown) {
+        DirOpened::Failed(reason) => {
+            e = fail.io_error(heap, e, reason, true, shown);
+        }
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            let leaf = place.leaf(shown);
+            borrow dir as &dd in {
+                borrow digest as &hx in {
+                    let temp = atomic.temp_path(heap, leaf, buffer.bytes(hx));
+                    borrow temp as &tp in {
+                        let (errno, step) = place_file(dd, leaf, buffer.bytes(tp), data);
+                        if errno == 0 {
+                            ok = true;
+                        } else {
+                            e = placing_error(heap, e, errno, step, shown);
+                        }
+                    }
+                    buffer.drop(heap, temp);
+                }
+            }
+            dir_close(dir);
+        }
+    }
+    return (e, ok, digest);
+}
+
+// ---- counts ------------------------------------------------------------------------------------------------
+
+struct Count {
+    entries: int,
+    bytes: int,
+    // Error records already written.
+    emitted: int,
+    broken: bool,
+}
+
+fn sync[&h, &i, &e](heap: &!h Heap, io: &!i Io, errs: &e fail.Errors, c: Count) -> [heap, io_write] Count {
+    var broken = c.broken;
+    if !broken {
+        if !out.error_records(heap, io, errs, c.emitted) {
+            broken = true;
+        }
+    }
+    return Count { entries: c.entries, bytes: c.bytes, emitted: fail.count(errs), broken: broken };
+}
+
+// ---- list ---------------------------------------------------------------------------------------------------------
+
+fn list_entries[&h, &i, &x](heap: &!h Heap, io: &!i Io, entries: &x tar.Entries, format: int, c: Count) -> [heap, io_write] Count {
+    var count = c;
+    var k = 0;
+    while k < tar.count(entries) && !count.broken {
+        var mode = tar.mode(entries, k);
+        if format == 3 {
+            mode = 0 - 1;
+        }
+        let wrote = put_entry(heap, io, tar.name(entries, k), tar.kind_name(tar.kind(entries, k)), tar.size(entries, k), mode, tar.unsafe_at(entries, k));
+        count = Count { entries: count.entries + 1, bytes: count.bytes + tar.size(entries, k), emitted: count.emitted, broken: !wrote };
+        k = k + 1;
+    }
+    return count;
+}
+
+// ---- extract ------------------------------------------------------------------------------------------------------
+
+// The destination of entry `name` beneath `into`.
+fn destination[&h, &i, &n](heap: &!h Heap, into: &i [byte], name: &n [byte]) -> [heap] buffer.Buffer {
+    return joined(heap, into, name);
+}
+
+// The end of the shallowest directory in `dir` (a relative path) that does not exist: `len(dir)` when
+// every one does, so a report names the directory to make first.
+fn first_missing[&f, &r, &t](fs: &f Fs(""), root: &r [byte], dir: &t [byte]) -> [fs_read(""), dir_read] int {
+    var i = 0;
+    while i <= len(dir) {
+        if i == len(dir) || int_of(dir[i]) == '/' {
+            if i > 0 && !bytes.equal(dir[0..i], ".") {
+                match place.open_directory(fs, root, dir[0..i], dir[0..i]) {
+                    DirOpened::Ok(opened) => {
+                        dir_close(opened);
+                    }
+                    DirOpened::Failed(reason) => {
+                        if reason == 2 || reason == 20 {
+                            return i;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return len(dir);
+}
+
+// Whether `key` is in `m`; the map comes back.
+fn was_seen[&k](m: map.Map[int], key: &k [byte]) -> [] (map.Map[int], bool) {
+    var found = false;
+    borrow m as &r in {
+        found = map.has(r, key);
+    }
+    return (m, found);
+}
+
+// Check one entry against the filesystem: its parent directory exists, and a file's name is free.
+fn check_entry[&h, &f, &r, &t](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], target: &t [byte], directory: bool, reported: map.Map[int], errs: fail.Errors) -> [heap, fs_read(""), dir_read] (fail.Errors, map.Map[int]) {
+    var e = errs;
+    var seen = reported;
+    if bytes.equal(target, ".") {
+        return (e, seen);
+    }
+    if directory {
+        match place.open_directory(fs, root, target, target) {
+            DirOpened::Ok(opened) => {
+                dir_close(opened);
+            }
+            DirOpened::Failed(reason) => {
+                if reason == 2 || reason == 20 {
+                    let gone = target[0..first_missing(fs, root, target)];
+                    let (after_seen, already) = was_seen(seen, gone);
+                    seen = after_seen;
+                    if !already {
+                        e = refuse(heap, e, "archive.directory-missing", "a directory the archive needs does not exist, and cancho has no mkdir", "create the directory first, then extract again", gone, "", 0);
+                        seen = map.put(heap, seen, gone, 1);
+                    }
+                } else {
+                    e = fail.io_error(heap, e, reason, true, target);
+                }
+            }
+        }
+        return (e, seen);
+    }
+    match place.parent(fs, root, target, target) {
+        DirOpened::Failed(reason) => {
+            if reason == 2 || reason == 20 {
+                let up = place.parent_of(target);
+                let missing = up[0..first_missing(fs, root, up)];
+                let (after_seen, already) = was_seen(seen, missing);
+                seen = after_seen;
+                if !already {
+                    e = refuse(heap, e, "archive.directory-missing", "a directory an entry needs does not exist, and cancho has no mkdir", "create the directory first, then extract again", missing, "", 0);
+                    seen = map.put(heap, seen, missing, 1);
+                }
+            } else {
+                e = fail.io_error(heap, e, reason, true, target);
+            }
+        }
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            borrow dir as &d in {
+                match dir_stat(d, place.leaf(target)) {
+                    DirStat::Ok(kind, size, mtime) => {
+                        e = fail.simple(heap, e, "conflict.exists", "the file exists already; archive never replaces a file", "move it aside with `move`, or extract elsewhere with --into", "path", target);
+                    }
+                    DirStat::Failed(reason) => {
+                        if reason != 2 {
+                            e = fail.io_error(heap, e, reason, true, target);
+                        }
+                    }
+                }
+            }
+            dir_close(dir);
+        }
+    }
+    return (e, seen);
+}
+
+// Extract (or, with --dry-run, plan) the entries of `entries`, whose bodies are in `data`, beneath `into`.
+fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], into: &n [byte], entries: &x tar.Entries, data: &d [byte], dry: bool, errs: fail.Errors, c: Count) -> [heap, io_write, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, Count) {
+    var e = errs;
+    var count = c;
+    // 1. The plan: every entry checked, every problem reported, nothing written.
+    var seen_names = map.empty(heap, 64, 0, 7);
+    var missing = map.empty(heap, 16, 0, 11);
+    var k = 0;
+    var clean = true;
+    while k < tar.count(entries) {
+        let name = tar.name(entries, k);
+        let kind = tar.kind(entries, k);
+        if tar.unsafe_at(entries, k) {
+            e = refuse(heap, e, "archive.unsafe-name", "an entry's name is absolute, has `..` or holds a NUL; nothing was extracted", "the archive is not safe to extract anywhere", name, "", 0);
+            clean = false;
+        } else if kind != tar.kind_file() && kind != tar.kind_directory() {
+            e = refuse(heap, e, "archive.entry-kind", "an entry is not a regular file or a directory; archive extracts nothing else", "list the archive to see its entries", name, "", 0);
+            clean = false;
+        } else {
+            if kind == tar.kind_file() {
+                let (after_names, twice) = was_seen(seen_names, name);
+                seen_names = after_names;
+                if twice {
+                    e = refuse(heap, e, "archive.duplicate-entry", "two entries name the same file", "", name, "", 0);
+                    clean = false;
+                } else {
+                    seen_names = map.put(heap, seen_names, name, 1);
+                }
+            }
+            let target = destination(heap, into, name);
+            borrow target as &t in {
+                let (after, reported) = check_entry(heap, fs, root, buffer.bytes(t), kind == tar.kind_directory(), missing, e);
+                e = after;
+                missing = reported;
+            }
+            buffer.drop(heap, target);
+        }
+        k = k + 1;
+    }
+    map.drop(heap, seen_names);
+    map.drop(heap, missing);
+    borrow e as &er in {
+        clean = clean && fail.count(er) == 0;
+        count = sync(heap, io, er, count);
+    }
+    // 2. Only a clean plan is written.
+    k = 0;
+    while clean && k < tar.count(entries) && !count.broken {
+        let name = tar.name(entries, k);
+        let target = destination(heap, into, name);
+        borrow target as &t in {
+            if tar.kind(entries, k) == tar.kind_directory() {
+                if !bytes.equal(buffer.bytes(t), ".") {
+                    let wrote = put_dir(heap, io, buffer.bytes(t));
+                    count = Count { entries: count.entries + 1, bytes: count.bytes, emitted: count.emitted, broken: !wrote };
+                }
+            } else {
+                let at = tar.body(entries, k);
+                let size = tar.size(entries, k);
+                let content = data[at..at + size];
+                if dry {
+                    let digest = atomic.sha256_hex(heap, content);
+                    borrow digest as &hx in {
+                        let wrote = put_file(heap, io, buffer.bytes(t), size, buffer.bytes(hx));
+                        count = Count { entries: count.entries + 1, bytes: count.bytes + size, emitted: count.emitted, broken: !wrote };
+                    }
+                    buffer.drop(heap, digest);
+                } else {
+                    let (after, ok, digest) = put_new(heap, fs, root, buffer.bytes(t), content, e);
+                    e = after;
+                    if ok {
+                        borrow digest as &hx in {
+                            let wrote = put_file(heap, io, buffer.bytes(t), size, buffer.bytes(hx));
+                            count = Count { entries: count.entries + 1, bytes: count.bytes + size, emitted: count.emitted, broken: !wrote };
+                        }
+                    } else {
+                        clean = false;
+                    }
+                    buffer.drop(heap, digest);
+                }
+            }
+        }
+        buffer.drop(heap, target);
+        k = k + 1;
+    }
+    borrow e as &er in {
+        count = sync(heap, io, er, count);
+    }
+    return (e, count);
+}
+
+// ---- create ---------------------------------------------------------------------------------------------------------
+
+// What a create has gathered so far.
+struct Gathered {
+    entries: int,
+    bytes: int,
+    // The size of the archive so far, to stop at --max-bytes before the memory is spent.
+    held: int,
+    broken: bool,
+}
+
+// A directory's entry (its name ends in `/`) or a file's header and body, appended to `archive`.
+fn append_entry[&h, &n, &c](heap: &!h Heap, archive: buffer.Buffer, name: &n [byte], content: &c [byte], directory: bool, mode: int) -> [heap] (buffer.Buffer, int) {
+    var shown = buffer.empty(heap, len(name) + 2);
+    shown = buffer.append(heap, shown, name);
+    if directory {
+        shown = buffer.push(heap, shown, byte_of('/'));
+    }
+    var a = archive;
+    var why = 0;
+    borrow shown as &s in {
+        let (with_header, status) = tar.header(heap, a, buffer.bytes(s), len(content), directory, mode);
+        a = with_header;
+        why = status;
+    }
+    buffer.drop(heap, shown);
+    if why == 0 && !directory {
+        a = tar.body_of(heap, a, content);
+    }
+    return (a, why);
+}
+
+// Add `rel` (a file or a directory beneath the root) and, for a directory, everything beneath it.
+fn gather[&h, &i, &f, &r, &p](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], rel: &p [byte], depth: int, archive: buffer.Buffer, most_bytes: int, most_entries: int, errs: fail.Errors, g: Gathered) -> [heap, io_write, fs_read(""), dir_read, file_read] (buffer.Buffer, fail.Errors, Gathered) {
+    var e = errs;
+    var a = archive;
+    var state = g;
+    if state.entries >= most_entries {
+        e = refuse(heap, e, "limit.too-many-entries", "the tree has more entries than --max-entries", "raise --max-entries, up to 1000000", rel, "max_entries", most_entries);
+        return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+    }
+    if depth > depth_ceiling() {
+        e = refuse(heap, e, "limit.too-many-entries", "the tree is deeper than 64 levels", "", rel, "max_depth", depth_ceiling());
+        return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+    }
+    var kind = 0;
+    var size = 0;
+    var mode = 420;
+    var statted = false;
+    var root_itself = bytes.equal(rel, ".");
+    if root_itself {
+        kind = dirs.kind_directory();
+        statted = true;
+    } else {
+        match place.parent(fs, root, rel, rel) {
+            DirOpened::Failed(reason) => {
+                e = fail.io_error(heap, e, reason, false, rel);
+            }
+            DirOpened::Ok(opened) => {
+                var dir = opened;
+                borrow dir as &d in {
+                    match dir_stat(d, place.leaf(rel)) {
+                        DirStat::Ok(found, held, seconds) => {
+                            kind = found;
+                            size = held;
+                            statted = true;
+                        }
+                        DirStat::Failed(reason) => {
+                            e = fail.io_error(heap, e, reason, false, rel);
+                        }
+                    }
+                    if statted {
+                        match dir_mode(d, place.leaf(rel)) {
+                            Done::Ok(bits) => {
+                                if bits & 0x40 != 0 {
+                                    mode = 493;
+                                }
+                                if kind == dirs.kind_directory() {
+                                    mode = 493;
+                                }
+                            }
+                            Done::Failed(reason) => {
+                            }
+                        }
+                    }
+                }
+                dir_close(dir);
+            }
+        }
+    }
+    if !statted {
+        return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+    }
+    if kind == dirs.kind_file() {
+        if size + state.held + 1024 > most_bytes {
+            e = too_large(heap, e, rel, most_bytes);
+            return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+        }
+        let (read, errno, big) = atomic.read_all(heap, place.open_operand(fs, root, rel, rel), size + 1, buffer.empty(heap, size + 1));
+        if errno != 0 {
+            e = fail.io_error(heap, e, errno, false, rel);
+            buffer.drop(heap, read);
+            return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+        }
+        if big {
+            e = refuse(heap, e, "limit.archive-too-large", "the file grew while it was being read", "run again when nothing is writing to it", rel, "", 0);
+            buffer.drop(heap, read);
+            return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+        }
+        var grown = 0;
+        borrow read as &rd in {
+            let (with_entry, why) = append_entry(heap, a, rel, buffer.bytes(rd), false, mode);
+            a = with_entry;
+            if why != 0 {
+                e = refuse(heap, e, "archive.name-too-long", "the name does not fit a tar header (100 bytes, or 155 and 100 split at a /)", "rename it shorter", rel, "", 0);
+                state = Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true };
+            } else {
+                // A receipt for the entry: its path, size and the hash `move --remove` or a check would want.
+                let digest = atomic.sha256_hex(heap, buffer.bytes(rd));
+                var wrote = false;
+                borrow digest as &hx in {
+                    wrote = put_file(heap, io, rel, size, buffer.bytes(hx));
+                }
+                buffer.drop(heap, digest);
+                state = Gathered { entries: state.entries + 1, bytes: state.bytes + size, held: state.held + 512 + (size + 511) / 512 * 512, broken: state.broken || !wrote };
+            }
+            grown = size;
+        }
+        buffer.drop(heap, read);
+        return (a, e, state);
+    }
+    if kind != dirs.kind_directory() {
+        e = refuse(heap, e, "archive.entry-kind", "a link, device or FIFO is not archived", "name the file it points to instead", rel, "", 0);
+        return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+    }
+    // A directory: its own entry (not the root's), then everything beneath it, sorted.
+    if !root_itself {
+        let (with_entry, why) = append_entry(heap, a, rel, "", true, 493);
+        a = with_entry;
+        if why != 0 {
+            e = refuse(heap, e, "archive.name-too-long", "the name does not fit a tar header (100 bytes, or 155 and 100 split at a /)", "rename it shorter", rel, "", 0);
+            return (a, e, Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true });
+        }
+        let wrote = put_dir(heap, io, rel);
+        state = Gathered { entries: state.entries + 1, bytes: state.bytes, held: state.held + 512, broken: state.broken || !wrote };
+    }
+    match place.open_directory(fs, root, rel, rel) {
+        DirOpened::Failed(reason) => {
+            e = fail.io_error(heap, e, reason, false, rel);
+            state = Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true };
+        }
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            borrow dir as &d in {
+                let names = dirs.list(heap, d, most_entries + 1);
+                borrow names as &nm in {
+                    if dirs.failed(nm) != 0 {
+                        e = fail.io_error(heap, e, dirs.failed(nm), false, rel);
+                        state = Gathered { entries: state.entries, bytes: state.bytes, held: state.held, broken: true };
+                    }
+                    var k = 0;
+                    while k < dirs.count(nm) && !state.broken {
+                        let child = joined(heap, rel, dirs.name(nm, k));
+                        borrow child as &cp in {
+                            let (with_child, after, gathered) = gather(heap, io, fs, root, buffer.bytes(cp), depth + 1, a, most_bytes, most_entries, e, state);
+                            a = with_child;
+                            e = after;
+                            state = gathered;
+                        }
+                        buffer.drop(heap, child);
+                        k = k + 1;
+                    }
+                }
+                dirs.drop(heap, names);
+            }
+            dir_close(dir);
+        }
+    }
+    return (a, e, state);
+}
+
+fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, root: &r [byte], format: &static [byte], dry: bool, most_bytes: int, most_entries: int, errs: fail.Errors, c: Count) -> [heap, args, io_write, fs_read(""), dir_read, dir_write, file_read, file_write] (fail.Errors, Count, buffer.Buffer) {
+    let table = flag_table();
+    var e = errs;
+    var count = c;
+    var digest = buffer.empty(heap, 1);
+    // The archive's own name, checked first: it must be free, so a long walk is not spent on a refusal.
+    let (target, checked) = path.operand(heap, args, root, cli.operand_index(parsed, 0), e);
+    e = checked;
+    var archive = buffer.empty(heap, 4096);
+    var gathered = Gathered { entries: 0, bytes: 0, held: 0, broken: false };
+    var ok = false;
+    borrow target as &tp in {
+        if path.ok(tp) {
+            ok = true;
+            match place.parent(fs, root, path.shown(tp), path.shown(tp)) {
+                DirOpened::Failed(reason) => {
+                    e = fail.io_error(heap, e, reason, true, path.shown(tp));
+                    ok = false;
+                }
+                DirOpened::Ok(opened) => {
+                    var dir = opened;
+                    borrow dir as &d in {
+                        match dir_stat(d, place.leaf(path.shown(tp))) {
+                            DirStat::Ok(kind, size, mtime) => {
+                                e = fail.simple(heap, e, "conflict.exists", "the archive exists already; archive never replaces a file", "move it aside with `move`, or name another archive", "path", path.shown(tp));
+                                ok = false;
+                            }
+                            DirStat::Failed(reason) => {
+                                if reason != 2 {
+                                    e = fail.io_error(heap, e, reason, true, path.shown(tp));
+                                    ok = false;
+                                }
+                            }
+                        }
+                    }
+                    dir_close(dir);
+                }
+            }
+        }
+    }
+    if ok {
+        var k = 1;
+        while k < cli.operand_count(parsed) && !gathered.broken {
+            let (source, after) = path.operand(heap, args, root, cli.operand_index(parsed, k), e);
+            e = after;
+            borrow source as &sp in {
+                if path.ok(sp) {
+                    if bytes.equal(format, "gz") {
+                        // One file, gzipped: no tar around it.
+                        let (read, errno, big) = atomic.read_all(heap, place.open_operand(fs, root, path.shown(sp), path.full(sp)), most_bytes, buffer.empty(heap, 4096));
+                        if errno != 0 {
+                            e = fail.io_error(heap, e, errno, false, path.shown(sp));
+                            gathered = Gathered { entries: 0, bytes: 0, held: 0, broken: true };
+                            buffer.drop(heap, read);
+                        } else if big {
+                            e = too_large(heap, e, path.shown(sp), most_bytes);
+                            gathered = Gathered { entries: 0, bytes: 0, held: 0, broken: true };
+                            buffer.drop(heap, read);
+                        } else {
+                            buffer.drop(heap, archive);
+                            borrow read as &rd in {
+                                archive = flate.gzip(heap, buffer.bytes(rd));
+                                let digest = atomic.sha256_hex(heap, buffer.bytes(rd));
+                                var wrote = false;
+                                borrow digest as &hx in {
+                                    wrote = put_file(heap, io, path.shown(sp), buffer.size(rd), buffer.bytes(hx));
+                                }
+                                buffer.drop(heap, digest);
+                                gathered = Gathered { entries: 1, bytes: buffer.size(rd), held: 0, broken: !wrote };
+                            }
+                            buffer.drop(heap, read);
+                        }
+                    } else {
+                        let (grown, errs2, state) = gather(heap, io, fs, root, path.shown(sp), 1, archive, most_bytes, most_entries, e, gathered);
+                        archive = grown;
+                        e = errs2;
+                        gathered = state;
+                    }
+                }
+            }
+            path.drop(heap, source);
+            k = k + 1;
+        }
+        if bytes.equal(format, "gz") && cli.operand_count(parsed) != 2 {
+            e = flag_problem(heap, e, "args.too-many-operands", "--as gz gzips exactly one file", "archive --op create --as gz ARCHIVE FILE", "PATH");
+        }
+        borrow e as &er in {
+            count = sync(heap, io, er, count);
+            if fail.count(er) > 0 {
+                gathered = Gathered { entries: gathered.entries, bytes: gathered.bytes, held: gathered.held, broken: true };
+            }
+        }
+        if !gathered.broken && !bytes.equal(format, "gz") {
+            archive = tar.finish(heap, archive);
+            if bytes.equal(format, "tgz") {
+                var zipped = buffer.empty(heap, 1);
+                borrow archive as &ar in {
+                    buffer.drop(heap, zipped);
+                    zipped = flate.gzip(heap, buffer.bytes(ar));
+                }
+                buffer.drop(heap, archive);
+                archive = zipped;
+            }
+        }
+        var total = 0;
+        borrow archive as &ar in {
+            total = buffer.size(ar);
+        }
+        if !gathered.broken && total > most_bytes {
+            e = too_large(heap, e, "", most_bytes);
+            gathered = Gathered { entries: gathered.entries, bytes: gathered.bytes, held: gathered.held, broken: true };
+        }
+        if !gathered.broken {
+            borrow target as &tp in {
+                borrow archive as &ar in {
+                    buffer.drop(heap, digest);
+                    digest = atomic.sha256_hex(heap, buffer.bytes(ar));
+                    count = Count { entries: gathered.entries, bytes: gathered.bytes, emitted: count.emitted, broken: count.broken };
+                    if !dry {
+                        let (after, wrote, unused) = put_new(heap, fs, root, path.shown(tp), buffer.bytes(ar), e);
+                        e = after;
+                        buffer.drop(heap, unused);
+                        if !wrote {
+                            count = Count { entries: count.entries, bytes: count.bytes, emitted: count.emitted, broken: count.broken };
+                        }
+                    }
+                }
+            }
+        }
+        borrow e as &er in {
+            count = sync(heap, io, er, count);
+        }
+    }
+    path.drop(heap, target);
+    buffer.drop(heap, archive);
+    return (e, count, digest);
+}
+
+// ---- the command ----------------------------------------------------------------------------------------------------------------
+
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, dir_write, file_read, file_write, io_write, err_write] int {
+    let table = flag_table();
+    var e = errs;
+    let op = cli.text(args, parsed, table, "op");
+    let dry = cli.has(parsed, table, "dry-run");
+    let most_bytes = cli.nat(args, parsed, table, "max-bytes");
+    let most_entries = cli.nat(args, parsed, table, "max-entries");
+    let listing = bytes.equal(op, "list");
+    let extracting = bytes.equal(op, "extract");
+    let creating = bytes.equal(op, "create");
+    if most_bytes < 1 || most_bytes > bytes_ceiling() {
+        e = flag_problem(heap, e, "args.bad-value", "--max-bytes is from 1 to 1073741824", "1073741824 is the most this tool holds", "--max-bytes");
+    }
+    if most_entries < 1 || most_entries > entries_ceiling() {
+        e = flag_problem(heap, e, "args.bad-value", "--max-entries is from 1 to 1000000", "1000000 is the most this tool holds", "--max-entries");
+    }
+    if dry && listing {
+        e = flag_problem(heap, e, "args.conflict", "--dry-run is for extract and create; list changes nothing", "drop --dry-run", "--dry-run");
+    }
+    if cli.has(parsed, table, "into") && !extracting {
+        e = flag_problem(heap, e, "args.conflict", "--into is for --op extract", "drop --into, or use --op extract", "--into");
+    }
+    if cli.has(parsed, table, "as") && !creating {
+        e = flag_problem(heap, e, "args.conflict", "--as is for --op create", "drop --as, or use --op create", "--as");
+    }
+    if cli.operand_count(parsed) == 0 {
+        e = flag_problem(heap, e, "args.missing-operand", "archive takes the ARCHIVE to work on", "archive --op list ARCHIVE", "ARCHIVE");
+    } else if !creating && cli.operand_count(parsed) > 1 {
+        e = flag_problem(heap, e, "args.too-many-operands", "only --op create takes PATHs after the ARCHIVE", "archive --op list|extract ARCHIVE", "PATH");
+    } else if creating && cli.operand_count(parsed) == 1 {
+        e = flag_problem(heap, e, "args.missing-operand", "--op create takes the PATHs to add after the ARCHIVE", "archive --op create ARCHIVE PATH...", "PATH");
+    }
+    let (given, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
+    e = after_root;
+    var root = given;
+    var rooted = 0;
+    borrow root as &rr in {
+        rooted = buffer.size(rr);
+    }
+    if rooted == 0 {
+        root = buffer.push(heap, root, byte_of('.'));
+    }
+    var count = Count { entries: 0, bytes: 0, emitted: 0, broken: false };
+    var format = 0;
+    var archive_bytes = 0 - 1;
+    var archive_hash = buffer.empty(heap, 1);
+    borrow e as &er in {
+        count = sync(heap, io, er, count);
+    }
+    var refused = false;
+    borrow e as &er in {
+        refused = fail.count(er) > 0;
+    }
+    if !refused {
+        borrow root as &rr in {
+            let r = buffer.bytes(rr);
+            if creating {
+                let kind = cli.text(args, parsed, table, "as");
+                if bytes.equal(kind, "tar") {
+                    format = 1;
+                } else if bytes.equal(kind, "tgz") {
+                    format = 2;
+                } else {
+                    format = 3;
+                }
+                let (e2, c2, digest) = create_archive(heap, args, parsed, fs, io, r, kind, dry, most_bytes, most_entries, e, count);
+                e = e2;
+                count = c2;
+                buffer.drop(heap, archive_hash);
+                archive_hash = digest;
+            } else {
+                let (e2, loaded) = load(heap, args, fs, r, cli.operand_index(parsed, 0), most_bytes, e);
+                e = e2;
+                borrow e as &er in {
+                    count = sync(heap, io, er, count);
+                }
+                borrow loaded as &ld in {
+                    format = ld.format;
+                    if ld.format != 0 {
+                        var entries = tar.parse(heap, buffer.bytes(ld.data), most_entries);
+                        if ld.format == 3 {
+                            tar.drop(heap, entries);
+                            entries = tar.single(heap, buffer.bytes(ld.label), buffer.size(ld.data), 0);
+                        }
+                        borrow entries as &en in {
+                            if tar.failure(en) != 0 {
+                                e = tar_error(heap, e, tar.failure(en), tar.failure_at(en), "", most_entries);
+                            }
+                            if listing {
+                                count = list_entries(heap, io, en, ld.format, count);
+                            } else if tar.failure(en) == 0 {
+                                var into: &static [byte] = ".";
+                                var target = buffer.empty(heap, 2);
+                                if cli.has(parsed, table, "into") {
+                                    let (resolved, checked) = path.operand(heap, args, r, cli.value_index(parsed, table, "into"), e);
+                                    e = checked;
+                                    borrow resolved as &rp in {
+                                        if path.ok(rp) {
+                                            target = buffer.append(heap, target, path.shown(rp));
+                                        } else {
+                                            target = buffer.append(heap, target, "?");
+                                        }
+                                    }
+                                    path.drop(heap, resolved);
+                                } else {
+                                    target = buffer.push(heap, target, byte_of('.'));
+                                }
+                                var usable = true;
+                                borrow target as &tb in {
+                                    if bytes.equal(buffer.bytes(tb), "?") {
+                                        usable = false;
+                                    }
+                                    if usable {
+                                        let (e3, c3) = extract_entries(heap, io, fs, r, buffer.bytes(tb), en, buffer.bytes(ld.data), dry, e, count);
+                                        e = e3;
+                                        count = c3;
+                                    }
+                                }
+                                buffer.drop(heap, target);
+                            }
+                        }
+                        tar.drop(heap, entries);
+                    }
+                }
+                drop_loaded(heap, loaded);
+            }
+        }
+    }
+    buffer.drop(heap, root);
+    borrow e as &er in {
+        count = sync(heap, io, er, count);
+    }
+    var status = 0;
+    var broken = count.broken;
+    borrow e as &er in {
+        status = fail.exit_code(er);
+        if !broken {
+            let ok = fail.count(er) == 0;
+            var w = out.end_open(heap, "archive", "archive.v1", ok, ok);
+            w = json.put_key(heap, w, "op");
+            w = json.put_string(heap, w, op);
+            w = json.put_key(heap, w, "format");
+            w = json.put_string(heap, w, format_name(format));
+            w = json.put_key(heap, w, "entries");
+            w = json.put_int(heap, w, count.entries);
+            w = json.put_key(heap, w, "bytes");
+            w = json.put_int(heap, w, count.bytes);
+            w = json.put_key(heap, w, "errors");
+            w = json.put_int(heap, w, fail.count(er));
+            w = json.put_key(heap, w, "dry_run");
+            w = json.put_bool(heap, w, dry);
+            if creating && ok {
+                w = json.put_key(heap, w, "archive_sha256");
+                borrow archive_hash as &ah in {
+                    w = json.put_string(heap, w, buffer.bytes(ah));
+                }
+            }
+            if !out.close_line(heap, io, w) {
+                broken = true;
+            }
+        }
+    }
+    buffer.drop(heap, archive_hash);
+    var success = 0;
+    if dry {
+        success = 9;
+    }
+    if status == 0 {
+        status = success;
+    }
+    fail.drop(heap, e);
+    if !broken && !out.flushed(io) {
+        broken = true;
+    }
+    if broken {
+        out.write_failed(io, "archive");
+        return 1;
+    }
+    return status;
+}
+
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, dir_write, file_read, file_write, io_write, err_write] int {
+    let which = cli.subcommand(args);
+    if which != 0 {
+        return describe.answer(heap, io, which, tool(), built());
+    }
+    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty_in(heap, extra()));
+    var status = 0;
+    borrow parsed as &p in {
+        status = body(heap, args, p, fs, io, e);
+    }
+    cli.drop(heap, parsed);
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    // No foreign code, no network, no clock, no signals, no programs.
+    release(ffi);
+    release(net);
+    release(clock);
+    release(signals);
+    release(exec);
+    var status = 0;
+    borrow mut heap as &!h in {
+        borrow args as &g in {
+            borrow fs as &f in {
+                borrow mut io as &!i in {
+                    status = run(h, g, f, i);
+                }
+            }
+        }
+    }
+    release(heap);
+    release(args);
+    release(fs);
+    release(io);
+    return status;
+}

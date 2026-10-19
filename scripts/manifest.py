@@ -33,6 +33,11 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FORBIDDEN = {"ffi", "net_out", "net_in", "clock"}
+# The one recorded exception (docs/next-tools.md section 3.4, answered 2026-10-07):
+# a tool may hold `clock` if tools.toml names it in `exceptions` with a reason
+# (`run`, for its deadline). Nothing else is excusable, and an exception that is
+# not used is a stale row.
+EXCUSABLE = {"clock"}
 
 
 def compiler():
@@ -127,9 +132,17 @@ def gate(tool, authority, ceilings):
         problems.append("%s: bounded is false" % tool)
     if authority.get("foreign_symbols"):
         problems.append("%s: foreign symbols %s" % (tool, authority["foreign_symbols"]))
+    excepted = ceiling.get("exceptions", {})
+    for name, reason in excepted.items():
+        if name not in EXCUSABLE:
+            problems.append("%s: %s cannot be excused; only %s can" % (tool, name, ", ".join(sorted(EXCUSABLE))))
+        elif not str(reason).strip():
+            problems.append("%s: the exception for %s has no reason" % (tool, name))
+        elif name not in {l["name"] for l in authority["labels"]}:
+            problems.append("%s: excepted %s is not used (a row is exact)" % (tool, name))
     for label in authority["labels"]:
         text = label_text(label)
-        if label["name"] in FORBIDDEN:
+        if label["name"] in FORBIDDEN and label["name"] not in excepted:
             problems.append("%s: %s is forbidden to every tool" % (tool, text))
         if text not in allowed:
             problems.append("%s: %s is not within the ceiling in tools.toml" % (tool, text))
@@ -154,7 +167,7 @@ def main():
         ceilings = tomllib.load(f)
     bins = proj.get("bin", [])
     problems = []
-    if len(bins) > ceilings.get("max_tools", 10):
+    if len(bins) > ceilings.get("max_tools", 12):
         problems.append("%d tools; tools.toml allows %d (D1)" % (len(bins), ceilings["max_tools"]))
     for entry in bins:
         tool = entry["name"]

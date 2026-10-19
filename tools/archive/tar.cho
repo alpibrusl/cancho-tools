@@ -1,0 +1,595 @@
+edition 7;
+
+module archive.tar;
+
+// `archive.tar` -- tar archives (POSIX ustar, with GNU long names and the pax `path` and
+// `size` keys), read from memory and written to a buffer.
+//
+// docs/archive.md section 4.1 is the design. The reader never trusts a field: every offset
+// is checked against the data before it is used, a size that cannot fit is `truncated`, and
+// no input reaches a trap. Names are normalised (`.` and empty components are dropped) and
+// a name that climbs (`..`), is absolute, or holds a NUL is flagged, not repaired.
+//
+// Kinds (what `kind` holds): 1 file, 2 directory, 3 hard link, 4 symbolic link, 5 device,
+// 6 FIFO, 7 sparse file, 8 anything else.
+//
+// Failures of `parse` (`Entries.failure`):
+//   0 none: the archive ended with its end marker
+//   1 the data ends inside a header or body, or before the end marker
+//   2 a header's checksum is not its bytes'
+//   3 a header field is not readable (a size or mode that is not octal)
+//   4 more than `most` entries
+
+import std.buffer;
+import std.bytes;
+import std.vec;
+
+pub fn block() -> [] int {
+    return 512;
+}
+
+pub fn kind_file() -> [] int {
+    return 1;
+}
+
+pub fn kind_directory() -> [] int {
+    return 2;
+}
+
+pub fn kind_name(kind: int) -> [] &static [byte] {
+    if kind == 1 {
+        return "file";
+    }
+    if kind == 2 {
+        return "directory";
+    }
+    if kind == 3 {
+        return "hardlink";
+    }
+    if kind == 4 {
+        return "symlink";
+    }
+    if kind == 5 {
+        return "device";
+    }
+    if kind == 6 {
+        return "fifo";
+    }
+    if kind == 7 {
+        return "sparse";
+    }
+    return "other";
+}
+
+fn kind_of(flag: int) -> [] int {
+    if flag == '0' || flag == 0 {
+        return 1;
+    }
+    if flag == '5' {
+        return 2;
+    }
+    if flag == '1' {
+        return 3;
+    }
+    if flag == '2' {
+        return 4;
+    }
+    if flag == '3' || flag == '4' {
+        return 5;
+    }
+    if flag == '6' {
+        return 6;
+    }
+    if flag == 'S' {
+        return 7;
+    }
+    return 8;
+}
+
+// Whether a header of this kind is followed by `size` bytes of body.
+fn has_body(flag: int) -> [] bool {
+    return !(flag == '1' || flag == '2' || flag == '3' || flag == '4' || flag == '5' || flag == '6');
+}
+
+pub res struct Entries {
+    names: buffer.Buffer,
+    name_at: vec.Vec[int],
+    name_len: vec.Vec[int],
+    kind: vec.Vec[int],
+    size: vec.Vec[int],
+    body: vec.Vec[int],
+    mode: vec.Vec[int],
+    // Whether the name was flagged by `unsafe_name`.
+    unsafe: vec.Vec[int],
+    failure: int,
+    // The offset of the header that failed.
+    failure_at: int,
+}
+
+pub fn count[&e](entries: &e Entries) -> [] int {
+    return vec.size(entries.kind);
+}
+
+pub fn name[&e](entries: &e Entries, i: int) -> [] &e [byte] {
+    let at = vec.get(entries.name_at, i);
+    return buffer.bytes(entries.names)[at..at + vec.get(entries.name_len, i)];
+}
+
+pub fn kind[&e](entries: &e Entries, i: int) -> [] int {
+    return vec.get(entries.kind, i);
+}
+
+pub fn size[&e](entries: &e Entries, i: int) -> [] int {
+    return vec.get(entries.size, i);
+}
+
+pub fn body[&e](entries: &e Entries, i: int) -> [] int {
+    return vec.get(entries.body, i);
+}
+
+pub fn mode[&e](entries: &e Entries, i: int) -> [] int {
+    return vec.get(entries.mode, i);
+}
+
+pub fn unsafe_at[&e](entries: &e Entries, i: int) -> [] bool {
+    return vec.get(entries.unsafe, i) != 0;
+}
+
+pub fn failure[&e](entries: &e Entries) -> [] int {
+    return entries.failure;
+}
+
+pub fn failure_at[&e](entries: &e Entries) -> [] int {
+    return entries.failure_at;
+}
+
+pub fn drop[&h](heap: &!h Heap, entries: Entries) -> [heap] int {
+    let Entries { names, name_at, name_len, kind, size, body, mode, unsafe, failure, failure_at } = entries;
+    buffer.drop(heap, names);
+    vec.drop(heap, name_at);
+    vec.drop(heap, name_len);
+    vec.drop(heap, kind);
+    vec.drop(heap, size);
+    vec.drop(heap, body);
+    vec.drop(heap, mode);
+    vec.drop(heap, unsafe);
+    return failure;
+}
+
+// ---- header fields ---------------------------------------------------------------------
+
+// An octal field: leading spaces, digits, then a NUL or a space. -1 when it is anything else.
+fn octal[&d](data: &d [byte], at: int, width: int) -> [] int {
+    var i = at;
+    let end = at + width;
+    while i < end && int_of(data[i]) == ' ' {
+        i = i + 1;
+    }
+    if i >= end {
+        return 0 - 1;
+    }
+    var value = 0;
+    var digits = 0;
+    while i < end && int_of(data[i]) >= '0' && int_of(data[i]) <= '7' {
+        if digits >= 20 {
+            return 0 - 1;
+        }
+        value = value * 8 + (int_of(data[i]) - '0');
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if digits == 0 {
+        return 0 - 1;
+    }
+    if i < end && int_of(data[i]) != 0 && int_of(data[i]) != ' ' {
+        return 0 - 1;
+    }
+    return value;
+}
+
+// Whether the 512 bytes at `at` are all zero.
+fn is_zero[&d](data: &d [byte], at: int) -> [] bool {
+    var i = 0;
+    while i < 512 {
+        if int_of(data[at + i]) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn checksum_ok[&d](data: &d [byte], at: int) -> [] bool {
+    var sum = 0;
+    var i = 0;
+    while i < 512 {
+        if i >= 148 && i < 156 {
+            sum = sum + 32;
+        } else {
+            sum = sum + int_of(data[at + i]);
+        }
+        i = i + 1;
+    }
+    return sum == octal(data, at + 148, 8);
+}
+
+// Bytes of `data[at..at + width]` up to the first NUL.
+fn cstring[&d](data: &d [byte], at: int, width: int) -> [] &d [byte] {
+    var n = 0;
+    while n < width && int_of(data[at + n]) != 0 {
+        n = n + 1;
+    }
+    return data[at..at + n];
+}
+
+fn round_up(n: int) -> [] int {
+    return (n + 511) / 512 * 512;
+}
+
+// ---- names ---------------------------------------------------------------------------------
+
+// Whether `name` is a name `extract` must refuse: absolute, holding a NUL, or with a `..`
+// component. (`.` and empty components are dropped by `normalised`, not refused.)
+pub fn unsafe_name[&n](name: &n [byte]) -> [] bool {
+    if len(name) > 0 && int_of(name[0]) == '/' {
+        return true;
+    }
+    var i = 0;
+    var start = 0;
+    while i <= len(name) {
+        if i < len(name) && int_of(name[i]) == 0 {
+            return true;
+        }
+        if i == len(name) || int_of(name[i]) == '/' {
+            if i - start == 2 && int_of(name[start]) == '.' && int_of(name[start + 1]) == '.' {
+                return true;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// `name` without `.` and empty components, trailing slashes included: `./a//b/.` is `a/b`.
+// A name of nothing but those is `.`.
+pub fn normalised[&h, &n](heap: &!h Heap, name: &n [byte]) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, len(name) + 1);
+    var start = 0;
+    var i = 0;
+    var any = false;
+    while i <= len(name) {
+        if i == len(name) || int_of(name[i]) == '/' {
+            let part = name[start..i];
+            if len(part) > 0 && !(len(part) == 1 && int_of(part[0]) == '.') {
+                if any {
+                    out = buffer.push(heap, out, byte_of('/'));
+                }
+                out = buffer.append(heap, out, part);
+                any = true;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if !any && len(name) > 0 && int_of(name[0]) != '/' {
+        out = buffer.push(heap, out, byte_of('.'));
+    }
+    return out;
+}
+
+// ---- pax extended headers ----------------------------------------------------------------------
+
+// The value of `key` in the pax records `body[at..at + size]` (`LEN key=value\n`, repeated),
+// as a range of `body`, or (-1, -1).
+fn pax_value[&d](data: &d [byte], at: int, size: int, key: &static [byte]) -> [] (int, int) {
+    var p = at;
+    let end = at + size;
+    while p < end {
+        var length = 0;
+        var q = p;
+        while q < end && int_of(data[q]) >= '0' && int_of(data[q]) <= '9' && length < 100000000 {
+            length = length * 10 + (int_of(data[q]) - '0');
+            q = q + 1;
+        }
+        if q >= end || int_of(data[q]) != ' ' || length < q - p + 2 || p + length > end {
+            return (0 - 1, 0 - 1);
+        }
+        let record = data[q + 1..p + length - 1];
+        let eq = bytes.find(record, "=");
+        if eq >= 0 && bytes.equal(record[0..eq], key) {
+            return (q + 1 + eq + 1, p + length - 1);
+        }
+        p = p + length;
+    }
+    return (0 - 1, 0 - 1);
+}
+
+fn decimal[&d](data: &d [byte], from: int, to: int) -> [] int {
+    if to <= from || to - from > 18 {
+        return 0 - 1;
+    }
+    var value = 0;
+    var i = from;
+    while i < to {
+        if int_of(data[i]) < '0' || int_of(data[i]) > '9' {
+            return 0 - 1;
+        }
+        value = value * 10 + (int_of(data[i]) - '0');
+        i = i + 1;
+    }
+    return value;
+}
+
+// ---- the reader ------------------------------------------------------------------------------------
+
+fn fail(e: Entries, why: int, at: int) -> [] Entries {
+    let Entries { names, name_at, name_len, kind, size, body, mode, unsafe, failure, failure_at } = e;
+    return Entries { names: names, name_at: name_at, name_len: name_len, kind: kind, size: size, body: body, mode: mode, unsafe: unsafe, failure: why, failure_at: at };
+}
+
+// `e` with one more entry, whose name is already in `e.names` at `held`.
+fn add[&h, &c](heap: &!h Heap, e: Entries, clean: &c [byte], held: int, class: int, length: int, at: int, permissions: int, flagged: bool) -> [heap] Entries {
+    var flag_value = 0;
+    if flagged {
+        flag_value = 1;
+    }
+    let Entries { names, name_at, name_len, kind, size, body, mode, unsafe, failure, failure_at } = e;
+    return Entries { names: buffer.append(heap, names, clean), name_at: vec.push(heap, name_at, held), name_len: vec.push(heap, name_len, len(clean)), kind: vec.push(heap, kind, class), size: vec.push(heap, size, length), body: vec.push(heap, body, at), mode: vec.push(heap, mode, permissions), unsafe: vec.push(heap, unsafe, flag_value), failure: failure, failure_at: failure_at };
+}
+
+// The entries of a single file named `name` of `length` bytes at `at` in the data: what
+// `archive` lists and extracts for a gzip that is not a tar.
+pub fn single[&h, &n](heap: &!h Heap, name: &n [byte], length: int, at: int) -> [heap] Entries {
+    let e = Entries { names: buffer.empty(heap, len(name) + 1), name_at: vec.empty(heap, 1, 0), name_len: vec.empty(heap, 1, 0), kind: vec.empty(heap, 1, 0), size: vec.empty(heap, 1, 0), body: vec.empty(heap, 1, 0), mode: vec.empty(heap, 1, 0), unsafe: vec.empty(heap, 1, 0), failure: 0, failure_at: 0 };
+    return add(heap, e, name, 0, 1, length, at, 420, unsafe_name(name));
+}
+
+// Read every entry of the tar in `data`, at most `most`. The entries read before a failure are kept.
+pub fn parse[&h, &d](heap: &!h Heap, data: &d [byte], most: int) -> [heap] Entries {
+    var e = Entries { names: buffer.empty(heap, 256), name_at: vec.empty(heap, 16, 0), name_len: vec.empty(heap, 16, 0), kind: vec.empty(heap, 16, 0), size: vec.empty(heap, 16, 0), body: vec.empty(heap, 16, 0), mode: vec.empty(heap, 16, 0), unsafe: vec.empty(heap, 16, 0), failure: 0, failure_at: 0 };
+    var at = 0;
+    var going = true;
+    // A name and a size that a long-name or pax header gives the next entry.
+    var pending = buffer.empty(heap, 1);
+    var has_pending = false;
+    var pending_size = 0 - 1;
+    // How much of `e.names` is used: where the next name starts.
+    var names_size = 0;
+    var seen = 0;
+    while going {
+        if at + 512 > len(data) {
+            e = fail(e, 1, at);
+            going = false;
+        } else if is_zero(data, at) {
+            going = false;
+        } else if !checksum_ok(data, at) {
+            e = fail(e, 2, at);
+            going = false;
+        } else {
+            let flag = int_of(data[at + 156]);
+            var size = octal(data, at + 124, 12);
+            let mode = octal(data, at + 100, 8);
+            if size < 0 || mode < 0 {
+                e = fail(e, 3, at);
+                going = false;
+            } else {
+                let body_at = at + 512;
+                var advance = 512;
+                if has_body(flag) {
+                    advance = 512 + round_up(size);
+                }
+                if size > len(data) || body_at + (advance - 512) > len(data) {
+                    e = fail(e, 1, at);
+                    going = false;
+                } else if flag == 'x' {
+                    let (path_from, path_to) = pax_value(data, body_at, size, "path");
+                    if path_from >= 0 {
+                        buffer.drop(heap, pending);
+                        pending = buffer.append(heap, buffer.empty(heap, path_to - path_from), data[path_from..path_to]);
+                        has_pending = true;
+                    }
+                    let (size_from, size_to) = pax_value(data, body_at, size, "size");
+                    if size_from >= 0 {
+                        pending_size = decimal(data, size_from, size_to);
+                    }
+                    at = at + advance;
+                } else if flag == 'L' {
+                    buffer.drop(heap, pending);
+                    pending = buffer.append(heap, buffer.empty(heap, size), cstring(data, body_at, size));
+                    has_pending = true;
+                    at = at + advance;
+                } else if flag == 'g' || flag == 'K' {
+                    at = at + advance;
+                } else {
+                    if pending_size >= 0 && has_body(flag) {
+                        // A pax `size` overrides the field, which is too small for it.
+                        size = pending_size;
+                        advance = 512 + round_up(size);
+                    }
+                    pending_size = 0 - 1;
+                    if body_at + (advance - 512) > len(data) {
+                        e = fail(e, 1, at);
+                        going = false;
+                    } else if seen >= most {
+                        e = fail(e, 4, at);
+                        going = false;
+                    } else {
+                        // The name: a long name or a pax path, else the prefix and the name.
+                        var raw = buffer.empty(heap, 256);
+                        if has_pending {
+                            borrow pending as &p in {
+                                raw = buffer.append(heap, raw, buffer.bytes(p));
+                            }
+                        } else {
+                            let has_prefix = bytes.equal(data[at + 257..at + 262], "ustar") && int_of(data[at + 345]) != 0;
+                            if has_prefix {
+                                raw = buffer.append(heap, raw, cstring(data, at + 345, 155));
+                                raw = buffer.push(heap, raw, byte_of('/'));
+                            }
+                            raw = buffer.append(heap, raw, cstring(data, at, 100));
+                        }
+                        buffer.drop(heap, pending);
+                        pending = buffer.empty(heap, 1);
+                        has_pending = false;
+                        var flagged = false;
+                        borrow raw as &r in {
+                            flagged = unsafe_name(buffer.bytes(r));
+                            let clean = normalised(heap, buffer.bytes(r));
+                            borrow clean as &c in {
+                                let held = names_size;
+                                names_size = names_size + buffer.size(c);
+                                e = add(heap, e, buffer.bytes(c), held, kind_of(flag), size, body_at, mode, flagged);
+                            }
+                            buffer.drop(heap, clean);
+                        }
+                        buffer.drop(heap, raw);
+                        seen = seen + 1;
+                        at = at + advance;
+                    }
+                }
+            }
+        }
+    }
+    buffer.drop(heap, pending);
+    return e;
+}
+
+// Whether `data` starts like a tar: a header whose checksum is its bytes', or two zero blocks.
+pub fn looks_like_tar[&d](data: &d [byte]) -> [] bool {
+    if len(data) < 512 {
+        return false;
+    }
+    if is_zero(data, 0) {
+        return len(data) >= 1024 && is_zero(data, 512);
+    }
+    return checksum_ok(data, 0);
+}
+
+// ---- the writer -------------------------------------------------------------------------------------------
+
+fn put_octal[&h](heap: &!h Heap, b: buffer.Buffer, value: int, digits: int) -> [heap] buffer.Buffer {
+    var o = b;
+    var shift = (digits - 1) * 3;
+    while shift >= 0 {
+        o = buffer.push(heap, o, byte_of('0' + (value >> shift & 7)));
+        shift = shift - 3;
+    }
+    return o;
+}
+
+fn pad_to[&h](heap: &!h Heap, b: buffer.Buffer, width: int, used: int) -> [heap] buffer.Buffer {
+    var o = b;
+    var i = used;
+    while i < width {
+        o = buffer.push(heap, o, byte_of(0));
+        i = i + 1;
+    }
+    return o;
+}
+
+// Where to split `name` into a prefix (at most 155) and a name (at most 100): the offset of
+// the `/` between them, or -1 when `name` fits in 100 bytes, or -2 when it cannot be split.
+pub fn split_point[&n](name: &n [byte]) -> [] int {
+    if len(name) <= 100 {
+        return 0 - 1;
+    }
+    var i = len(name) - 1;
+    while i > 0 {
+        if int_of(name[i]) == '/' && i <= 155 && len(name) - i - 1 <= 100 && len(name) - i - 1 > 0 {
+            return i;
+        }
+        i = i - 1;
+    }
+    return 0 - 2;
+}
+
+// Append the header of one entry: a file (`directory` false) of `size` bytes, or a directory.
+// `mode` is the permission bits. The owner and group are 0 and the time is 0, so the bytes are a
+// function of the arguments. Answers the buffer and 0, or 1 when the name cannot be written.
+pub fn header[&h, &n](heap: &!h Heap, out: buffer.Buffer, name: &n [byte], size: int, directory: bool, mode: int) -> [heap] (buffer.Buffer, int) {
+    let cut = split_point(name);
+    if cut == 0 - 2 || len(name) > 255 {
+        return (out, 1);
+    }
+    var shown = name;
+    var prefix = name[0..0];
+    if cut >= 0 {
+        prefix = name[0..cut];
+        shown = name[cut + 1..len(name)];
+    }
+    var h = buffer.empty(heap, 512);
+    h = buffer.append(heap, h, shown);
+    h = pad_to(heap, h, 100, len(shown));
+    h = put_octal(heap, h, mode, 7);
+    h = buffer.push(heap, h, byte_of(0));
+    h = put_octal(heap, h, 0, 7);
+    h = buffer.push(heap, h, byte_of(0));
+    h = put_octal(heap, h, 0, 7);
+    h = buffer.push(heap, h, byte_of(0));
+    var length = size;
+    if directory {
+        length = 0;
+    }
+    h = put_octal(heap, h, length, 11);
+    h = buffer.push(heap, h, byte_of(0));
+    h = put_octal(heap, h, 0, 11);
+    h = buffer.push(heap, h, byte_of(0));
+    // The checksum, as eight spaces for now.
+    h = buffer.append(heap, h, "        ");
+    if directory {
+        h = buffer.push(heap, h, byte_of('5'));
+    } else {
+        h = buffer.push(heap, h, byte_of('0'));
+    }
+    h = pad_to(heap, h, 257, 157);
+    // The link name is 100 bytes of nothing; the magic and version come after it.
+    h = buffer.append(heap, h, "ustar");
+    h = buffer.push(heap, h, byte_of(0));
+    h = buffer.append(heap, h, "00");
+    h = pad_to(heap, h, 345, 265);
+    h = buffer.append(heap, h, prefix);
+    h = pad_to(heap, h, 512, 345 + len(prefix));
+    // Sum it with the checksum field as spaces, and write it over them: six digits, a NUL, a space.
+    var sum = 0;
+    borrow h as &r in {
+        let all = buffer.bytes(r);
+        var i = 0;
+        while i < 512 {
+            sum = sum + int_of(all[i]);
+            i = i + 1;
+        }
+    }
+    var result = out;
+    var fixed = buffer.empty(heap, 512);
+    borrow h as &r in {
+        let all = buffer.bytes(r);
+        fixed = buffer.append(heap, fixed, all[0..148]);
+        fixed = put_octal(heap, fixed, sum, 6);
+        fixed = buffer.push(heap, fixed, byte_of(0));
+        fixed = buffer.push(heap, fixed, byte_of(' '));
+        fixed = buffer.append(heap, fixed, all[156..512]);
+    }
+    buffer.drop(heap, h);
+    borrow fixed as &f in {
+        result = buffer.append(heap, result, buffer.bytes(f));
+    }
+    buffer.drop(heap, fixed);
+    return (result, 0);
+}
+
+// The bytes of a file's body and the zeros that round it up to a block.
+pub fn body_of[&h, &d](heap: &!h Heap, out: buffer.Buffer, data: &d [byte]) -> [heap] buffer.Buffer {
+    var o = buffer.append(heap, out, data);
+    return pad_to(heap, o, round_up(len(data)), len(data));
+}
+
+// The end marker: two zero blocks.
+pub fn finish[&h](heap: &!h Heap, out: buffer.Buffer) -> [heap] buffer.Buffer {
+    var o = out;
+    var used = 0;
+    borrow o as &r in {
+        used = buffer.size(r);
+    }
+    return pad_to(heap, o, used + 1024, used);
+}

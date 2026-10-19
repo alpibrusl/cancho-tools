@@ -1,7 +1,8 @@
-# The next tools: `run` (design), and where `move` and `table` went
+# The next tools: `run` (built), and where `move` and `table` went
 
-> **Status, 2026-10-07: `move` is built and merged; `table` is built in its own repository;
-> `run` is designed, its two compiler prerequisites are merged, and it is not built.**
+> **Status, 2026-10-19: `move` is built and merged; `table` is built in its own repository; `run` is
+> built (§3.7) on the maintainer's request of 2026-10-19, which lifts the hold of 2026-10-07 on it; `archive`
+> has its own document, `docs/archive.md`.**
 > The live part of this document is §3. Sections 4 and 5 are kept, with their measured history and
 > with the status statements brought up to date (each says which PR is the evidence); the
 > section numbers are unchanged because source comments and tests cite them (`tools/move/move.cho`,
@@ -19,7 +20,7 @@ three:
 | D15 says | this design | resolution |
 |---|---|---|
 | **"No tool deletes."** A delete is lex-os's `irreversible-consequential` class, which in a no-human system "must be absent from the grant entirely". | `move --remove` and `--purge` | **`--purge` is dropped.** `--remove` is a rename to a tombstone: the content is kept and it is undone by renaming back, so it is reversible and not the class D15 keeps out. Tombstones accumulate; clearing them is a person's job. **Merged:** the amendment is in cancho `docs/agent-toolbox.md` (cancho#298, "D15: a tombstone is a rename, not a delete"), and `move --remove` is cancho-tools#25. |
-| "**No process spawning** ... the language has no `exec` builtin, so `find -exec` and `xargs` are not a thing the toolbox can be tempted into." | `run` | **The premise has changed, the principle has not been revisited.** The language has `Exec` since cancho slice 1 (cancho#274). `run` is allowed to exist only as a tool that **declares** `irreversible-consequential` honestly, so a grant that must not hold it (a no-human supervisor) refuses it by its report, as D15 intends for that class. It is an opt-in tool, not part of the default set an agent is handed (§3). **Not yet amended in cancho:** D15's text still says the language has no `exec`; the amendment goes in with the PR that builds `run` (§6). |
+| "**No process spawning** ... the language has no `exec` builtin, so `find -exec` and `xargs` are not a thing the toolbox can be tempted into." | `run` | **The premise has changed, the principle has not been revisited.** The language has `Exec` since cancho slice 1 (cancho#274). `run` is allowed to exist only as a tool that **declares** `irreversible-consequential` honestly, so a grant that must not hold it (a no-human supervisor) refuses it by its report, as D15 intends for that class. It is an opt-in tool, not part of the default set an agent is handed (§3). **Amended in cancho** with the PR that builds `run` (`docs/agent-toolbox.md`, D15, "Amended: `run` is the one tool that spawns"). |
 | `cut`/`sort`/`uniq` "**not worth it** ... agents transform text in their own language. `tally` is the one aggregate with a real gain." | `table` | **A reversal, and the weakest of the three, made anyway.** The condition stated in the draft was "built only if an independent asker appears". `table` was built in its own repository without that condition having been recorded as met; the maintainer should say whether D15's verdict is amended (§5, §8). Nothing in this repository changes either way. |
 | `diff` deferred; regex `seek` declined (L8, "`std` — large"). | neither is proposed | unchanged. |
 
@@ -32,7 +33,7 @@ written against). What the eight tools do not cover:
 
 | command (runs) | what it was for | the gap | now |
 |---|---|---|---|
-| `python3` 2, `perl` 2, `git` 6 | running something | **running a program** | `run`: designed, not built (§3) |
+| `python3` 2, `perl` 2, `git` 6 | running something | **running a program** | `run`: built (§3.7) |
 | `mv` 4 | renaming | **moving or deleting a file** | `move`: built (§4) |
 | `cut` 8, `awk` 9, `tr` 5 | picking fields, summing | **a table of records** | `table`: built, own repository (§5) |
 | `readlink` 2 | what a link points at | `list` could say (a flag, not a tool) | unchanged |
@@ -224,6 +225,29 @@ under the cap and a deadline each end the child and leave no zombie; and `--dry-
 * **Question 1 and the status of `run`: held.** `run` is **not** to be built yet. It waits for a second
   asker (question 1); until then it stays a design. Questions 4 to 8 are not decided and are asked
   again when `run` is taken up.
+* **Superseded, 2026-10-19:** the maintainer asked for `run` to be built. The second asker (question 1) is still not
+  counted: the request is the evidence, as for `archive` (`docs/archive.md` section 1). Questions 4 to 8 are answered
+  by the build, below the list and in §3.7, for confirmation.
+
+**Decided with the build (2026-10-19), for the maintainer to confirm or reverse.** The build had to pick, and picked
+the smallest of each:
+
+4. **`--stdin-file`: not offered.** Only `--stdin` (the MCP route gives `stdin` as a string), bounded by `--max-stdin`
+   (default 1 MiB, ceiling 64 MiB). A path would be a second way to read a file, with `toolbox.place` and a second
+   rule set, for no asker.
+5. **The cap is per stream**, as `capture_both` bounds it (`--max-output`, default 1 MiB, ceiling 64 MiB). A stream
+   holding exactly the cap is reported `truncated` when the other overran, because the primitive does not say which
+   (§2, measured there): the field means "at the cap" where the other stream overran, and this is the place that says so.
+6. **Orphans are accepted and documented.** Measured, 2026-10-19: `kill -9` of `run` leaves the program it started running,
+   reparented to init. The deadline and the reap cover every path of a live `run` and none of a dead one. A supervisor
+   that needs more kills the process group; this tool does not make one (no `setsid` in the language).
+7. **The ceiling is twelve** (cancho `docs/agent-toolbox.md`, D1 as amended); `run` is the eleventh counting `archive`,
+   `table` outside the count.
+8. **The programs directory is a literal baked at build**, by `scripts/run_build.py`, as the MCP server's is. It is the
+   cheapest honest answer: the row says `exec("<dir>")`, and a model cannot name a directory because nothing it sends
+   reaches the source. cancho's `exec_spawn_under` (cancho#546, merged 2026-10-19) takes a *run-time* directory
+   (`Dir`) and would remove the rebuild, at the price of a row that says `exec_under` and does not name it. Not taken:
+   the point of this tool's row is that a supervisor can read where it may run from the binary alone.
 
 ### 3.5 What it does to the benchmark
 
@@ -243,6 +267,40 @@ under the cap and a deadline each end the child and leave no zombie; and `--dry-
 it out of the build and out of the server's list; `introspect` says why, and the authority row
 (`exec("<dir>")`) is what a supervisor reads. The default set (nine tools here, `table` beside them)
 holds no `exec`.
+
+### 3.7 What was built, and what was measured
+
+`tools/run/run.cho`, `schemas/run.v1.json`, `tests/conformance/test_run.py` (22 tests), `scripts/run_build.py`
+(the baked build) and `scripts/run_mutants.py` (15 mutants). The pinned compiler (cancho `62c2be5`) was enough:
+`exec_spawn_in` and `capture_both` are in it, so nothing here waited on cancho.
+
+* **Authority, derived** (`cancho authority`): `args`, `child_signal`, `clock`, `err_write`, `exec("<dir>")`, `fs_read("")`,
+  `heap`, `io_read`, `io_write`, `pipe_read`, `pipe_write`, `poll`; `bounded: true`; no `net`, no `ffi`, no write label.
+  `tools.toml` `[run]` holds exactly that, with `clock` named as the one excused label and its reason, and
+  `scripts/manifest.py` fails an excuse that is not used or a second label excused (the draft's `dir_read` is not
+  there: the working directory is opened by name and handed to the spawn, nothing is listed).
+* **Gates (test_run.py):** the argument list arrives byte for byte (a `;`, a `$(id)`, a backtick, a `*`, an empty
+  argument, a `--`, a tab, a quote, UTF-8: 13 hostile arguments, each echoed back inside `[..]`); the environment is exactly
+  `PATH=<dir>` (`env` run through `run` prints that and nothing; `HOME`, `LANG` and a caller's `SECRET` and `LD_PRELOAD`
+  do not arrive); the child's `pwd` is `--root`; PROGRAM is a name (`''`, `.`, `..`, `../x`, `/bin/true`, `sub/x`, `./x`,
+  `x/` and the programs directory's own absolute path are each `run.program-name`); a name the directory does not hold,
+  including `true` which the caller has on its own `PATH`, is `run.program-not-found`; a program that is not executable is
+  `run.spawn-failed` with the errno; a deadline of 400 ms ends a `sleep 60` in under 5 s and **leaves no process** (the
+  pid the program wrote is gone and not a zombie); a cap of 1,000 bytes keeps exactly 1,000 and marks the stream; output of
+  exactly the cap is not an overrun and one byte more is; every answer validates against the schema.
+* **Memory (measured, with `maxrss.c`, the launcher that does not inherit the test runner's peak):** `yes` through a
+  cap of 8 MiB peaks at **34,608 KiB** (about 4 times the cap: two streams, the JSON being built from one, and the
+  buffers' doubling); the test bound is 10 times the cap. The `bounded_memory`
+  guarantee is claimed in that sense: bounded by `--max-output` and `--max-stdin`, not by what the program writes.
+* **Mutants (15 of 15 killed):** a slash allowed in a name; an empty name; `..`; another `PATH`; no `PATH`; the working
+  directory instead of `--root`; no directory handed to the spawn; a late deadline; a 1000-times cap; stdin always given
+  (which, first run, *hung the tests* because a test inherited the terminal's stdin: the test was wrong, not the
+  tool, and now passes `/dev/null`; the mutant is killed by the hang's timeout as well as by an assertion); every failure
+  reported as not found; no truncated marker; no timed-out marker; the exit status lost; an argument dropped.
+* **What it does not claim:** that a program started by it is contained. `introspect` says `irreversible-consequential`
+  and lists only `bounded_memory` among its guarantees, and `concurrency: none`.
+* **MCP:** opt-in. `scripts/mcp.py` leaves `run` out of the committed definitions and the test server; `--with run`
+  lists it. A deployment that wants it builds both with its own directory.
 
 ## 4. `move`: a rename, a tombstone, and nothing across directories
 

@@ -1,0 +1,426 @@
+edition 7;
+
+// `run` -- start one program from a directory the deployer chose, with exact
+// arguments, no shell and a fixed environment, for a bounded time, and answer
+// what it did.
+//
+//     run [--root DIR] [--timeout-ms N] [--max-output N] [--stdin]
+//         [--max-stdin N] [--format json|text] -- PROGRAM [ARG...]
+//
+// docs/next-tools.md section 3 is the design and the maintainer's answers to
+// its questions 2 and 3 (a `clock` for the deadline; an opt-in tool that
+// declares `irreversible-consequential`). This is the one tool that spawns.
+//
+// * PROGRAM is a name, never a path: it is looked up in one directory that is
+//   in this file's source (`programs()` and the `narrow` in `main`, which
+//   `scripts/run_build.py` rewrites together for a deployment). That
+//   directory is the allow-list. A name with a `/`, or empty, `.` or `..`, is
+//   `run.program-name`; one the directory does not hold is
+//   `run.program-not-found`.
+// * The argument list is exactly the operands after PROGRAM. No shell reads
+//   it, so a `;` or `$(...)` is bytes of one argument.
+// * The environment is `PATH=<programs directory>` and nothing else. The
+//   child starts in `--root` (the working directory when it is omitted).
+// * `--timeout-ms` and `--max-output` end the child (`limit.timeout`,
+//   `limit.output-too-large`); the output cap is per stream, as
+//   `std.process.capture_both` bounds it.
+// * It does not sandbox the child: it bounds the invocation, not what the
+//   child then does. See the guarantees below, which are fewer than any
+//   other tool's, on purpose.
+
+import std.buffer;
+import std.bytes;
+import std.io;
+import std.json;
+import std.process;
+import toolbox.atomic;
+import toolbox.built;
+import toolbox.cli;
+import toolbox.describe;
+import toolbox.fail;
+import toolbox.out;
+import toolbox.path;
+import toolbox.text;
+
+// The programs directory. `scripts/run_build.py` replaces this literal and the
+// one in `main` and in every `Exec(...)` below, together, because `narrow`
+// takes a literal (cancho docs/processes.md section 7.1).
+fn programs() -> [] &static [byte] {
+    return "/opt/cancho-tools/programs";
+}
+
+fn extra() -> [] &static [byte] {
+    return "run.program-name|2|never|the program is not one plain name (it is empty, `.`, `..` or has a `/`);run.program-not-found|3|never|the programs directory holds no program of that name;run.spawn-failed|8|never|the operating system could not start the program or its channels;limit.timeout|8|never|the program ran past --timeout-ms and was killed;limit.output-too-large|8|never|the program wrote more than --max-output to one stream and was killed";
+}
+
+fn flag_table() -> [] &static [byte] {
+    return "root||path|root||start the program in this directory (default: the working directory) and refuse a directory outside it;timeout-ms||nat|none|30000|the longest the program may run, in milliseconds, after which it is killed (1 to 600000);max-output||nat|none|1048576|the most bytes kept from each of standard output and standard error, and the program is killed at the first byte past it (ceiling 67108864);stdin||bool|none||give the program this tool's standard input as its standard input (default: nothing);max-stdin||nat|none|1048576|the most standard input accepted with --stdin (ceiling 67108864);format||choice:json/text|none|json|json for a program, text writes the program's standard output to standard output and its standard error to standard error";
+}
+
+fn tool() -> [] describe.Tool {
+    return describe.Tool { name: "run", version: "0.1.0", summary: "Start one program from the deployer's programs directory with exact arguments, no shell, a fixed environment, a deadline and an output cap; answers its exit status and output. Opt-in: it can run whatever the directory holds, and it does not sandbox it.", usage: "run [--root DIR] [--timeout-ms N] [--max-output N] [--stdin] [--max-stdin N] [--format json|text] -- PROGRAM [ARG...]", output: "document", schema: "run.v1", flags: flag_table(), operands: "PROGRAM|name|1|1|a program name in the programs directory, never a path;ARG...|text|0||the program's arguments, passed byte for byte", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.missing-operand;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.permission-denied;limit.input-too-large;run.program-name;run.program-not-found;run.spawn-failed;limit.timeout;limit.output-too-large", extra_rules: extra(), limits: "timeout-ms|30000|600000;max-output|1048576|67108864;max-stdin|1048576|67108864", reversibility: "irreversible-consequential", stdin: "with --stdin", guarantees: "bounded_memory" };
+}
+
+fn built() -> [] describe.Built {
+    return describe.Built { authority: built.authority(), schema: built.schema(), compiler: built.compiler() };
+}
+
+fn timeout_ceiling() -> [] int {
+    return 600000;
+}
+
+fn size_ceiling() -> [] int {
+    return 67108864;
+}
+
+fn flag_problem[&h](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], flags: &static [byte]) -> [heap] fail.Errors {
+    var w = fail.open(heap, rule, message, hint);
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, "flags");
+    w = json.put_string(heap, w, flags);
+    return fail.add(heap, e, w);
+}
+
+// A plain name: not empty, not `.` or `..`, no `/`.
+fn plain_name[&n](name: &n [byte]) -> [] bool {
+    if len(name) == 0 || bytes.equal(name, ".") || bytes.equal(name, "..") {
+        return false;
+    }
+    var i = 0;
+    while i < len(name) {
+        if int_of(name[i]) == '/' {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Start the program and watch it. Answers what it wrote to each stream, how it
+// ended, and whether it was started at all (when it was not, `Ran::Failed`
+// carries the errno and both buffers are empty).
+fn execute[&h, &x, &c, &d, &p, &a, &e, &n](heap: &!h Heap, exec: &x Exec("/opt/cancho-tools/programs"), clock: &c Clock, dir: &d Dir, path: &p [byte], argv: &a [byte], env: &e [byte], input: &n [byte], most: int, timeout: int) -> [heap, exec("/opt/cancho-tools/programs"), clock, poll] (buffer.Buffer, buffer.Buffer, process.Ran, bool) {
+    match process.channels_with_errors() {
+        process.ChannelsWithErrors::Failed(errno) => {
+            return (buffer.empty(heap, 1), buffer.empty(heap, 1), process.Ran::Failed(errno), false);
+        }
+        process.ChannelsWithErrors::Ok(to_child, child_in, from_child, child_out, from_errors, child_errors) => {
+            match exec_spawn_in(exec, dir, path, argv, env, Stdio::Pipe(child_in), Stdio::Pipe(child_out), Stdio::Pipe(child_errors)) {
+                Spawned::Failed(errno) => {
+                    pipe_close(to_child);
+                    pipe_close(from_child);
+                    pipe_close(from_errors);
+                    return (buffer.empty(heap, 1), buffer.empty(heap, 1), process.Ran::Failed(errno), false);
+                }
+                Spawned::Ok(child) => {
+                    let (out, err, ran) = process.capture_both(heap, clock, child, to_child, from_child, from_errors, input, most, most, timeout);
+                    return (out, err, ran, true);
+                }
+            }
+        }
+    }
+}
+
+// The directory the program starts in: `--root`, else the working directory.
+fn start_dir[&f, &r](fs: &f Fs(""), root: &r [byte]) -> [fs_read("")] DirOpened {
+    if len(root) == 0 {
+        return open_dir(fs, ".");
+    }
+    return open_dir(fs, root);
+}
+
+// `{"program":…,"exit":…,"signal":…,"timed_out":…,"truncated":{…},"stdout":…,
+// "stderr":…,"milliseconds":…}`.
+fn data[&h, &p, &o, &r](heap: &!h Heap, program: &p [byte], code: int, signal: int, timed_out: bool, cut_out: bool, cut_err: bool, out: &o [byte], err: &r [byte], millis: int) -> [heap] buffer.Buffer {
+    var w = json.writer(heap, 256 + len(out) + len(err));
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "program");
+    w = text.put(heap, w, program);
+    w = json.put_key(heap, w, "exit");
+    if code < 0 {
+        w = json.put_null(heap, w);
+    } else {
+        w = json.put_int(heap, w, code);
+    }
+    w = json.put_key(heap, w, "signal");
+    if signal < 0 {
+        w = json.put_null(heap, w);
+    } else {
+        w = json.put_int(heap, w, signal);
+    }
+    w = json.put_key(heap, w, "timed_out");
+    w = json.put_bool(heap, w, timed_out);
+    w = json.put_key(heap, w, "truncated");
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "stdout");
+    w = json.put_bool(heap, w, cut_out);
+    w = json.put_key(heap, w, "stderr");
+    w = json.put_bool(heap, w, cut_err);
+    w = json.end_object(heap, w);
+    w = json.put_key(heap, w, "stdout");
+    w = text.put(heap, w, out);
+    w = json.put_key(heap, w, "stderr");
+    w = text.put(heap, w, err);
+    w = json.put_key(heap, w, "milliseconds");
+    w = json.put_int(heap, w, millis);
+    w = json.end_object(heap, w);
+    return json.finish(w);
+}
+
+fn body[&h, &g, &p, &f, &x, &c, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), exec: &x Exec("/opt/cancho-tools/programs"), clock: &c Clock, io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), exec("/opt/cancho-tools/programs"), clock, poll, io_read, io_write, err_write] int {
+    let table = flag_table();
+    var e = errs;
+    let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
+    let timeout = cli.nat(args, parsed, table, "timeout-ms");
+    let most = cli.nat(args, parsed, table, "max-output");
+    let most_in = cli.nat(args, parsed, table, "max-stdin");
+    if timeout < 1 || timeout > timeout_ceiling() {
+        e = flag_problem(heap, e, "args.bad-value", "--timeout-ms is from 1 to 600000", "pass a deadline in that range", "--timeout-ms");
+    }
+    if most < 1 || most > size_ceiling() {
+        e = flag_problem(heap, e, "args.bad-value", "--max-output is from 1 to 67108864", "pass a cap in that range", "--max-output");
+    }
+    if most_in > size_ceiling() {
+        e = flag_problem(heap, e, "args.bad-value", "--max-stdin is above the ceiling", "67108864 is the most this tool holds", "--max-stdin");
+    }
+    let (root, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
+    e = after_root;
+    var name: &static [byte] = "";
+    if cli.operand_count(parsed) == 0 {
+        e = flag_problem(heap, e, "args.missing-operand", "run takes the PROGRAM to start", "run [flags] -- PROGRAM [ARG...]", "PROGRAM");
+    } else {
+        name = cli.operand(args, parsed, 0);
+        if !plain_name(name) {
+            var w = fail.open_in(heap, extra(), "run.program-name", "PROGRAM is a name in the programs directory, not a path", "pass the bare name, e.g. `git`, with the arguments after it");
+            w = fail.no_repair(heap, w);
+            w = fail.detail_open(heap, w);
+            w = json.put_key(heap, w, "program");
+            w = text.put(heap, w, name);
+            e = fail.add(heap, e, w);
+        }
+    }
+
+    var input = buffer.empty(heap, 1);
+    var refused = false;
+    borrow e as &er in {
+        refused = fail.count(er) > 0;
+    }
+    if !refused && cli.has(parsed, table, "stdin") {
+        buffer.drop(heap, input);
+        let (read, more) = atomic.read_stdin(heap, io, most_in, buffer.empty(heap, 4096));
+        input = read;
+        if more {
+            e = fail.simple(heap, e, "limit.input-too-large", "the standard input is larger than --max-stdin", "raise --max-stdin, up to 67108864", "", "");
+            refused = true;
+        }
+    }
+
+    var payload = buffer.empty(heap, 1);
+    var shown = buffer.empty(heap, 1);
+    var out_text = buffer.empty(heap, 1);
+    var err_text = buffer.empty(heap, 1);
+    if !refused {
+        // The program's path, its arguments and the environment.
+        var full = buffer.empty(heap, 64);
+        full = buffer.append(heap, full, programs());
+        full = buffer.push(heap, full, byte_of('/'));
+        full = buffer.append(heap, full, name);
+        var list = process.argv(heap, 128);
+        var k = 1;
+        var bad = false;
+        while k < cli.operand_count(parsed) {
+            let (added, refused_arg) = process.add(heap, list, cli.operand(args, parsed, k));
+            list = added;
+            if refused_arg != 0 {
+                bad = true;
+            }
+            k = k + 1;
+        }
+        var env = process.argv(heap, 64);
+        var assignment = buffer.empty(heap, 64);
+        assignment = buffer.append(heap, assignment, "PATH=");
+        assignment = buffer.append(heap, assignment, programs());
+        borrow assignment as &asg in {
+            let (added, unused) = process.add(heap, env, buffer.bytes(asg));
+            env = added;
+        }
+        buffer.drop(heap, assignment);
+
+        // The directory the program starts in.
+        borrow root as &rr in {
+            match start_dir(fs, buffer.bytes(rr)) {
+                DirOpened::Failed(errno) => {
+                    e = fail.io_error(heap, e, errno, false, cli.text(args, parsed, table, "root"));
+                }
+                DirOpened::Ok(directory) => {
+                    var dir = directory;
+                    let started = clock_ms(clock);
+                    var code = 0 - 1;
+                    var signal = 0 - 1;
+                    var timed_out = false;
+                    var cut_out = false;
+                    var cut_err = false;
+                    var killed = 0;
+                    var failure = 0;
+                    var did_start = false;
+                    borrow dir as &d in {
+                        borrow full as &fp in {
+                            borrow list as &l in {
+                                borrow env as &ev in {
+                                    borrow input as &ip in {
+                                        let (out, err, ran, ok) = execute(heap, exec, clock, d, buffer.bytes(fp), process.list(l), process.list(ev), buffer.bytes(ip), most, timeout);
+                                        did_start = ok;
+                                        buffer.drop(heap, out_text);
+                                        buffer.drop(heap, err_text);
+                                        out_text = out;
+                                        err_text = err;
+                                        match ran {
+                                            process.Ran::Code(n) => {
+                                                code = n;
+                                            }
+                                            process.Ran::Signaled(bit) => {
+                                                signal = bit;
+                                            }
+                                            process.Ran::TimedOut => {
+                                                timed_out = true;
+                                                killed = 1;
+                                            }
+                                            process.Ran::TooMuch => {
+                                                killed = 2;
+                                            }
+                                            process.Ran::Failed(errno) => {
+                                                failure = errno;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    dir_close(dir);
+                    let millis = clock_ms(clock) - started;
+                    borrow out_text as &ot in {
+                        borrow err_text as &et in {
+                            if killed == 2 {
+                                // `capture_both` does not say which stream overran; a
+                                // stream that holds exactly the cap is reported as cut.
+                                cut_out = buffer.size(ot) >= most;
+                                cut_err = buffer.size(et) >= most;
+                            }
+                            buffer.drop(heap, payload);
+                            payload = data(heap, name, code, signal, timed_out, cut_out, cut_err, buffer.bytes(ot), buffer.bytes(et), millis);
+                        }
+                    }
+                    if !did_start || failure != 0 {
+                        buffer.drop(heap, payload);
+                        payload = buffer.empty(heap, 1);
+                        if failure == 2 {
+                            var w = fail.open_in(heap, extra(), "run.program-not-found", "the programs directory holds no program of that name", "the deployer chooses what is in the directory; introspect and the deployment say what it holds");
+                            w = fail.no_repair(heap, w);
+                            w = fail.detail_open(heap, w);
+                            w = json.put_key(heap, w, "program");
+                            w = text.put(heap, w, name);
+                            e = fail.add(heap, e, w);
+                        } else {
+                            var w = fail.open_in(heap, extra(), "run.spawn-failed", "the operating system could not start the program", "");
+                            w = fail.no_repair(heap, w);
+                            w = fail.detail_open(heap, w);
+                            w = json.put_key(heap, w, "program");
+                            w = text.put(heap, w, name);
+                            w = json.put_key(heap, w, "errno");
+                            w = json.put_int(heap, w, failure);
+                            e = fail.add(heap, e, w);
+                        }
+                    } else if killed == 1 {
+                        var w = fail.open_in(heap, extra(), "limit.timeout", "the program ran past --timeout-ms and was killed", "raise --timeout-ms, up to 600000, or give the program less to do");
+                        w = fail.no_repair(heap, w);
+                        w = fail.detail_open(heap, w);
+                        w = json.put_key(heap, w, "timeout_ms");
+                        w = json.put_int(heap, w, timeout);
+                        e = fail.add(heap, e, w);
+                    } else if killed == 2 {
+                        var w = fail.open_in(heap, extra(), "limit.output-too-large", "the program wrote more than --max-output to a stream and was killed", "raise --max-output, up to 67108864, or have the program write less");
+                        w = fail.no_repair(heap, w);
+                        w = fail.detail_open(heap, w);
+                        w = json.put_key(heap, w, "max_output");
+                        w = json.put_int(heap, w, most);
+                        e = fail.add(heap, e, w);
+                    }
+                }
+            }
+        }
+        process.drop(heap, list);
+        process.drop(heap, env);
+        buffer.drop(heap, full);
+    }
+    buffer.drop(heap, root);
+    buffer.drop(heap, input);
+
+    var status = 0;
+    borrow e as &er in {
+        borrow payload as &pl in {
+            borrow out_text as &ot in {
+                if text_mode && fail.count(er) == 0 {
+                    borrow err_text as &et in {
+                        if len(buffer.bytes(et)) > 0 {
+                            io.error_all(io, buffer.bytes(et));
+                        }
+                    }
+                }
+                status = out.respond(heap, io, "run", "run.v1", "0.1.0", buffer.bytes(pl), "", er, text_mode, buffer.bytes(ot), 0);
+            }
+        }
+    }
+    buffer.drop(heap, payload);
+    buffer.drop(heap, shown);
+    buffer.drop(heap, out_text);
+    buffer.drop(heap, err_text);
+    fail.drop(heap, e);
+    return status;
+}
+
+fn run[&h, &g, &f, &x, &c, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), exec: &x Exec("/opt/cancho-tools/programs"), clock: &c Clock, io: &!i Io) -> [heap, args, fs_read(""), exec("/opt/cancho-tools/programs"), clock, poll, io_read, io_write, err_write] int {
+    let which = cli.subcommand(args);
+    if which != 0 {
+        return describe.answer(heap, io, which, tool(), built());
+    }
+    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty_in(heap, extra()));
+    var status = 0;
+    borrow parsed as &p in {
+        status = body(heap, args, p, fs, exec, clock, io, e);
+    }
+    cli.drop(heap, parsed);
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    // No foreign code, no network, no signals. A clock, for the deadline only
+    // (tools.toml, [run]); `Exec`, narrowed to the programs directory.
+    release(ffi);
+    release(net);
+    release(signals);
+    let bin = narrow(exec, "/opt/cancho-tools/programs");
+    var status = 0;
+    borrow mut heap as &!h in {
+        borrow args as &g in {
+            borrow fs as &f in {
+                borrow bin as &x in {
+                    borrow clock as &c in {
+                        borrow mut io as &!i in {
+                            status = run(h, g, f, x, c, i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    release(heap);
+    release(args);
+    release(fs);
+    release(bin);
+    release(clock);
+    release(io);
+    return status;
+}

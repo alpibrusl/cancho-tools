@@ -103,6 +103,14 @@ from a fresh derivation, as `manifest.py --check` does for authority.
 | `kind: choice:a/b` | `{"enum": ["a", "b"]}` |
 | an operand | a string, or an array of strings for `NAME...` |
 | `help`, `default` | `description`, `default` |
+| `reversibility`, `guarantees`, `authority` | `annotations`, below |
+
+**What a host may gate on.** Every entry in `tools/list` carries the MCP `annotations`, derived from the same
+`introspect` and nothing else: `readOnlyHint` is true when the tool is `reversible-cheap` and holds no `file_write`,
+`dir_write` or `exec`; `destructiveHint` is true when it is not `reversible-cheap`; `idempotentHint` is the tool's own
+`idempotent` guarantee; `openWorldHint` is true when it can start a program or open a socket (`exec`, `net_out`,
+`net_in`); `title` is the name. A host that confirms destructive calls and auto-approves read-only ones can do so from
+the list, without parsing a description. `tests/conformance/test_agent_first.py` pins the derivation.
 
 **`introspect` has to say one thing it does not yet.** Whether an operand
 is required is only in the `usage` prose: `jsonq`'s `FILE` and `tally`'s

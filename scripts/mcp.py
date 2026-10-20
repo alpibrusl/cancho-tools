@@ -79,6 +79,26 @@ def schema_of_flag(flag):
     return s
 
 
+# The hints an MCP host can gate on (the 2025-06-18 `ToolAnnotations`), read from the same description as everything
+# else: a tool that holds no write or start effect is read-only; one whose reversibility is not `reversible-cheap` may
+# destroy what was there; idempotence is the tool's own guarantee; and a tool reaches beyond its directory when it can
+# start a program or open a socket.
+WRITES = {"file_write", "dir_write", "exec"}
+OUTSIDE = {"exec", "net_out", "net_in"}
+
+
+def annotations_of(d):
+    effects = set(d["authority"]["effects"])
+    read_only = d["reversibility"] == "reversible-cheap" and not effects & WRITES
+    return {
+        "title": d["tool"],
+        "readOnlyHint": read_only,
+        "destructiveHint": d["reversibility"] != "reversible-cheap",
+        "idempotentHint": bool(d["guarantees"].get("idempotent")),
+        "openWorldHint": bool(effects & OUTSIDE),
+    }
+
+
 def reads_stdin(d):
     """How standard input reaches the tool: `flag` when it has `--stdin`,
     `implicit` when it holds `io_read` and reads it with no operand, or none."""
@@ -128,6 +148,7 @@ def definition(d):
         "description": d["summary"],
         "inputSchema": {"type": "object", "properties": props, "required": required,
                         "additionalProperties": False},
+        "annotations": annotations_of(d),
     }
     if d["output"] == "document":
         entry["outputSchema"] = d["schemas"]["%s.v1" % name]

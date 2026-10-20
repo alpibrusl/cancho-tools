@@ -248,7 +248,7 @@ fn quoted[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] buffer.Buffer {
 }
 
 fn wrong_kind[&h, &p](heap: &!h Heap, e: fail.Errors, pointer: &p [byte], found: &static [byte], wanted: &static [byte]) -> [heap] fail.Errors {
-    var w = fail.open(heap, "query.wrong-kind", "the value at the pointer is not of a kind this query applies to", "");
+    var w = fail.open(heap, "query.wrong-kind", "the value at the pointer is not of a kind this query applies to", "point at a value of the kind detail.wanted names, or use a query that applies to detail.kind");
     w = fail.no_repair(heap, w);
     w = fail.detail_open(heap, w);
     w = json.put_key(heap, w, "pointer");
@@ -373,7 +373,7 @@ fn answer[&h, &g, &p, &s, &n](heap: &!h Heap, args: &g Args, parsed: &p cli.Pars
     if nodes < 0 {
         let offset = json.error_position(nodes);
         let (line, column) = position(src, offset);
-        var w = fail.open(heap, "parse.json", "the input is not one valid JSON document", "");
+        var w = fail.open(heap, "parse.json", "the input is not one valid JSON document", "fix the document at detail.line and detail.column; it must be exactly one JSON value with nothing after it");
         w = fail.no_repair(heap, w);
         w = fail.detail_open(heap, w);
         w = json.put_key(heap, w, "path");

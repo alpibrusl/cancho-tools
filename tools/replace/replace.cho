@@ -187,7 +187,7 @@ fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parse
                         } else if step == 1 && failed_errno == 17 {
                             e = fail.simple(heap, e, "conflict.locked", "the temporary file could not be created; another writer may hold it", "retry later", "path", shown);
                         } else {
-                            var w = fail.open(heap, fail.io_rule(failed_errno, true), "the replacement could not be written; the file is as it was", "");
+                            var w = fail.open(heap, fail.io_rule(failed_errno, true), "the replacement could not be written; the file is as it was", "the file is unchanged, so the same command can be retried once the cause (space, permissions, a read-only filesystem) is fixed");
                             w = fail.no_repair(heap, w);
                             w = fail.detail_open(heap, w);
                             w = json.put_key(heap, w, "path");
@@ -332,7 +332,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     var e = errs;
     let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
     if !cli.has(parsed, table, "old") {
-        e = flag_problem(heap, e, "args.required-flag", "replace needs --old, the text to find", "", "--old");
+        e = flag_problem(heap, e, "args.required-flag", "replace needs --old, the text to find", "pass --old with the exact text to find; it is matched byte for byte, not as a pattern", "--old");
     }
     if !cli.has(parsed, table, "new") {
         e = flag_problem(heap, e, "args.required-flag", "replace needs --new, the text to put in its place", "pass --new '' to delete the text", "--new");

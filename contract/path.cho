@@ -212,11 +212,11 @@ pub fn root[&h, &g](heap: &!h Heap, args: &g Args, given: &static [byte], at: in
         return (buffer.empty(heap, 1), e);
     }
     if len(given) == 0 {
-        e = path_error(heap, e, args, "path.empty", "--root is empty", "", at, "");
+        e = path_error(heap, e, args, "path.empty", "--root is empty", "name a directory, or leave --root out", at, "");
         return (buffer.empty(heap, 1), e);
     }
     if len(given) > longest() {
-        e = path_error(heap, e, args, "path.too-long", "--root is longer than 4096 bytes", "", at, "");
+        e = path_error(heap, e, args, "path.too-long", "--root is longer than 4096 bytes", "name a root of at most 4096 bytes", at, "");
         return (buffer.empty(heap, 1), e);
     }
     if has_dotdot(given) {
@@ -242,11 +242,11 @@ pub fn operand[&h, &g, &r](heap: &!h Heap, args: &g Args, root: &r [byte], at: i
     var e = errs;
     let given = arg(args, at);
     if len(given) == 0 {
-        e = path_error(heap, e, args, "path.empty", "the path is empty", "", at, "");
+        e = path_error(heap, e, args, "path.empty", "the path is empty", "name a path; an empty argument names nothing", at, "");
         return (refused(heap), e);
     }
     if len(given) > longest() {
-        e = path_error(heap, e, args, "path.too-long", "the path is longer than 4096 bytes", "", at, "");
+        e = path_error(heap, e, args, "path.too-long", "the path is longer than 4096 bytes", "use a path of at most 4096 bytes", at, "");
         return (refused(heap), e);
     }
     let absolute = int_of(given[0]) == slash();

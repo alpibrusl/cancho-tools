@@ -194,6 +194,8 @@ build/mcp --root /path/to/workspace
 
 Design and measurements: [docs/mcp.md](docs/mcp.md).
 
+What "designed for agents" means here, what a test checks on every binary, and what is not checked: [docs/agent-first.md](docs/agent-first.md).
+
 ## What it cannot do
 
 * **No delete.** No tool removes a file. `move --remove --if-sha256 HEX` renames it to a tombstone in the same directory, and `move NAME.removed-… NAME` undoes it.

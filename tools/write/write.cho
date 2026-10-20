@@ -330,7 +330,7 @@ fn apply[&h, &g, &p, &f, &s, &c, &a](heap: &!h Heap, args: &g Args, parsed: &p c
                 w = json.put_int(heap, w, failed);
                 e = fail.add(heap, e, w);
             } else {
-                var w = fail.open(heap, fail.io_rule(failed, true), "the replacement could not be written; the file is as it was", "");
+                var w = fail.open(heap, fail.io_rule(failed, true), "the replacement could not be written; the file is as it was", "the file is unchanged, so the same command can be retried once the cause (space, permissions, a read-only filesystem) is fixed");
                 w = fail.no_repair(heap, w);
                 w = fail.detail_open(heap, w);
                 w = json.put_key(heap, w, "path");
@@ -450,7 +450,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     if from_stdin && from_file {
         e = flag_problem(heap, e, "args.conflict", "--stdin and --content-file exclude each other", "give the content one way", "--stdin --content-file");
     } else if !from_stdin && !from_file {
-        e = flag_problem(heap, e, "args.required-flag", "the new content must come from --stdin or --content-file", "", "--stdin | --content-file");
+        e = flag_problem(heap, e, "args.required-flag", "the new content must come from --stdin or --content-file", "send the content on standard input with --stdin, or name a file holding it with --content-file PATH", "--stdin | --content-file");
     }
     let most = cli.nat(args, parsed, table, "max-bytes");
     if most > ceiling() {

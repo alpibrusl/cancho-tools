@@ -323,7 +323,7 @@ fn body[&h, &g, &p, &f, &x, &c, &i](heap: &!h Heap, args: &g Args, parsed: &p cl
                             w = text.put(heap, w, name);
                             e = fail.add(heap, e, w);
                         } else {
-                            var w = fail.open_in(heap, extra(), "run.spawn-failed", "the operating system could not start the program", "");
+                            var w = fail.open_in(heap, extra(), "run.spawn-failed", "the operating system could not start the program", "the program exists but could not be started; detail.errno says why (permissions, a missing interpreter, too many processes), and starting it again is safe only if the program is");
                             w = fail.no_repair(heap, w);
                             w = fail.detail_open(heap, w);
                             w = json.put_key(heap, w, "program");

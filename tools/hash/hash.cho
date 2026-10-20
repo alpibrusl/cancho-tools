@@ -173,7 +173,7 @@ fn one[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Par
                                 wrote = out.close_line(heap, io, w);
                             }
                             if cli.has(parsed, table, "verify") && !bytes.equal(buffer.bytes(x), cli.text(args, parsed, table, "verify")) {
-                                var w = fail.open(heap, "precondition.hash-failed", "the file's digest is not the one --verify named", "");
+                                var w = fail.open(heap, "precondition.hash-failed", "the file's digest is not the one --verify named", "the file is not what the caller expected; re-read it, or fetch it again and compare detail.actual");
                                 w = fail.no_repair(heap, w);
                                 w = fail.detail_open(heap, w);
                                 w = json.put_key(heap, w, "path");
@@ -213,7 +213,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
             digits = 128;
         }
         if !sha.is_hex(cli.text(args, parsed, table, "verify"), digits) {
-            e = flag_problem(heap, e, "args.bad-value", "--verify wants the digest in lowercase hex: 64 digits for sha256, 128 for sha512", "", "--verify");
+            e = flag_problem(heap, e, "args.bad-value", "--verify wants the digest in lowercase hex: 64 digits for sha256, 128 for sha512", "pass the digest as lowercase hex: 64 digits with --algo sha256, 128 with --algo sha512", "--verify");
         }
         if cli.operand_count(parsed) > 1 {
             e = flag_problem(heap, e, "args.too-many-operands", "--verify checks one PATH", "verify one file per call", "PATH");

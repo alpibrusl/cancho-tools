@@ -360,7 +360,7 @@ fn apply[&h, &g, &p, &f, &s, &t, &q, &z](heap: &!h Heap, args: &g Args, parsed: 
         } else if failed == 95 || failed == 45 {
             e = rename_unsupported(heap, e, from_shown, to_shown, failed);
         } else if failed != 0 {
-            var w = fail.open(heap, fail.io_rule(failed, true), "the rename failed; nothing was moved", "");
+            var w = fail.open(heap, fail.io_rule(failed, true), "the rename failed; nothing was moved", "nothing changed, so the same command can be retried once the cause (permissions, a read-only filesystem) is fixed");
             w = fail.no_repair(heap, w);
             w = fail.detail_open(heap, w);
             w = fail.detail_text(heap, w, "path", from_shown);

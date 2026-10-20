@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move"]
+TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move", "archive", "run"]
 REPO = "https://github.com/alpibrusl/cancho-tools"
 
 CSS = """

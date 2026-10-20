@@ -220,6 +220,7 @@ TASKS = [
      ["write", "--root", ".", "--create", "--stdin", "NOTES.md"], b"hello\n"),
     ("replace", "change exact text, here as a dry run", ["replace", "--root", ".", "--old", "a + b", "--new", "a.wrapping_add(b)", "--dry-run", "src/main.rs"], None),
     ("move", "rename in place, never over an existing name", ["move", "--root", ".", "--dry-run", "NOTES.md", "NOTES-2026.md"], None),
+    ("archive", "a tarball, byte for byte the same every time, here as a dry run", ["archive", "--root", ".", "--op", "create", "--dry-run", "project.tgz", "src", "package.json"], None),
 ]
 
 
@@ -270,7 +271,7 @@ def main():
     ap.add_argument("--update-readme", action="store_true")
     ap.add_argument("--check", action="store_true")
     args = ap.parse_args()
-    for name in ("hash", "write", "seek", "list", "peek", "jsonq", "tally", "replace", "move"):
+    for name in ("hash", "write", "seek", "list", "peek", "jsonq", "tally", "replace", "move", "archive"):
         if not (BUILD / name).exists():
             sys.exit(f"demo_race: build/{name} is missing; run `cancho build` first")
     section, outcome = transcript()

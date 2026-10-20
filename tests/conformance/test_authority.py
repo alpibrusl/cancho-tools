@@ -15,7 +15,7 @@ import subprocess
 import sys
 import unittest
 
-from harness import ROOT, TOOLS, introspect
+from harness import ADDED, EVERY, ROOT, TOOLS, introspect
 
 # cancho docs/agent-toolbox.md D13: each label and what the bridge does
 # with it. `refuse` labels must never appear in a tool.
@@ -37,6 +37,14 @@ BRIDGE = {
     "err_write": "off_lattice, reviewed",
     "heap": "off_lattice, reviewed",
     "args": "off_lattice, reviewed",
+    # `run` alone (docs/next-tools.md section 3). D13's table does not yet map these; the rows are this
+    # repository's proposal for the bridge: a program the directory names, the wait on it, and its pipes.
+    "exec": "exec with the programs directory as scope (proposed: a spawn grant for that directory)",
+    "poll": "off_lattice, reviewed: the wait on the child's pipes and exit",
+    "pipe_read": "dropped: the child's channel, spent at spawn",
+    "pipe_write": "dropped: the child's channel, spent at spawn",
+    "child_signal": "off_lattice, reviewed: the kill at the deadline, of the child this tool started",
+    "clock": "off_lattice, reviewed: run's deadline, the one recorded exception (tools.toml)",
 }
 REFUSED = {"ffi", "net_in"}
 
@@ -53,7 +61,7 @@ class Authority(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
 
     def test_bridge_table_is_total_for_every_label_held(self):
-        for tool in TOOLS:
+        for tool in EVERY:
             for label in introspect(tool)["authority"]["labels"]:
                 self.assertNotIn(label["name"], REFUSED, tool)
                 self.assertIn(label["name"], BRIDGE, "%s holds %s, which D13's table does not map" % (tool, label["name"]))
@@ -65,9 +73,25 @@ class Authority(unittest.TestCase):
             self.assertTrue(introspect(tool)["authority"]["bounded"])
 
     def test_no_tool_reads_the_clock_or_the_network(self):
-        for tool in TOOLS:
+        for tool in TOOLS + ["archive"]:
             names = {l["name"] for l in introspect(tool)["authority"]["labels"]}
             self.assertFalse(names & {"clock", "net_out", "net_in", "ffi"}, (tool, names))
+
+    def test_run_alone_starts_programs_and_holds_a_clock_and_nothing_reaches_the_network(self):
+        for tool in EVERY:
+            names = {l["name"] for l in introspect(tool)["authority"]["labels"]}
+            self.assertFalse(names & {"net_out", "net_in", "ffi"}, (tool, names))
+            if tool == "run":
+                self.assertTrue(names >= {"exec", "clock", "poll"}, names)
+            else:
+                self.assertFalse(names & {"exec", "exec_under", "clock", "poll", "child_signal", "pipe_read", "pipe_write"}, (tool, names))
+
+    def test_the_tools_added_since_hold_what_their_design_says(self):
+        archive = {l["name"] for l in introspect("archive")["authority"]["labels"]}
+        write = {l["name"] for l in introspect("write")["authority"]["labels"]}
+        # docs/archive.md section 6: `write`'s row, less the standard input it does not read.
+        self.assertEqual(archive, write - {"io_read"})
+        self.assertEqual(sorted(ADDED), ["archive", "run"])
 
 
 if __name__ == "__main__":

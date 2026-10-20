@@ -1,0 +1,221 @@
+edition 7;
+
+import std.buffer;
+import std.bytes;
+import std.test;
+import archive.flate;
+
+// Pseudo-random bytes from a linear congruential generator: `n` of them, `spread` distinct values.
+fn noise[&h](heap: &!h Heap, n: int, spread: int, seed: int) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, n);
+    var x = seed;
+    var i = 0;
+    while i < n {
+        x = x * 1103515245 + 12345 & 0x7fffffff;
+        b = buffer.push(heap, b, byte_of((x >> 8) % spread));
+        i = i + 1;
+    }
+    return b;
+}
+
+// gunzip(gzip(data)) is data.
+fn round_trips[&h, &d](heap: &!h Heap, input: &d [byte]) -> [heap] bool {
+    let zipped = flate.gzip(heap, input);
+    var same = false;
+    borrow zipped as &z in {
+        let flate.Gunzipped { data, status, name_at, name_len } = flate.gunzip(heap, buffer.bytes(z), 1073741824);
+        borrow data as &o in {
+            same = status == 0 && bytes.equal(buffer.bytes(o), input);
+        }
+        buffer.drop(heap, data);
+    }
+    buffer.drop(heap, zipped);
+    return same;
+}
+
+pub fn test_crc32_of_the_check_string_is_the_published_value[&h](heap: &!h Heap) -> [heap] int {
+    test.assert_eq(flate.crc32(heap, "123456789"), 0xcbf43926);
+    test.assert_eq(flate.crc32(heap, ""), 0);
+    test.assert_eq(flate.crc32(heap, "a"), 0xe8b7be43);
+    return 0;
+}
+
+pub fn test_small_inputs_round_trip[&h](heap: &!h Heap) -> [heap] int {
+    test.assert(round_trips(heap, ""));
+    test.assert(round_trips(heap, "a"));
+    test.assert(round_trips(heap, "ab"));
+    test.assert(round_trips(heap, "abc"));
+    test.assert(round_trips(heap, "abcabcabcabcabcabcabcabcabcabc"));
+    test.assert(round_trips(heap, "the quick brown fox jumps over the lazy dog, the quick brown fox jumps over the lazy dog"));
+    return 0;
+}
+
+pub fn test_repetitive_and_random_inputs_round_trip[&h](heap: &!h Heap) -> [heap] int {
+    // Long runs (matches of 258 with distance 1), a short alphabet (many matches), and
+    // noise (almost none), at sizes either side of the 32 KiB window.
+    var sizes = box_slice(heap, 6, 0);
+    borrow mut sizes as &!w in {
+        contents(w)[0] = 1000;
+        contents(w)[1] = 32767;
+        contents(w)[2] = 32768;
+        contents(w)[3] = 32769;
+        contents(w)[4] = 70000;
+        contents(w)[5] = 200000;
+    }
+    var k = 0;
+    while k < 6 {
+        var n = 0;
+        borrow sizes as &r in {
+            n = contents(r)[k];
+        }
+        var spread = 1;
+        while spread <= 256 {
+            let data = noise(heap, n, spread, 7 + k + spread);
+            borrow data as &d in {
+                test.assert(round_trips(heap, buffer.bytes(d)));
+            }
+            buffer.drop(heap, data);
+            spread = spread * 4;
+        }
+        k = k + 1;
+    }
+    unbox_slice(heap, sizes);
+    return 0;
+}
+
+pub fn test_a_run_compresses_a_lot[&h](heap: &!h Heap) -> [heap] int {
+    let zeros = noise(heap, 1000000, 1, 1);
+    var small = 0;
+    borrow zeros as &z in {
+        let zipped = flate.gzip(heap, buffer.bytes(z));
+        borrow zipped as &g in {
+            small = buffer.size(g);
+        }
+        buffer.drop(heap, zipped);
+    }
+    buffer.drop(heap, zeros);
+    // 1,000,000 zero bytes are 3,876 matches of 258 at 13 bits each (the length-258 code is 8 bits in
+    // the fixed code, the distance 5): about 6.3 KB, where a dynamic code gets under 1 KB.
+    test.assert(small < 6600);
+    return 0;
+}
+
+pub fn test_a_stored_block_is_read[&h](heap: &!h Heap) -> [heap] int {
+    // final stored block, LEN 5, NLEN ~5, "hello"
+    var s = buffer.empty(heap, 16);
+    s = buffer.push(heap, s, byte_of(1));
+    s = buffer.push(heap, s, byte_of(5));
+    s = buffer.push(heap, s, byte_of(0));
+    s = buffer.push(heap, s, byte_of(0xfa));
+    s = buffer.push(heap, s, byte_of(0xff));
+    s = buffer.append(heap, s, "hello");
+    borrow s as &r in {
+        let (out, status, next) = flate.inflate(heap, buffer.bytes(r), 0, buffer.size(r), 100);
+        test.assert_eq(status, 0);
+        test.assert_eq(next, 10);
+        borrow out as &o in {
+            test.assert(bytes.equal(buffer.bytes(o), "hello"));
+        }
+        buffer.drop(heap, out);
+        // The same with room for four bytes only.
+        let (cut, status2, unused) = flate.inflate(heap, buffer.bytes(r), 0, buffer.size(r), 4);
+        test.assert_eq(status2, 3);
+        buffer.drop(heap, cut);
+        // And with the NLEN broken.
+        let (bad, status3, unused2) = flate.inflate(heap, buffer.bytes(r)[0..3], 0, 3, 100);
+        test.assert_eq(status3, 2);
+        buffer.drop(heap, bad);
+    }
+    buffer.drop(heap, s);
+    return 0;
+}
+
+// A gzip of 1000 bytes of noise, to damage.
+fn sample[&h](heap: &!h Heap) -> [heap] buffer.Buffer {
+    let data = noise(heap, 1000, 16, 3);
+    var z = buffer.empty(heap, 1);
+    borrow data as &d in {
+        buffer.drop(heap, z);
+        z = flate.gzip(heap, buffer.bytes(d));
+    }
+    buffer.drop(heap, data);
+    return z;
+}
+
+// The status of gunzipping `zipped`.
+fn status_of[&h, &z](heap: &!h Heap, zipped: &z [byte], limit: int) -> [heap] int {
+    let flate.Gunzipped { data, status, name_at, name_len } = flate.gunzip(heap, zipped, limit);
+    buffer.drop(heap, data);
+    return status;
+}
+
+// `zipped` with byte `at` set to `value`, gunzipped: the status.
+fn status_with[&h, &z](heap: &!h Heap, zipped: &z [byte], at: int, value: int, limit: int) -> [heap] int {
+    var copy = buffer.empty(heap, len(zipped));
+    copy = buffer.append(heap, copy, zipped);
+    var status = 0;
+    borrow copy as &c in {
+        let mutated = box_slice(heap, len(zipped), byte_of(0));
+        borrow mut mutated as &!w in {
+            var i = 0;
+            while i < len(zipped) {
+                contents(w)[i] = buffer.bytes(c)[i];
+                i = i + 1;
+            }
+            if at >= 0 {
+                contents(w)[at] = byte_of(value);
+            }
+        }
+        borrow mutated as &m in {
+            status = status_of(heap, contents(m), limit);
+        }
+        unbox_slice(heap, mutated);
+    }
+    buffer.drop(heap, copy);
+    return status;
+}
+
+pub fn test_damage_is_a_status_never_a_trap[&h](heap: &!h Heap) -> [heap] int {
+    let z = sample(heap);
+    borrow z as &r in {
+        let n = buffer.size(r);
+        let bytes_of = buffer.bytes(r);
+        test.assert_eq(status_with(heap, bytes_of, 0 - 1, 0, 1000000), 0);
+        // not gzip
+        test.assert_eq(status_with(heap, bytes_of, 0, 0x50, 1000000), 10);
+        // method
+        test.assert_eq(status_with(heap, bytes_of, 2, 7, 1000000), 11);
+        // reserved flag
+        test.assert_eq(status_with(heap, bytes_of, 3, 0x20, 1000000), 11);
+        // the CRC and the length in the trailer
+        test.assert_eq(status_with(heap, bytes_of, n - 8, 1 ^ int_of(bytes_of[n - 8]), 1000000), 13);
+        test.assert_eq(status_with(heap, bytes_of, n - 4, 1 ^ int_of(bytes_of[n - 4]), 1000000), 14);
+        // the limit
+        test.assert_eq(status_with(heap, bytes_of, 0 - 1, 0, 999), 3);
+        // too short to be a member
+        test.assert_eq(status_of(heap, bytes_of[0..17], 1000000), 12);
+        // every cut inside is a status
+        var cut = 18;
+        while cut < n {
+            test.assert(status_of(heap, bytes_of[0..cut], 1000000) != 0);
+            cut = cut + 7;
+        }
+        // trailing bytes after the member
+        var longer = buffer.empty(heap, n + 1);
+        longer = buffer.append(heap, longer, bytes_of);
+        longer = buffer.push(heap, longer, byte_of(0));
+        borrow longer as &l in {
+            test.assert_eq(status_of(heap, buffer.bytes(l), 1000000), 15);
+        }
+        buffer.drop(heap, longer);
+        // every single-byte change in the deflate body is a status, whatever it is
+        var at = 10;
+        while at < n - 8 {
+            let s = status_with(heap, bytes_of, at, 0xff ^ int_of(bytes_of[at]), 1000000);
+            test.assert(s == 0 || s == 1 || s == 2 || s == 3 || s == 13 || s == 14 || s == 15 || s == 12);
+            at = at + 1;
+        }
+    }
+    buffer.drop(heap, z);
+    return 0;
+}

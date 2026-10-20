@@ -8,7 +8,7 @@ import std.process;
 import mcp.tools;
 
 // The MCP server (#10, docs/mcp.md): one stdio connection, newline-delimited
-// JSON-RPC 2.0, and the eight tools as MCP tools.
+// JSON-RPC 2.0, and the tools as MCP tools.
 //
 //     mcp --root DIR [--timeout-ms N] [--max-output N]
 //
@@ -824,7 +824,7 @@ fn call[&h, &x, &c, &i, &s, &t](heap: &!h Heap, exec: &x Exec("/opt/cancho-tools
         k = k + 1;
     }
     if tool < 0 {
-        return refuse(heap, io, src, tape, id, 0 - 32602, "unknown tool; tools/list names the eight");
+        return refuse(heap, io, src, tape, id, 0 - 32602, "unknown tool; tools/list names the ones this server has");
     }
     // Type faults first, all of them: the unknown keys and the rest are argv_for's.
     let (fault_message, fault_data, found) = faults(heap, src, tape, tool, json.get(src, tape, params, "arguments"));

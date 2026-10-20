@@ -300,7 +300,9 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
         g = g + 1;
     }
     w = json.put_key(heap, w, "concurrency");
-    if guarantees_has(tool, "atomic") {
+    if bytes.equal(tool.reversibility, "irreversible-consequential") {
+        w = json.put_string(heap, w, "none: it takes no lock and cannot see what the program it starts then does");
+    } else if guarantees_has(tool, "atomic") {
         w = json.put_string(heap, w, "locked: of writers racing with the same precondition, exactly one wins and the others are refused (M7)");
     } else {
         w = json.put_string(heap, w, "read-only: it never writes, so any number may run at once");
@@ -405,7 +407,9 @@ pub fn skill[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer.Buff
         }
         g = g + 1;
     }
-    if guarantees_has(tool, "atomic") {
+    if bytes.equal(tool.reversibility, "irreversible-consequential") {
+        b = md(heap, b, "- **concurrency**: none; it takes no lock and cannot see what the program it starts then does.\n");
+    } else if guarantees_has(tool, "atomic") {
         b = md(heap, b, "- **concurrency**: locked; of writers racing with the same precondition, exactly one wins and the others are refused, so re-read and retry.\n");
     } else {
         b = md(heap, b, "- **concurrency**: read-only; it never writes.\n");

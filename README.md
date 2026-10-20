@@ -4,9 +4,9 @@
 
 [![ci](https://github.com/alpibrusl/cancho-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/alpibrusl/cancho-tools/actions/workflows/ci.yml)
 
-**Nine small tools that AI agents and scripts can rely on.** `seek`, `list`, `peek`, `jsonq`, `tally`, `hash`, `write`, `replace` and `move` do the everyday work of `grep`, `ls`/`find`, `sed -n`, `jq`, `sort | uniq -c`, `sha256sum` and a careful `cp`/`mv`, with explicit semantics, bounded resources, tagged refusals that often carry a repair, and a checkable authority row per binary. Every answer is JSON against a published schema, and every tool describes itself (`introspect`, `skill`); an [MCP server](docs/mcp.md) serves them to an agent runtime from that same description. Written in [cancho](https://github.com/alpibrusl/cancho). The [project page](https://alpibrusl.github.io/cancho-tools/) has one page per tool.
+**Ten small tools that AI agents and scripts can rely on, and one opt-in.** `seek`, `list`, `peek`, `jsonq`, `tally`, `hash`, `write`, `replace`, `move` and `archive` do the everyday work of `grep`, `ls`/`find`, `sed -n`, `jq`, `sort | uniq -c`, `sha256sum`, a careful `cp`/`mv` and `tar`/`gzip`, and `run` starts a program from a directory you chose, with explicit semantics, bounded resources, tagged refusals that often carry a repair, and a checkable authority row per binary. Every answer is JSON against a published schema, and every tool describes itself (`introspect`, `skill`); an [MCP server](docs/mcp.md) serves them to an agent runtime from that same description. Written in [cancho](https://github.com/alpibrusl/cancho). The [project page](https://alpibrusl.github.io/cancho-tools/) has one page per tool.
 
-**Status: early, nine tools built and tested.** Not claimed: that agents do better with these tools than with the incumbents. That needs an agent-in-the-loop evaluation ([cancho#228](https://github.com/alpibrusl/cancho/issues/228)) that has not been run. What is claimed is what the conformance gates check. What is missing is listed under "What it cannot do".
+**Status: early, ten tools and one opt-in built and tested.** Not claimed: that agents do better with these tools than with the incumbents. That needs an agent-in-the-loop evaluation ([cancho#228](https://github.com/alpibrusl/cancho/issues/228)) that has not been run. What is claimed is what the conformance gates check. What is missing is listed under "What it cannot do".
 
 | Tool | Instead of | Does |
 |---|---|---|
@@ -19,6 +19,8 @@
 | `write` | `cp`, `>`, `tee` | replace a file atomically, only if it holds what the caller says |
 | `replace` | `sed -i` | replace exact text an expected number of times, atomically |
 | `move` | `mv` | rename a file or directory in place, never over an existing name |
+| `archive` | `tar`, `gzip`, `gunzip` | list, extract and create tar archives, gzip-compressed or not, checked whole before any file is written ([docs/archive.md](docs/archive.md)) |
+| `run` | `exec`, `timeout` | **opt-in:** start one program from the deployer's directory with exact arguments, a fixed environment, a deadline and an output cap ([docs/next-tools.md](docs/next-tools.md) section 3) |
 
 ## One complete flow: two agents, one file
 
@@ -72,7 +74,7 @@ The full transcript, with every JSON line as printed, is in [docs/reference.md](
 
 ## Quick start
 
-You need `git`, Rust and `clang`. On a 16-core Mac with Rust installed and its dependencies already downloaded, the compiler built in 17 seconds and the nine tools in 7; the clones and a first-time dependency download are extra, so allow a few minutes the first time.
+You need `git`, Rust and `clang`. On a 16-core Mac with Rust installed and its dependencies already downloaded, the compiler built in 17 seconds and the first nine tools in 7; the clones and a first-time dependency download are extra, so allow a few minutes the first time.
 
 ```sh
 git clone https://github.com/alpibrusl/cancho
@@ -166,13 +168,24 @@ $ move --root . --dry-run NOTES.md NOTES-2026.md
 # exit status 9
 ```
 
+**`archive`**: a tarball, byte for byte the same every time, here as a dry run.
+
+```console
+$ archive --root . --op create --dry-run project.tgz src package.json
+{"type":"dir","path":"src"}
+{"type":"file","path":"src/main.rs","bytes":113,"sha256":"98ace4483c48…"}
+{"type":"file","path":"package.json","bytes":78,"sha256":"2c313334b372…"}
+{"type":"end","ok":true,"command":"archive","schema":"archive.v1","complete":true,"op":"create","format":"tgz","entries":3,"bytes":191,"errors":0,"dry_run":true,"archive_sha256":"4ee91f70c62e…"}
+# exit status 9
+```
+
 <!-- demo-tasks:end -->
 
 Flags, more examples, and each tool's rules are in [docs/reference.md](docs/reference.md).
 
 ## As an MCP server
 
-`server/mcp.cho` serves the nine tools over MCP (stdio, protocol `2025-06-18`). `tools/list` is generated from each tool's `introspect`, and a `tools/call` runs the binary and answers with its output byte for byte. It may start the binaries in the one directory it was built with, and nothing else; `--root` is the server's, never the model's.
+`server/mcp.cho` serves the ten default tools over MCP (`run` only if the server is built with `--with run`) (stdio, protocol `2025-06-18`). `tools/list` is generated from each tool's `introspect`, and a `tools/call` runs the binary and answers with its output byte for byte. It may start the binaries in the one directory it was built with, and nothing else; `--root` is the server's, never the model's.
 
 ```sh
 python3 scripts/mcp.py build --bin "$PWD/build" --out build/mcp
@@ -184,10 +197,11 @@ Design and measurements: [docs/mcp.md](docs/mcp.md).
 ## What it cannot do
 
 * **No delete.** No tool removes a file. `move --remove --if-sha256 HEX` renames it to a tombstone in the same directory, and `move NAME.removed-… NAME` undoes it.
-* **No regular expressions, no diff tool, no network fetch.** `seek` is literal text; `jsonq` takes pointers, not `jq` filters.
+* **No regular expressions, no diff tool, no network fetch (and no `curl` or `ssh`: a network tier would be a separate project with its own authority ceiling, [docs/archive.md](docs/archive.md) section 9).** `seek` is literal text; `jsonq` takes pointers, not `jq` filters.
 * **Same-directory renames only.** `move` takes a new name, not a new directory.
 * **`seek` takes named files,** not a directory: `list` then `seek` is the pattern for now.
-* **No process spawning, no network, no clock** in any tool: their authority does not hold them.
+* **No process spawning, no network, no clock** in any tool but one: `run`, which is opt-in, holds `exec` for its programs directory and a `clock` for its deadline, and says it is `irreversible-consequential`. No other tool's authority holds them (`tools.toml`).
+* **`archive` cannot make directories.** cancho has no `mkdir`, so `extract` writes files into directories that exist and names the ones that do not ([docs/archive.md](docs/archive.md) section 2). It holds the archive in memory, up to `--max-bytes`, so its memory is that bound and not a constant.
 * **SHA-256 is cancho's own** until it moves into the standard library ([cancho#219](https://github.com/alpibrusl/cancho/issues/219)).
 
 The list of open work is in [issues](https://github.com/alpibrusl/cancho-tools/issues).

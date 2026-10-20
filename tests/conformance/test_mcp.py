@@ -111,10 +111,49 @@ class Server(unittest.TestCase):
             [r], _ = talk(self.fx.root, [call(name, {})])
             self.assertEqual(r["error"]["code"], -32602, name)
 
+    def test_run_is_not_served_unless_the_server_was_built_with_it(self):
+        [r], _ = talk(self.fx.root, [call("run", {"program": "true"})])
+        self.assertEqual(r["error"]["code"], -32602)
+
+    def test_a_server_built_with_run_lists_it_and_routes_to_it(self):
+        out = pathlib.Path(tempfile.mkdtemp(prefix="mcp-run-")) / "mcp"
+        mcp.build(str(BIN), str(BIN.resolve()), str(out), ["run"])
+        data = b"".join(json.dumps(m).encode() + b"\n" for m in [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            call("run", {"program": "true", "args": ["a", "b"]}, 2),
+        ])
+        p = subprocess.run([str(out), "--root", str(self.fx.root)], input=data, capture_output=True, timeout=120)
+        listed, called = [json.loads(x) for x in p.stdout.split(b"\n") if x]
+        names = {t["name"]: t for t in listed["result"]["tools"]}
+        self.assertIn("run", names)
+        props = names["run"]["inputSchema"]["properties"]
+        self.assertEqual({"program", "args", "timeout-ms", "max-output", "max-stdin", "stdin"}, set(props))
+        self.assertEqual(names["run"]["inputSchema"]["required"], ["program"])
+        # The default build's programs directory does not exist here, so the answer is the tool's own refusal.
+        self.assertEqual(called["result"]["structuredContent"]["error"]["rule"], "run.program-not-found")
+
+    def test_archive_is_served_and_its_answer_is_the_cli_s(self):
+        import io
+        import tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            info = tarfile.TarInfo("a.txt")
+            info.size = 5
+            t.addfile(info, io.BytesIO(b"hello"))
+        (self.fx.root / "served.tar").write_bytes(buf.getvalue())
+        [r], _ = talk(self.fx.root, [call("archive", {"archive": "served.tar", "op": "list"})])
+        text = r["result"]["content"][0]["text"]
+        records = [json.loads(l) for l in text.splitlines()]
+        self.assertEqual([x["path"] for x in records if x.get("type") == "entry"], ["a.txt"])
+        self.assertEqual(records[-1]["format"], "tar")
+        # --root is the server's: the model cannot name another.
+        [r], _ = talk(self.fx.root, [call("archive", {"archive": "../served.tar"})])
+        self.assertIn("path.dotdot", r["result"]["content"][0]["text"])
+
     def test_tools_list_is_what_introspect_says(self):
         [r], _ = talk(self.fx.root, [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}])
         listed = {t["name"]: t for t in r["result"]["tools"]}
-        self.assertEqual(sorted(listed), sorted(b["name"] for b in manifest.project()["bin"]))
+        self.assertEqual(sorted(listed), sorted(b["name"] for b in manifest.project()["bin"] if b["name"] not in mcp.OPT_IN))
         for name, t in listed.items():
             props = t["inputSchema"]["properties"]
             self.assertNotIn("root", props, name)

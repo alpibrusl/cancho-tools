@@ -3,7 +3,7 @@
 
     python3 scripts/mcp.py [--bin DIR]            # write generated/mcp/tools.cho
     python3 scripts/mcp.py --check                # fail if it is not current
-    python3 scripts/mcp.py build --bin DIR --out FILE
+    python3 scripts/mcp.py build --bin DIR --out FILE [--with run]
 
 The tools are built first (`cancho build`); each one's `introspect` is the
 only description read. What it writes is one cancho module, `mcp.tools`: the
@@ -33,6 +33,11 @@ ROOT = manifest.ROOT
 DEFAULT_BIN = "/opt/cancho-tools/bin"
 GENERATED = ROOT / "generated" / "mcp" / "tools.cho"
 SERVER = ROOT / "server" / "mcp.cho"
+
+# Tools a deployment chooses to list: `run` starts programs, the one thing the other tools'
+# authority rows deny (docs/next-tools.md section 3, D15 as amended). The committed definitions and
+# the server the tests build leave it out; `--with run` puts it in.
+OPT_IN = {"run"}
 
 # Flags the server sets or that would change what the answer is: `--root` is
 # the server's (role `root`), and the server always asks for JSON.
@@ -140,8 +145,8 @@ def definition(d):
     }
 
 
-def generated(build_dir, bin_dir):
-    tools = [b["name"] for b in manifest.project()["bin"]]
+def generated(build_dir, bin_dir, with_=()):
+    tools = [b["name"] for b in manifest.project()["bin"] if b["name"] not in OPT_IN or b["name"] in with_]
     entries, tables = zip(*(definition(introspect(t, build_dir)) for t in tools))
     lit = manifest.literal
     out = ["""edition 5;
@@ -188,12 +193,12 @@ def baked(text, bin_dir):
     return text.replace('"%s' % DEFAULT_BIN, '"%s' % bin_dir)
 
 
-def build(build_dir, bin_dir, out):
+def build(build_dir, bin_dir, out, with_=()):
     check_bin(bin_dir)
     with tempfile.TemporaryDirectory() as scratch:
         src = pathlib.Path(scratch)
         tools_ls = src / "tools.cho"
-        tools_ls.write_text(generated(build_dir, bin_dir))
+        tools_ls.write_text(generated(build_dir, bin_dir, with_))
         server_ls = src / "mcp.cho"
         server_ls.write_text(baked(SERVER.read_text(), bin_dir))
         subprocess.run([manifest.compiler(), "build", str(server_ls), str(tools_ls), "--std", "-o", out],
@@ -207,13 +212,15 @@ def main():
     ap.add_argument("--build-dir", default=str(ROOT / "build"))
     ap.add_argument("--out")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument("--with", dest="with_", action="append", default=[], choices=sorted(OPT_IN),
+                    help="list an opt-in tool (repeatable)")
     a = ap.parse_args()
     if a.command == "build":
         if not a.bin or not a.out:
             sys.exit("mcp: build needs --bin and --out")
-        build(a.build_dir, a.bin, a.out)
+        build(a.build_dir, a.bin, a.out, a.with_)
         return
-    text = generated(a.build_dir, a.bin or DEFAULT_BIN)
+    text = generated(a.build_dir, a.bin or DEFAULT_BIN, a.with_)
     if a.check:
         if not GENERATED.exists() or GENERATED.read_text() != text:
             sys.exit("mcp: generated/mcp/tools.cho is not what introspect says; run scripts/mcp.py")

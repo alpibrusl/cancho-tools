@@ -61,6 +61,18 @@ sources = ["contract", "tools/list", "generated/list"]
 std = true
 out = "build/list"
 
+[[bin]]
+name = "run"
+sources = ["contract", "tools/run", "generated/run"]
+std = true
+out = "build/run"
+
+[[bin]]
+name = "archive"
+sources = ["contract", "tools/archive", "generated/archive"]
+std = true
+out = "build/archive"
+
 [[test]]
 name = "sha"
 sources = ["contract", "tests/sha_test.cho"]
@@ -89,4 +101,14 @@ std = true
 [[test]]
 name = "sort"
 sources = ["contract", "tests/sort_test.cho"]
+std = true
+
+[[test]]
+name = "flate"
+sources = ["contract", "tools/archive/flate.cho", "tests/flate_test.cho"]
+std = true
+
+[[test]]
+name = "tar"
+sources = ["contract", "tools/archive/tar.cho", "tests/tar_test.cho"]
 std = true

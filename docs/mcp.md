@@ -12,8 +12,16 @@ An agent runtime adopts tools most easily over MCP (#10). Every tool here
 already describes itself (`introspect`, the schemas), so the server derives
 its tool definitions from that and has no description of its own to drift.
 The server is a cancho program, because what it may do should be what the
-compiler derives, as for each tool: **start the eight binaries, under a
-fixed `--root`, and nothing else.**
+compiler derives, as for each tool: **start the tools' binaries (ten by
+default, `run` only when it was asked for), under a fixed `--root`, and nothing
+else.**
+
+> **Updated 2026-10-19.** This document was written for eight tools and says "eight" in several places; the
+> default set is now ten (`list`, `move` and `archive` joined it), and `run` is an **opt-in** eleventh:
+> `scripts/mcp.py` leaves it out of the committed definitions and out of the server the tests build, and
+> `--with run` lists it. A server that lists `run` can start whatever the `run` binary's programs directory
+> holds, and nothing it sends reaches that directory (it is in `run`'s source, `scripts/run_build.py`). The "eight"
+> below is the set at the time of writing, kept so the text still reads as what was measured then.
 
 ## 1. What a call becomes
 
@@ -26,7 +34,7 @@ tools/call {"name": "seek", "arguments": {"pattern": "TODO", "files": ["src/a.ch
     -> <bin>/seek --root=<ROOT> --max-count=5 -- TODO src/a.cho
 ```
 
-* **The binary is one of eight, by name.** The name is matched against the
+* **The binary is one of the generated table's, by name** (eight when this was written). The name is matched against the
   generated table (§3), and anything else is a JSON-RPC error (`-32602`,
   "unknown tool"), as the spec has it. No path from the model reaches
   `exec_spawn`.

@@ -9,10 +9,13 @@
 # be smaller than the ceiling, never larger.
 #
 # A label with an argument is written as the compiler prints it: fs_read("").
-# No tool may hold ffi, net_out, net_in or clock; `bounded` must be true.
+# No tool may hold ffi, net_out, net_in or clock, except as a row below names it in
+# `exceptions` with a reason (only `clock` can be excused: `run`'s deadline);
+# `bounded` must be true.
 
-# D1: at most ten tools. A new [tool] past this count fails the check.
-max_tools = 10
+# D1 (as amended, cancho docs/agent-toolbox.md "Amended: twelve"): at most twelve
+# tools. A new [tool] past this count fails the check.
+max_tools = 12
 
 [seek]
 allow = ["args", "dir_read", "err_write", "file_read", "fs_read(\"\")", "heap", "io_write"]
@@ -39,4 +42,18 @@ allow = ["args", "dir_read", "err_write", "file_read", "fs_read(\"\")", "heap", 
 allow = ["args", "dir_read", "err_write", "fs_read(\"\")", "heap", "io_write"]
 
 [move]
+allow = ["args", "dir_read", "dir_write", "err_write", "file_read", "file_write", "fs_read(\"\")", "heap", "io_write"]
+
+# The one tool that starts a program (docs/next-tools.md section 3; D15 as
+# amended). `exec(...)` is the programs directory the deployer chose, baked at
+# build by scripts/run_build.py; the committed source says the default.
+# `child_signal`, `pipe_read`, `pipe_write` and `poll` are the child's channels and
+# the wait on it. It declares `irreversible-consequential` and is opt-in.
+[run]
+allow = ["args", "child_signal", "clock", "err_write", "exec(\"/opt/cancho-tools/programs\")", "fs_read(\"\")", "heap", "io_read", "io_write", "pipe_read", "pipe_write", "poll"]
+exceptions = { clock = "the deadline: --timeout-ms kills the child at a time, and a deadline needs a clock (docs/next-tools.md section 3.4, question 2, accepted 2026-10-07)" }
+
+# docs/archive.md section 6: `write`'s row and no more. It reads and writes files beneath a directory
+# it was handed and nothing else.
+[archive]
 allow = ["args", "dir_read", "dir_write", "err_write", "file_read", "file_write", "fs_read(\"\")", "heap", "io_write"]

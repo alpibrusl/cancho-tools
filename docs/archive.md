@@ -252,12 +252,15 @@ not a decision), reusing this package's `contract/` through the published packag
   grant a deployment must give is that row, and `bounded: true` holds only if no `ffi` is reached
   (`docs/net.md`, `docs/foreign-authority.md`). `curl` has the process's whole network authority and the OS firewall is
   the only bound. For an agent runtime, a binary that *cannot* reach any other host, shown by `cancho authority`, is the
-  same kind of fact as "`seek` cannot write". **Not yet literally true, and it matters:** the bound is a *prefix* checked at run time against the destination
-  (`docs/net.md` §4, and its "Correction (#77)": the literal is a bound, not a destination). cancho's own `docs/net-bounds.md`
-  (a design, nothing built, 2026-10-19) records that the host half of a bound is therefore a prefix match (a bound of
-  `ns1.example.com` admits `ns1.example.com.attacker.net`), that one `Net` carries one bound for dialing and for
-  listening, and that an unnarrowed `Net("")` is reported `bounded: true` (§2.4 there, a report fix recommended first).
-  By the same prefix rule, on my reading and **not tested here**, a bound ending in `:443` would also admit `:4430`.
+  same kind of fact as "`seek` cannot write". **Not yet literally true, and it matters:** the bound is checked at run time against the destination
+  (`docs/net.md` §4, and its "Correction (#77)": the literal is a bound, not a destination). Measured against cancho
+  (2026-10-20): the bound splits at its last `:`; the **host is a prefix match** (a bound of `127.0.0.1:443` admits
+  `127.0.0.10`, and `ns1.example.com` admits `ns1.example.com.attacker.net`); the **port is exact** (a `:44` bound traps on
+  443 and a `:443` bound traps on 4430; an earlier version of this paragraph guessed the opposite and was wrong); a bound
+  with no `:` checks no port. One `Net` still carries one bound for dialing and for listening. cancho's `docs/net-bounds.md`
+  has the fix as a design: its steps 1 (an unnarrowed `Net("")` is no longer reported `bounded: true`) and 2 (several
+  bounds from one `narrow`, and a `narrow` that can no longer swap one port for another) are built; step 3 (exact hosts,
+  an edition) is not.
   A `fetch` whose row is to be trusted as an allow-list needs that design built first.
 * **TLS without `Ffi`.** The reason D15 row 9 (`fetch`) said "the dominant case defeats the premise" was that HTTPS
   needed `Ffi` and made the report `bounded: false`. cancho now has `packages/tls` (TLS 1.3 client and server, no C

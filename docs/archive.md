@@ -360,6 +360,45 @@ and on a 400 KB tree (100 KB of noise, 300 KB of repeated text) `archive create`
 makes 101,291. A million zero bytes compress to about 6.3 KB where a dynamic code gets under 1 KB (`tests/flate_test.cho`
 holds the bound).
 
+**Speed, measured again and improved** (`scripts/bench_archive.py`; Linux x86-64, 4 cores, a shared machine, medians of 3; one 64 MiB file of random
+lowercase words from a 20,000-word vocabulary, which gzip compresses to 39.6 MB; GNU tar 1.35, gzip 1.12; wall seconds). The
+first column is `main` before this change, built the same way on the same machine:
+
+| job | `archive` before | `archive` now | incumbent |
+|---|---|---|---|
+| `--op create --as gz` | 4.69 s | **3.14 s** | `gzip -c`: 2.94 s |
+| `--op create --as tgz` | 4.71 s | **3.43 s** | `tar czf`: 2.98 s |
+| `--op list` of a tgz (inflate, CRC, tar walk) | 2.18 s | **1.16 s** | `tar tzf`: 0.86 s |
+| peak resident memory, create / list | 176 MiB / 171 MiB | the same | gzip 21 MiB |
+| size of the gz / tgz written | 55,898,202 / 55,898,261 B | **the same bytes** | gzip: 39,596,303 B (**41 % smaller**) |
+
+The compressed bytes did not change (a test over eight inputs, from empty and one byte to random, runs of zeros, long
+distances and repeats, compares the old and new writers byte for byte, and `gzip -dc` and `tar xzf` read them), so
+nothing that compares an archive to an earlier one is affected. What `callgrind` showed, on a 4 MiB input, and what was done:
+
+* **Inflate: 100 instructions a symbol in a function that only returned the next one.** The decoder looped over a code's bits,
+  passing and returning the four-field `Bits` struct for each, and wrote one byte at a time through `buffer.push`. Now a
+  10-bit lookup table (8 for distances) finds a symbol in one read, the bit buffer lives in four locals inside the loop,
+  and the output is written straight into the buffer's allocation (grown by `reserve` when it is nearly full). A code longer
+  than the table, and the last bytes of the input, take the old careful path, which is where truncation is detected.
+  Inflate of a tgz: 2.18 s to 1.16 s.
+* **Create hashed the archive twice.** `put_new` computed the SHA-256 of what it was about to write (it names the
+  temporary file) after `create` had computed it for the answer: 174,755 block compressions for a 4 MiB file is the file
+  (65,536) plus the archive twice (2 x 54,608). SHA-256 was 44 % of the instructions of `create`. It is hashed once now,
+  and `extract` is unchanged (it still hashes each file once). The SHA-256 itself is already tuned (about 81 instructions
+  a byte) and was not touched.
+* **The writer reversed bit patterns in a loop for every symbol, searched for the length and distance code linearly, and
+  pushed output a byte at a time.** Now the fixed code, the length codes and the distance codes are read from tables built
+  once, a match's whole code (length, extra bits, distance, extra bits) is written as one value, and the buffer is reserved
+  for the worst case (9 bits a byte) up front. The match search skips a candidate that differs at the byte just past the best
+  length so far, which cannot win, and stops when the best is the longest possible; it makes the same choices as before.
+
+**What is still slower, and why it is not fixed here:** `archive` writes 41 % more bytes than gzip on this data (29 % on the
+input of the first table), because it uses the fixed Huffman code and takes the first long match it finds. Dynamic Huffman
+blocks and lazy matching would close most of that and would cost speed; they change every compressed byte, so they are a
+separate change with their own tests. `list` is 35 % slower than `tar tzf`; the remaining cost is the byte loops in the
+CRC and the match copy, which the language has no wide operation for.
+
 **Mutants (G10)**, `scripts/archive_mutants.py`: **29 of 29 killed** on the committed code. The first run killed 20: nine survived, and each
 survivor was a test that could not have failed (the execute bit, the gzip length, a pax size, the end marker, the header
 time, a tar size past the data, a code that is not a code, a stored block past the cap, the bound on the header counts), so a

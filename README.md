@@ -237,7 +237,7 @@ Supporting evidence: these tools are not built to win on speed, and mostly do no
 
 ## Contributing
 
-Every change goes through what CI runs: `cancho fmt --check contract tools tests generated server`, `cancho build`, `cancho test`, `scripts/schemas.py --check`, `scripts/manifest.py --check`, `scripts/demo_race.py --check`, `scripts/package.py --check`, `scripts/mcp.py --check`, the conformance tests. A change that needs a new effect fails until `tools.toml` allows it. After changing a tool, run `python3 scripts/manifest.py` and `cancho build`; after changing what a tool prints, `python3 scripts/demo_race.py --update-readme` rewrites the generated sections of this file. Layout, the gates and how to build more tools on the contract package: [docs/reference.md](docs/reference.md#developing).
+Every change goes through what CI runs: `cancho fmt --check contract tools tests generated server`, `cancho build`, `cancho test`, `scripts/schemas.py --check`, `scripts/manifest.py --check`, `scripts/demo_race.py --check`, `scripts/package.py --check`, `scripts/mcp.py --check`, `scripts/cli_mutants.py --check` (the mutants of the table scans), the conformance tests. A change that needs a new effect fails until `tools.toml` allows it. After changing a tool, run `python3 scripts/manifest.py` and `cancho build`; after changing what a tool prints, `python3 scripts/demo_race.py --update-readme` rewrites the generated sections of this file. Layout, the gates and how to build more tools on the contract package: [docs/reference.md](docs/reference.md#developing).
 
 ## Licence
 

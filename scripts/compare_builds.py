@@ -10,12 +10,14 @@ tool definitions from the first), the conformance corpus of `tests/conformance/t
 shape of success and refusal, on one shared fixture), and, for every flag of every tool read from its
 own `introspect`: the flag alone, with `=value`, mistyped (a letter dropped, a letter added: the
 repairs that name the nearest flag), its short letter alone and doubled, and an unknown long and
-short flag. Exit status 1 and the first differences printed when anything differs.
+short flag. Exit status 1 and the first differences printed when anything differs, except in the authority
+report's list of the functions a program reaches (REACHED below), which is the compiler's and moves with the code.
 """
 
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,19 @@ def call(directory, tool, argv, stdin, cwd):
     return (p.returncode, p.stdout, p.stderr)
 
 
+# `introspect` and `skill` carry the compiler's authority report, whose `pure` list names every function the
+# program reaches and whose counts say how many there are. A build with different functions in it differs
+# there and only there; the labels (the authority itself) are compared as they are.
+REACHED = re.compile(rb'"pure":\[[^\]]*\],"folded_operators":\d+,"folded_calls":\d+,"functions":\d+')
+
+
+def normal(result):
+    status, out, err = result
+    if isinstance(out, bytes):
+        out = REACHED.sub(b'"pure":[...]', out)
+    return (status, out, err)
+
+
 def probes(directory):
     out = []
     for tool in harness.EVERY:
@@ -55,23 +70,30 @@ def probes(directory):
 def main():
     a, b = (str(pathlib.Path(p).resolve()) for p in sys.argv[1:3])
     differences = []
+    reached_only = 0
     count = 0
     with tempfile.TemporaryDirectory() as empty:
         for tool, argv in probes(a):
             count += 1
             x, y = call(a, tool, argv, b"", empty), call(b, tool, argv, b"", empty)
             if x != y:
-                differences.append((tool, argv, x, y))
+                if normal(x) == normal(y):
+                    reached_only += 1
+                else:
+                    differences.append((tool, argv, x, y))
     fx = harness.Fixture()
     try:
         for tool, argv, stdin in test_schema.corpus(fx):
             count += 1
             x, y = call(a, tool, argv, stdin, fx.root), call(b, tool, argv, stdin, fx.root)
             if x != y:
-                differences.append((tool, argv, x, y))
+                if normal(x) == normal(y):
+                    reached_only += 1
+                else:
+                    differences.append((tool, argv, x, y))
     finally:
         fx.cleanup()
-    print("%d invocations, %d differ" % (count, len(differences)))
+    print("%d invocations, %d differ (and %d differ only in the authority report's list of reached functions)" % (count, len(differences), reached_only))
     for tool, argv, x, y in differences[:10]:
         print("  %s %s\n    A: %s\n    B: %s" % (tool, argv, [x[0], x[1][:200], x[2][:200]], [y[0], y[1][:200], y[2][:200]]))
     return 1 if differences else 0

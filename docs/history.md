@@ -115,6 +115,30 @@ The fourth column, in this repository again:
   AVX2/BMI2 assembly; closing it needs vector instructions the language does
   not have.
 
+* **Flag lookups were quadratic in the table.** Found by cancho-table's `table --join b.csv --on id p.csv`
+  (two-row files): 102,434,900 instructions, 94.6% of them in `toolbox.cli.index_of`, called 60 times for a
+  table of about 150 flags. `index_of`, `index_of_short`, `nearest`, the flag loops of `introspect` and `skill`
+  and `rules.find_in` all asked for entry `i` by `bytes.field(table, ';', i + 1)`, which walks the table byte by
+  byte from its start, inside a loop over `i`: a pass over the table for every entry. They now walk the table once,
+  entry to entry (`cli.entry_end` hops from `;` to `;` with `index_of_byte`, which is `memchr`; `cli.field_of`
+  does the same for `|`), and `index_of` compares each name as it passes. Instructions for one lookup of an
+  absent flag (callgrind, Linux x86-64, `tests/conformance/test_cli_lookup.py`, a table of 400 entries is 45,677
+  bytes):
+
+  | entries (table bytes) | 10 (1,097) | 50 (5,653) | 150 (17,048) | 400 (45,677) |
+  |---|---|---|---|---|
+  | before | 64,654 | 1,581,208 | 14,126,486 | 100,542,129 |
+  | after | 956 | 4,559 | 13,542 | 35,988 |
+
+  Before, 150 to 400 entries cost 7.1 times as much for a table 2.7 times as big; after, 2.7 times. `seek introspect`
+  went from 19,060,003 to 1,544,095 instructions (91% of it had been `rules.entry_in`, the same shape over the
+  39-rule catalogue). The answers are unchanged: `tests/reference/{cli_old,rules_old}.cho` are the old modules, and the
+  test asks both the same thing over edge and random tables; `scripts/compare_builds.py` compares two builds'
+  bytes over 834 invocations; `scripts/cli_mutants.py --check` kills the mutants of the new scans. **The rule for
+  the next change:** a loop over a table's entries uses `cli.entry_end` and `cli.field_of`, never `name_of(table, i)`
+  and its kin, which are one pass each. A test that fails if a call costs more than 120 instructions a table
+  byte keeps it so.
+
 **Corrected.** An earlier version of this table had `jsonq` at 0.08 s against
 `jq`'s 1.51 s. `jsonq` was refusing that document (exit 8: it was larger than
 `--max-bytes`), so the time measured a refusal. `toolbench.py` now marks a run

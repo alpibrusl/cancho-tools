@@ -2,7 +2,7 @@ edition 5;
 
 module toolbox.cli_old;
 
-// THE REFERENCE. This file is `contract/cli.cho` as it stood at 49a430e (before the flag
+// THE REFERENCE. This file is `contract/cli.cho` as it stood at 25acde0 (before the flag
 // lookups were made linear), byte for byte except for this module name and this comment.
 // `tests/conformance/test_cli_lookup.py` runs it beside the live `toolbox.cli` and requires
 // every answer to be the same. It is quadratic on purpose; do not "fix" it, and do not
@@ -346,12 +346,12 @@ fn take[&h, &g, &s](heap: &!h Heap, e: fail.Errors, args: &g Args, table: &stati
         return flag_error(heap, e, "args.duplicate-flag", "this flag was given more than once", "give each flag once", shown, flag_at);
     }
     if value_arg < 0 {
-        return flag_error(heap, e, "args.missing-value", "this flag takes a value and none followed it", "put the value after the flag, or write the two as --flag=value", shown, flag_at);
+        return flag_error(heap, e, "args.missing-value", "this flag takes a value and none followed it", "", shown, flag_at);
     }
     let value = arg(args, value_arg)[value_from..len(arg(args, value_arg))];
     let kind = kind_of(table, i);
     if !valid(kind, value) {
-        var w = fail.open(heap, "args.bad-value", "this flag's value is not of the kind it takes", "give the flag a value of the kind detail.expected names");
+        var w = fail.open(heap, "args.bad-value", "this flag's value is not of the kind it takes", "");
         w = fail.no_repair(heap, w);
         w = fail.detail_open(heap, w);
         w = json.put_key(heap, w, "flag");

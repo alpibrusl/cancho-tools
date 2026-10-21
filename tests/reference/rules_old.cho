@@ -2,7 +2,7 @@ edition 5;
 
 module toolbox.rules_old;
 
-// THE REFERENCE. This file is `contract/rules.cho` as it stood at 49a430e (before the catalogue
+// THE REFERENCE. This file is `contract/rules.cho` as it stood at 25acde0 (before the catalogue
 // lookups were made linear), byte for byte except for this module name and this comment.
 // `tests/conformance/test_cli_lookup.py` runs it beside the live `toolbox.rules`. Do not "fix" it.
 

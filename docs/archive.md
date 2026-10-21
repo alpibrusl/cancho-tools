@@ -393,11 +393,25 @@ nothing that compares an archive to an earlier one is affected. What `callgrind`
   for the worst case (9 bits a byte) up front. The match search skips a candidate that differs at the byte just past the best
   length so far, which cannot win, and stops when the best is the longest possible; it makes the same choices as before.
 
-**What is still slower, and why it is not fixed here:** `archive` writes 41 % more bytes than gzip on this data (29 % on the
-input of the first table), because it uses the fixed Huffman code and takes the first long match it finds. Dynamic Huffman
-blocks and lazy matching would close most of that and would cost speed; they change every compressed byte, so they are a
-separate change with their own tests. `list` is 35 % slower than `tar tzf`; the remaining cost is the byte loops in the
-CRC and the match copy, which the language has no wide operation for.
+**Round two: dynamic Huffman blocks and lazy matching** (same machine, same input; the compressed bytes now differ from
+every earlier version, and `gzip -dc` and `tar xzf` read them):
+
+| job | `archive` round 1 | `archive` round 2 | incumbent |
+|---|---|---|---|
+| `--op create --as gz` | 3.14 s | 4.58 s | `gzip -c`: 2.95 s |
+| `--op create --as tgz` | 3.43 s | 4.53 s | `tar czf`: 3.01 s |
+| `--op list` of a tgz | 1.16 s | 1.31 s | `tar tzf`: 0.82 s |
+| size of the gz written | 55,898,202 B | **39,568,288 B** | gzip: 39,596,303 B |
+
+The output is 29 % smaller than round 1 and within 0.1 % of gzip on this input (within 0.4 % of zlib level 6 on a fuzz of
+157 inputs of every kind: text, runs, noise, long distances, empty). Each block of up to 32,768 tokens is written as
+whichever of stored, fixed or dynamic costs the fewest bits, so noise no longer grows. Creating costs 46 % more time than
+round 1 (lazy matching looks at two positions for each match); list uses the same inflater and the spread of its runs (1.05 to 1.67 s) covers the difference. The cost is the price of the size: gzip is 1.55 times
+faster at the same size, and the remaining gap is the match search (chain depth 16, no wide compare in the language).
+
+**What is still slower, and why it is not fixed here:** `create` is 55 % slower than `gzip -c`, and `list` is 60 % slower
+than `tar tzf`; the remaining cost is the byte loops in the match search, the CRC and the match copy, which the language
+has no wide operation for.
 
 **Mutants (G10)**, `scripts/archive_mutants.py`: **29 of 29 killed** on the committed code. The first run killed 20: nine survived, and each
 survivor was a test that could not have failed (the execute bit, the gzip length, a pax size, the end marker, the header
@@ -406,5 +420,5 @@ test was written for each and the runner now also runs the cancho unit tests. On
 (a stored block cannot out-grow the file that holds it) and is killed by a unit test that passes the limit directly. A
 mutant that looked like it survived once was a stale binary left by the previous mutant; the runner now rebuilds the real one at the end.
 
-**Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); a dynamic-Huffman writer; any `zip`, `xz`,
+**Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); any `zip`, `xz`,
 `bzip2`, `zstd`; restoring modes and times; a second asker (§1).

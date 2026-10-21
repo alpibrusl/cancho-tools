@@ -229,10 +229,26 @@
     "usable",
     "valid",
     "value_index",
+    "w_blcount",
+    "w_clcode",
+    "w_clfreq",
+    "w_cllen",
+    "w_dcode",
+    "w_dfreq",
+    "w_dlen",
+    "w_hw",
+    "w_lcode",
+    "w_lens",
+    "w_lfreq",
+    "w_llen",
+    "w_next",
+    "w_rles",
+    "w_rlex",
+    "w_size",
     "was_seen",
     "width_of"
   ],
   "folded_operators": 62,
   "folded_calls": 0,
-  "functions": 334
+  "functions": 356
 }

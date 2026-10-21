@@ -847,19 +847,572 @@ fn writer_tables[&t, &c](tab: &!t [int], consts: &c [int]) -> [] int {
     return 0;
 }
 
-// The raw DEFLATE stream of `src`: one final block in the fixed code.
+// ---- dynamic Huffman blocks ---------------------------------------------------------------------
 //
-// The output is written straight into a buffer reserved for the worst case (9 bits a byte: a literal is the longest thing the
-// fixed code writes per input byte, and a match is shorter than the bytes it replaces), and a match's whole code is written
-// in one go.
+// The writer's working state is one `[int]` (`w`), addressed by these offsets, so that a function can read one part
+// and write another without two borrows of the same array.
+
+fn w_lfreq() -> [] int {
+    return 0;
+}
+
+fn w_dfreq() -> [] int {
+    return 288;
+}
+
+fn w_llen() -> [] int {
+    return 320;
+}
+
+fn w_dlen() -> [] int {
+    return 608;
+}
+
+fn w_lcode() -> [] int {
+    return 640;
+}
+
+fn w_dcode() -> [] int {
+    return 928;
+}
+
+fn w_lens() -> [] int {
+    return 960;
+}
+
+fn w_rles() -> [] int {
+    return 1280;
+}
+
+fn w_rlex() -> [] int {
+    return 1600;
+}
+
+fn w_clfreq() -> [] int {
+    return 1920;
+}
+
+fn w_cllen() -> [] int {
+    return 1944;
+}
+
+fn w_clcode() -> [] int {
+    return 1968;
+}
+
+fn w_blcount() -> [] int {
+    return 1992;
+}
+
+fn w_next() -> [] int {
+    return 2008;
+}
+
+// Scratch of `huffman_lengths`: the weights as scaled, the symbols in weight order, the nodes' weights and parents, depths.
+fn w_hw() -> [] int {
+    return 2100;
+}
+
+fn w_size() -> [] int {
+    return 4600;
+}
+
+// Code lengths for the `n` symbols whose frequencies are `w[freq_at..]`, none longer than `limit`, written to `w[out_at..]`.
+// A tree is built from the symbols that occur (the two lightest nodes joined, over and over); if it is deeper than `limit` the
+// frequencies are halved (to at least 1) and it is built again, which ends because a tree of equal weights is shallow. Fewer
+// than two symbols would make an incomplete code, which some decoders refuse, so symbols are added until there are two
+// (they get a length and are never written), as zlib does.
+fn huffman_lengths[&x](w: &!x [int], freq_at: int, out_at: int, n: int, limit: int) -> [] int {
+    let sf = w_hw();
+    let order = w_hw() + 300;
+    let weight = w_hw() + 600;
+    let parent = w_hw() + 1200;
+    let depth = w_hw() + 1800;
+    var i = 0;
+    while i < n {
+        w[sf + i] = w[freq_at + i];
+        i = i + 1;
+    }
+    var m = 0;
+    i = 0;
+    while i < n {
+        if w[sf + i] > 0 {
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while m < 2 && i < n {
+        if w[sf + i] == 0 {
+            w[sf + i] = 1;
+            m = m + 1;
+        }
+        i = i + 1;
+    }
+    var done = false;
+    while !done {
+        m = 0;
+        i = 0;
+        while i < n {
+            w[out_at + i] = 0;
+            if w[sf + i] > 0 {
+                // Insertion into the symbols in weight order (ties by symbol).
+                var j = m;
+                while j > 0 && w[sf + w[order + j - 1]] > w[sf + i] {
+                    w[order + j] = w[order + j - 1];
+                    j = j - 1;
+                }
+                w[order + j] = i;
+                m = m + 1;
+            }
+            i = i + 1;
+        }
+        i = 0;
+        while i < m {
+            w[weight + i] = w[sf + w[order + i]];
+            i = i + 1;
+        }
+        var li = 0;
+        var ni = m;
+        var made = m;
+        while made < 2 * m - 1 {
+            var a = 0;
+            if li < m && (ni >= made || w[weight + li] <= w[weight + ni]) {
+                a = li;
+                li = li + 1;
+            } else {
+                a = ni;
+                ni = ni + 1;
+            }
+            var b = 0;
+            if li < m && (ni >= made || w[weight + li] <= w[weight + ni]) {
+                b = li;
+                li = li + 1;
+            } else {
+                b = ni;
+                ni = ni + 1;
+            }
+            w[weight + made] = w[weight + a] + w[weight + b];
+            w[parent + a] = made;
+            w[parent + b] = made;
+            made = made + 1;
+        }
+        w[depth + 2 * m - 2] = 0;
+        var node = 2 * m - 3;
+        while node >= 0 {
+            w[depth + node] = w[depth + w[parent + node]] + 1;
+            node = node - 1;
+        }
+        var deepest = 0;
+        i = 0;
+        while i < m {
+            if w[depth + i] > deepest {
+                deepest = w[depth + i];
+            }
+            i = i + 1;
+        }
+        if deepest <= limit {
+            i = 0;
+            while i < m {
+                w[out_at + w[order + i]] = w[depth + i];
+                i = i + 1;
+            }
+            done = true;
+        } else {
+            i = 0;
+            while i < n {
+                if w[sf + i] > 1 {
+                    w[sf + i] = (w[sf + i] + 1) / 2;
+                }
+                i = i + 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// The canonical code of each symbol with a length (RFC 1951 3.2.2), written to `w[codes_at..]` reversed, ready to be written
+// least significant bit first.
+fn assign_codes[&x](w: &!x [int], lens_at: int, codes_at: int, n: int) -> [] int {
+    let count = w_blcount();
+    let next = w_next();
+    var i = 0;
+    while i < 16 {
+        w[count + i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        w[count + w[lens_at + i]] = w[count + w[lens_at + i]] + 1;
+        i = i + 1;
+    }
+    w[count] = 0;
+    var code = 0;
+    var bits = 1;
+    while bits <= 15 {
+        code = code + w[count + bits - 1] << 1;
+        w[next + bits] = code;
+        bits = bits + 1;
+    }
+    i = 0;
+    while i < n {
+        let l = w[lens_at + i];
+        if l > 0 {
+            w[codes_at + i] = reversed(w[next + l], l);
+            w[next + l] = w[next + l] + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The header of a dynamic block for the code lengths in `w[w_llen()..]` and `w[w_dlen()..]`: their run-length encoding (symbols
+// 0..15 as they are, 16 repeat the last, 17 and 18 runs of zeros) into `w_rles`/`w_rlex`, the code of that alphabet, and the
+// size of it all in bits. Answers (bits, the code length code's lengths to send, the number of run-length symbols).
+fn build_header[&x](w: &!x [int], nlit: int, ndist: int) -> [] (int, int, int) {
+    let total = nlit + ndist;
+    var i = 0;
+    while i < nlit {
+        w[w_lens() + i] = w[w_llen() + i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < ndist {
+        w[w_lens() + nlit + i] = w[w_dlen() + i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < 19 {
+        w[w_clfreq() + i] = 0;
+        i = i + 1;
+    }
+    var count = 0;
+    i = 0;
+    while i < total {
+        let l = w[w_lens() + i];
+        var run = 1;
+        while i + run < total && w[w_lens() + i + run] == l {
+            run = run + 1;
+        }
+        var r = run;
+        if l == 0 {
+            while r >= 11 {
+                var take = r;
+                if take > 138 {
+                    take = 138;
+                }
+                w[w_rles() + count] = 18;
+                w[w_rlex() + count] = take - 11;
+                count = count + 1;
+                r = r - take;
+            }
+            if r >= 3 {
+                w[w_rles() + count] = 17;
+                w[w_rlex() + count] = r - 3;
+                count = count + 1;
+                r = 0;
+            }
+            while r > 0 {
+                w[w_rles() + count] = 0;
+                w[w_rlex() + count] = 0;
+                count = count + 1;
+                r = r - 1;
+            }
+        } else {
+            w[w_rles() + count] = l;
+            w[w_rlex() + count] = 0;
+            count = count + 1;
+            r = run - 1;
+            while r >= 3 {
+                var take = r;
+                if take > 6 {
+                    take = 6;
+                }
+                w[w_rles() + count] = 16;
+                w[w_rlex() + count] = take - 3;
+                count = count + 1;
+                r = r - take;
+            }
+            while r > 0 {
+                w[w_rles() + count] = l;
+                w[w_rlex() + count] = 0;
+                count = count + 1;
+                r = r - 1;
+            }
+        }
+        i = i + run;
+    }
+    i = 0;
+    while i < count {
+        w[w_clfreq() + w[w_rles() + i]] = w[w_clfreq() + w[w_rles() + i]] + 1;
+        i = i + 1;
+    }
+    huffman_lengths(w, w_clfreq(), w_cllen(), 19, 7);
+    assign_codes(w, w_cllen(), w_clcode(), 19);
+    var ncl = 19;
+    while ncl > 4 && w[w_cllen() + order_of(ncl - 1)] == 0 {
+        ncl = ncl - 1;
+    }
+    // 5 + 5 + 4 bits of counts, 3 for each code length code length, then each run-length symbol and its extra bits.
+    var bits = 14 + 3 * ncl;
+    i = 0;
+    while i < count {
+        let sym = w[w_rles() + i];
+        bits = bits + w[w_cllen() + sym];
+        if sym == 16 {
+            bits = bits + 2;
+        } else if sym == 17 {
+            bits = bits + 3;
+        } else if sym == 18 {
+            bits = bits + 7;
+        }
+        i = i + 1;
+    }
+    return (bits, ncl, count);
+}
+
+// `bits` bits of `value` (at most 56, the pending bits included in what fits), least significant first, into `o` at `pos`.
+// Answers the new (position, pending bits, how many).
+fn emit[&o](o: &!o [byte], pos: int, acc: int, nbits: int, value: int, width: int) -> [] (int, int, int) {
+    var p = pos;
+    var a = acc | value << nbits;
+    var n = nbits + width;
+    while n >= 8 {
+        o[p] = byte_of(a & 255);
+        p = p + 1;
+        a = a >> 8;
+        n = n - 8;
+    }
+    return (p, a, n);
+}
+
+// One block: the `ntok` tokens `tk` (a literal is its byte, a match is `length << 16 | distance`) that stand for
+// `src[bstart..bend]`, as whichever of a stored block, a fixed-code block and a dynamic-code block is smallest. `final` marks
+// the last block of the stream. Answers the new (position, pending bits, how many).
+fn write_block[&o, &x, &t, &q, &k, &s](o: &!o [byte], pos0: int, acc0: int, nbits0: int, w: &!x [int], tab: &t [int], c: &q [int], tk: &k [int], ntok: int, src: &s [byte], bstart: int, bend: int, final: bool) -> [] (int, int, int) {
+    var pos = pos0;
+    var acc = acc0;
+    var nbits = nbits0;
+    var i = 0;
+    while i < 288 {
+        w[w_lfreq() + i] = 0;
+        i = i + 1;
+    }
+    i = 0;
+    while i < 32 {
+        w[w_dfreq() + i] = 0;
+        i = i + 1;
+    }
+    var extra = 0;
+    i = 0;
+    while i < ntok {
+        let t = tk[i];
+        if t < 256 {
+            w[w_lfreq() + t] = w[w_lfreq() + t] + 1;
+        } else {
+            let length = t >> 16;
+            let far = t & 0xffff;
+            let lc = tab[576 + length];
+            var dc = 0;
+            if far <= 256 {
+                dc = tab[840 + far - 1];
+            } else {
+                dc = tab[840 + 256 + (far - 1 >> 7)];
+            }
+            w[w_lfreq() + 257 + lc] = w[w_lfreq() + 257 + lc] + 1;
+            w[w_dfreq() + dc] = w[w_dfreq() + dc] + 1;
+            extra = extra + c[32 + lc] + c[96 + dc];
+        }
+        i = i + 1;
+    }
+    w[w_lfreq() + 256] = 1;
+    huffman_lengths(w, w_lfreq(), w_llen(), 286, 15);
+    huffman_lengths(w, w_dfreq(), w_dlen(), 30, 15);
+    var nlit = 286;
+    while nlit > 257 && w[w_llen() + nlit - 1] == 0 {
+        nlit = nlit - 1;
+    }
+    var ndist = 30;
+    while ndist > 1 && w[w_dlen() + ndist - 1] == 0 {
+        ndist = ndist - 1;
+    }
+    let (hbits, ncl, nrle) = build_header(w, nlit, ndist);
+    var dynamic_bits = 3 + hbits + extra;
+    var fixed_bits = 3 + extra;
+    i = 0;
+    while i < 286 {
+        dynamic_bits = dynamic_bits + w[w_lfreq() + i] * w[w_llen() + i];
+        fixed_bits = fixed_bits + w[w_lfreq() + i] * tab[288 + i];
+        i = i + 1;
+    }
+    i = 0;
+    while i < 30 {
+        dynamic_bits = dynamic_bits + w[w_dfreq() + i] * w[w_dlen() + i];
+        fixed_bits = fixed_bits + w[w_dfreq() + i] * 5;
+        i = i + 1;
+    }
+    let span = bend - bstart;
+    let chunks = (span + 65534) / 65535;
+    let stored_bits = span * 8 + chunks * 40 + 8;
+    var flag = 0;
+    if final {
+        flag = 1;
+    }
+    if span > 0 && stored_bits < dynamic_bits && stored_bits < fixed_bits {
+        // Stored: each piece its own block, a header, the rest of the byte skipped, the length, its complement and the bytes.
+        var from = bstart;
+        while from < bend {
+            var piece = bend - from;
+            if piece > 65535 {
+                piece = 65535;
+            }
+            var last = 0;
+            if final && from + piece == bend {
+                last = 1;
+            }
+            let (p1, a1, n1) = emit(o, pos, acc, nbits, last, 3);
+            pos = p1;
+            acc = a1;
+            nbits = n1;
+            if nbits > 0 {
+                o[pos] = byte_of(acc & 255);
+                pos = pos + 1;
+                acc = 0;
+                nbits = 0;
+            }
+            o[pos] = byte_of(piece & 255);
+            o[pos + 1] = byte_of(piece >> 8);
+            o[pos + 2] = byte_of(65535 - piece & 255);
+            o[pos + 3] = byte_of(65535 - piece >> 8);
+            pos = pos + 4;
+            var k = 0;
+            while k < piece {
+                o[pos + k] = src[from + k];
+                k = k + 1;
+            }
+            pos = pos + piece;
+            from = from + piece;
+        }
+        return (pos, acc, nbits);
+    }
+    if fixed_bits <= dynamic_bits {
+        i = 0;
+        while i < 288 {
+            w[w_lcode() + i] = tab[i];
+            w[w_llen() + i] = tab[288 + i];
+            i = i + 1;
+        }
+        i = 0;
+        while i < 30 {
+            w[w_dcode() + i] = tab[1360 + i];
+            w[w_dlen() + i] = 5;
+            i = i + 1;
+        }
+        let (p1, a1, n1) = emit(o, pos, acc, nbits, flag | 1 << 1, 3);
+        pos = p1;
+        acc = a1;
+        nbits = n1;
+    } else {
+        assign_codes(w, w_llen(), w_lcode(), 286);
+        assign_codes(w, w_dlen(), w_dcode(), 30);
+        let (p1, a1, n1) = emit(o, pos, acc, nbits, flag | 2 << 1, 3);
+        let (p2, a2, n2) = emit(o, p1, a1, n1, nlit - 257 | ndist - 1 << 5 | ncl - 4 << 10, 14);
+        pos = p2;
+        acc = a2;
+        nbits = n2;
+        i = 0;
+        while i < ncl {
+            let (p3, a3, n3) = emit(o, pos, acc, nbits, w[w_cllen() + order_of(i)], 3);
+            pos = p3;
+            acc = a3;
+            nbits = n3;
+            i = i + 1;
+        }
+        i = 0;
+        while i < nrle {
+            let sym = w[w_rles() + i];
+            var width = 0;
+            if sym == 16 {
+                width = 2;
+            } else if sym == 17 {
+                width = 3;
+            } else if sym == 18 {
+                width = 7;
+            }
+            let (p3, a3, n3) = emit(o, pos, acc, nbits, w[w_clcode() + sym] | w[w_rlex() + i] << w[w_cllen() + sym], w[w_cllen() + sym] + width);
+            pos = p3;
+            acc = a3;
+            nbits = n3;
+            i = i + 1;
+        }
+    }
+    // The tokens, then the end of the block, with the codes in `w`.
+    i = 0;
+    while i < ntok {
+        let t = tk[i];
+        var value = 0;
+        var width = 0;
+        if t < 256 {
+            value = w[w_lcode() + t];
+            width = w[w_llen() + t];
+        } else {
+            let length = t >> 16;
+            let far = t & 0xffff;
+            let lc = tab[576 + length];
+            var dc = 0;
+            if far <= 256 {
+                dc = tab[840 + far - 1];
+            } else {
+                dc = tab[840 + 256 + (far - 1 >> 7)];
+            }
+            value = w[w_lcode() + 257 + lc] | length - c[lc] << w[w_llen() + 257 + lc];
+            width = w[w_llen() + 257 + lc] + c[32 + lc];
+            value = value | w[w_dcode() + dc] << width;
+            width = width + w[w_dlen() + dc];
+            value = value | far - c[64 + dc] << width;
+            width = width + c[96 + dc];
+        }
+        acc = acc | value << nbits;
+        nbits = nbits + width;
+        while nbits >= 8 {
+            o[pos] = byte_of(acc & 255);
+            pos = pos + 1;
+            acc = acc >> 8;
+            nbits = nbits - 8;
+        }
+        i = i + 1;
+    }
+    let (p4, a4, n4) = emit(o, pos, acc, nbits, w[w_lcode() + 256], w[w_llen() + 256]);
+    return (p4, a4, n4);
+}
+
+// Insert position `p` in the hash chains.
+fn insert[&s, &x, &y](src: &s [byte], head: &!x [int], prev: &!y [int], p: int) -> [] int {
+    if p + 2 < len(src) {
+        let h = hash3(src, p);
+        prev[p & 32767] = head[h];
+        head[h] = p + 1;
+    }
+    return 0;
+}
+
+// The raw DEFLATE stream of `src`.
+//
+// The input is turned into tokens (a literal byte, or a match `length << 16 | distance`) by lazy matching: a match is
+// held back for one byte when the next position has a longer one, which is what a good compressor does and the first-match
+// writer did not. Every 32,768 tokens, and at the end, the tokens become a block, stored, fixed-code or dynamic-code,
+// whichever is smallest (`write_block`). The output is written straight into a buffer reserved for the worst case.
 pub fn deflate[&h, &s](heap: &!h Heap, src: &s [byte]) -> [heap] buffer.Buffer {
-    let out = buffer.reserve(heap, buffer.empty(heap, 16), len(src) + len(src) / 8 + 64);
+    let out = buffer.reserve(heap, buffer.empty(heap, 16), len(src) + len(src) / 8 + 4096);
     let buffer.Buffer { held, used } = out;
     var pos = used;
     var acc = 0;
     var nbits = 0;
+    let n = len(src);
     let consts = box_slice(heap, 128, 0);
     let tab = box_slice(heap, 1400, 0);
+    let work = box_slice(heap, w_size(), 0);
+    let tokens = box_slice(heap, 32768, 0);
     let head = box_slice(heap, 32768, 0);
     let prev = box_slice(heap, 32768, 0);
     borrow mut consts as &!cw in {
@@ -872,74 +1425,88 @@ pub fn deflate[&h, &s](heap: &!h Heap, src: &s [byte]) -> [heap] buffer.Buffer {
     }
     borrow mut held as &!ow in {
         let o = contents(ow);
-        // BFINAL = 1, BTYPE = 01.
-        acc = 3;
-        nbits = 3;
         borrow consts as &cr in {
             borrow tab as &tr in {
-                borrow mut head as &!hw in {
-                    borrow mut prev as &!pw in {
-                        let t = contents(tr);
-                        let c = contents(cr);
-                        let hs = contents(hw);
-                        let ps = contents(pw);
-                        var at = 0;
-                        while at < len(src) {
-                            let (length, far) = longest(src, hs, ps, at);
-                            var value = 0;
-                            var width = 0;
-                            var step = 1;
-                            if length == 0 {
-                                value = t[int_of(src[at])];
-                                width = t[288 + int_of(src[at])];
-                            } else {
-                                let code = t[576 + length];
-                                var dcode = 0;
-                                if far <= 256 {
-                                    dcode = t[840 + far - 1];
-                                } else {
-                                    dcode = t[840 + 256 + (far - 1 >> 7)];
+                borrow mut work as &!ww in {
+                    borrow mut tokens as &!kw in {
+                        borrow mut head as &!hw in {
+                            borrow mut prev as &!pw in {
+                                let c = contents(cr);
+                                let t = contents(tr);
+                                let wk = contents(ww);
+                                let tk = contents(kw);
+                                let hs = contents(hw);
+                                let ps = contents(pw);
+                                var at = 0;
+                                var bstart = 0;
+                                var ntok = 0;
+                                var cur_len = 0;
+                                var cur_far = 0;
+                                var have = false;
+                                while at < n {
+                                    if !have {
+                                        let (l0, f0) = longest(src, hs, ps, at);
+                                        cur_len = l0;
+                                        cur_far = f0;
+                                    }
+                                    have = false;
+                                    // A match of three bytes far away costs more than the three literals.
+                                    let worth = cur_len >= 3 && !(cur_len == 3 && cur_far > 4096);
+                                    if worth && cur_len < 16 && at + 1 < n {
+                                        insert(src, hs, ps, at);
+                                        let (l1, f1) = longest(src, hs, ps, at + 1);
+                                        if l1 > cur_len {
+                                            tk[ntok] = int_of(src[at]);
+                                            ntok = ntok + 1;
+                                            at = at + 1;
+                                            cur_len = l1;
+                                            cur_far = f1;
+                                            have = true;
+                                        } else {
+                                            tk[ntok] = cur_len << 16 | cur_far;
+                                            ntok = ntok + 1;
+                                            var k = 1;
+                                            while k < cur_len {
+                                                insert(src, hs, ps, at + k);
+                                                k = k + 1;
+                                            }
+                                            at = at + cur_len;
+                                        }
+                                    } else if worth {
+                                        tk[ntok] = cur_len << 16 | cur_far;
+                                        ntok = ntok + 1;
+                                        var k = 0;
+                                        while k < cur_len {
+                                            insert(src, hs, ps, at + k);
+                                            k = k + 1;
+                                        }
+                                        at = at + cur_len;
+                                    } else {
+                                        tk[ntok] = int_of(src[at]);
+                                        ntok = ntok + 1;
+                                        insert(src, hs, ps, at);
+                                        at = at + 1;
+                                    }
+                                    if ntok >= 32768 || at >= n {
+                                        let (p1, a1, n1) = write_block(o, pos, acc, nbits, wk, t, c, tk, ntok, src, bstart, at, at >= n);
+                                        pos = p1;
+                                        acc = a1;
+                                        nbits = n1;
+                                        ntok = 0;
+                                        bstart = at;
+                                    }
                                 }
-                                value = t[257 + code] | length - c[code] << t[288 + 257 + code];
-                                width = t[288 + 257 + code] + c[32 + code];
-                                value = value | t[1360 + dcode] << width;
-                                width = width + 5;
-                                value = value | far - c[64 + dcode] << width;
-                                width = width + c[96 + dcode];
-                                step = length;
-                            }
-                            acc = acc | value << nbits;
-                            nbits = nbits + width;
-                            while nbits >= 8 {
-                                o[pos] = byte_of(acc & 255);
-                                pos = pos + 1;
-                                acc = acc >> 8;
-                                nbits = nbits - 8;
-                            }
-                            var k = 0;
-                            while k < step {
-                                let p = at + k;
-                                if p + 2 < len(src) {
-                                    let hh = hash3(src, p);
-                                    ps[p & 32767] = hs[hh];
-                                    hs[hh] = p + 1;
+                                if n == 0 {
+                                    let (p1, a1, n1) = write_block(o, pos, acc, nbits, wk, t, c, tk, 0, src, 0, 0, true);
+                                    pos = p1;
+                                    acc = a1;
+                                    nbits = n1;
                                 }
-                                k = k + 1;
+                                if nbits > 0 {
+                                    o[pos] = byte_of(acc & 255);
+                                    pos = pos + 1;
+                                }
                             }
-                            at = at + step;
-                        }
-                        // The end-of-block symbol, 256: seven zero bits.
-                        acc = acc | t[256] << nbits;
-                        nbits = nbits + t[288 + 256];
-                        while nbits >= 8 {
-                            o[pos] = byte_of(acc & 255);
-                            pos = pos + 1;
-                            acc = acc >> 8;
-                            nbits = nbits - 8;
-                        }
-                        if nbits > 0 {
-                            o[pos] = byte_of(acc & 255);
-                            pos = pos + 1;
                         }
                     }
                 }
@@ -948,6 +1515,8 @@ pub fn deflate[&h, &s](heap: &!h Heap, src: &s [byte]) -> [heap] buffer.Buffer {
     }
     unbox_slice(heap, consts);
     unbox_slice(heap, tab);
+    unbox_slice(heap, work);
+    unbox_slice(heap, tokens);
     unbox_slice(heap, head);
     unbox_slice(heap, prev);
     return buffer.Buffer { held: held, used: pos };

@@ -40,10 +40,10 @@ jobs:
       - name: Put the compiler on PATH
         run: echo "$GITHUB_WORKSPACE/cancho/target/release" >> "$GITHUB_PATH"
 
-      - name: What the gates compare against (jq, strace, ripgrep) and validate with (jsonschema)
+      - name: What the gates compare against (jq, strace, ripgrep), count instructions with (valgrind) and validate with (jsonschema)
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y -q jq strace ripgrep
+          sudo apt-get install -y -q jq strace ripgrep valgrind
           pip install jsonschema
 
       - name: Formatting

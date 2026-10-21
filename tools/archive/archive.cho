@@ -386,8 +386,21 @@ fn placing_error[&h, &p](heap: &!h Heap, e: fail.Errors, errno: int, step: int, 
 
 // Write `data` as the new file `shown` beneath `root`. True when it was written.
 fn put_new[&h, &f, &r, &p, &d](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool, buffer.Buffer) {
-    var e = errs;
     var digest = atomic.sha256_hex(heap, data);
+    var e = errs;
+    var ok = false;
+    borrow digest as &hx in {
+        let (after, wrote) = put_new_with(heap, fs, root, shown, data, buffer.bytes(hx), e);
+        e = after;
+        ok = wrote;
+    }
+    return (e, ok, digest);
+}
+
+// `put_new`, for a caller that has the data's SHA-256 (hex) already: the digest names the temporary file, and hashing a
+// whole archive a second time was a quarter of the time `create` took.
+fn put_new_with[&h, &f, &r, &p, &d, &x](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], digest: &x [byte], errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool) {
+    var e = errs;
     var ok = false;
     match place.parent(fs, root, shown, shown) {
         DirOpened::Failed(reason) => {
@@ -397,23 +410,21 @@ fn put_new[&h, &f, &r, &p, &d](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], s
             var dir = opened;
             let leaf = place.leaf(shown);
             borrow dir as &dd in {
-                borrow digest as &hx in {
-                    let temp = atomic.temp_path(heap, leaf, buffer.bytes(hx));
-                    borrow temp as &tp in {
-                        let (errno, step) = place_file(dd, leaf, buffer.bytes(tp), data);
-                        if errno == 0 {
-                            ok = true;
-                        } else {
-                            e = placing_error(heap, e, errno, step, shown);
-                        }
+                let temp = atomic.temp_path(heap, leaf, digest);
+                borrow temp as &tp in {
+                    let (errno, step) = place_file(dd, leaf, buffer.bytes(tp), data);
+                    if errno == 0 {
+                        ok = true;
+                    } else {
+                        e = placing_error(heap, e, errno, step, shown);
                     }
-                    buffer.drop(heap, temp);
                 }
+                buffer.drop(heap, temp);
             }
             dir_close(dir);
         }
     }
-    return (e, ok, digest);
+    return (e, ok);
 }
 
 // ---- counts ------------------------------------------------------------------------------------------------
@@ -947,11 +958,12 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
                     digest = atomic.sha256_hex(heap, buffer.bytes(ar));
                     count = Count { entries: gathered.entries, bytes: gathered.bytes, emitted: count.emitted, broken: count.broken };
                     if !dry {
-                        let (after, wrote, unused) = put_new(heap, fs, root, path.shown(tp), buffer.bytes(ar), e);
-                        e = after;
-                        buffer.drop(heap, unused);
-                        if !wrote {
-                            count = Count { entries: count.entries, bytes: count.bytes, emitted: count.emitted, broken: count.broken };
+                        borrow digest as &dg in {
+                            let (after, wrote) = put_new_with(heap, fs, root, path.shown(tp), buffer.bytes(ar), buffer.bytes(dg), e);
+                            e = after;
+                            if !wrote {
+                                count = Count { entries: count.entries, bytes: count.bytes, emitted: count.emitted, broken: count.broken };
+                            }
                         }
                     }
                 }

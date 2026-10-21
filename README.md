@@ -175,7 +175,7 @@ $ archive --root . --op create --dry-run project.tgz src package.json
 {"type":"dir","path":"src"}
 {"type":"file","path":"src/main.rs","bytes":113,"sha256":"98ace4483c48…"}
 {"type":"file","path":"package.json","bytes":78,"sha256":"2c313334b372…"}
-{"type":"end","ok":true,"command":"archive","schema":"archive.v1","complete":true,"op":"create","format":"tgz","entries":3,"bytes":191,"errors":0,"dry_run":true,"archive_sha256":"4ee91f70c62e…"}
+{"type":"end","ok":true,"command":"archive","schema":"archive.v1","complete":true,"op":"create","format":"tgz","entries":3,"bytes":191,"errors":0,"dry_run":true,"archive_sha256":"372e8efb591b…"}
 # exit status 9
 ```
 

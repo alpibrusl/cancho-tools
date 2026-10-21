@@ -86,6 +86,53 @@ jobs:
         working-directory: tools
         run: python3 -W ignore -m unittest discover -s tests/conformance -v
 
+  # The table scans' mutants (scripts/cli_mutants.py): every mutant of toolbox.cli / toolbox.rules /
+  # toolbox.describe's table loops must be killed by tests/conformance/test_cli_lookup.py, which
+  # takes a while, so it is a job of its own.
+  table-scan-mutants:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Read the compiler pin from cancho.toml
+        id: pin
+        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' tools/cancho.toml)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: alpibrusl/cancho
+          ref: ${{ steps.pin.outputs.rev }}
+          path: cancho
+
+      - name: Cache the compiler
+        id: compiler
+        uses: actions/cache@v4
+        with:
+          path: cancho/target/release/cancho
+          key: cancho-${{ steps.pin.outputs.rev }}
+
+      - name: Build cancho
+        if: steps.compiler.outputs.cache-hit != 'true'
+        working-directory: cancho
+        run: cargo build --release -p cancho
+
+      - name: Put the compiler on PATH
+        run: echo "$GITHUB_WORKSPACE/cancho/target/release" >> "$GITHUB_PATH"
+
+      - name: valgrind (the cost gate counts instructions) and jsonschema (the conformance harness imports it)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q valgrind
+          pip install jsonschema
+
+      - name: Every mutant of the table scans is killed
+        working-directory: tools
+        env:
+          JOBS: "4"
+        run: python3 scripts/cli_mutants.py --check
+
   # The benchmark harness's own self-test (S3): power and the /dev/null
   # pitfall. It reports a probe and gates nothing against GNU; it is a
   # separate job because a shared runner is noisy.

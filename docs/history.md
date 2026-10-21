@@ -131,7 +131,7 @@ The fourth column, in this repository again:
   | after | 956 | 4,559 | 13,542 | 35,988 |
 
   Before, 150 to 400 entries cost 7.1 times as much for a table 2.7 times as big; after, 2.7 times. `seek introspect`
-  went from 19,060,003 to 1,544,095 instructions (91% of it had been `rules.entry_in`, the same shape over the
+  went from 19,059,883 to 1,544,812 instructions (91% of it had been `rules.entry_in`, the same shape over the
   39-rule catalogue). The answers are unchanged: `tests/reference/{cli_old,rules_old}.cho` are the old modules, and the
   test asks both the same thing over edge and random tables; `scripts/compare_builds.py` compares two builds'
   bytes over 834 invocations; `scripts/cli_mutants.py --check` kills the mutants of the new scans. **The rule for

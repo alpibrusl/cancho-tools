@@ -54,7 +54,7 @@ def normal(result):
 
 def probes(directory):
     out = []
-    for tool in harness.EVERY:
+    for tool in getattr(harness, "EVERY", harness.TOOLS):
         out += [(tool, ["introspect"]), (tool, ["skill"]), (tool, ["introspect", "--output", "json"]), (tool, ["introspect", "--output=json"]), (tool, [])]
         doc = json.loads(subprocess.run([str(pathlib.Path(directory) / tool), "introspect"], capture_output=True, check=True).stdout)
         for f in doc["flags"]:

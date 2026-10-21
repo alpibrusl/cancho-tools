@@ -22,6 +22,7 @@ at most 1.5 times as much as the table does (a quadratic lookup grows 7 times as
 constants are in this file, with what they were chosen from.
 """
 
+import json
 import os
 import pathlib
 import random
@@ -96,18 +97,136 @@ class Differential(unittest.TestCase):
         self.assertEqual(subprocess.run([str(self.exe)], capture_output=True).returncode, 31)
 
 
-# What the constants were chosen from (Linux x86-64, callgrind, `cancho` 62c2be5; the numbers are the
-# per-call instruction counts the Cost test prints, at 400 entries = 45,677 table bytes):
+def catalogue():
+    text = (ROOT / "contract" / "rules.cho").read_text()
+    return re.search(r'pub fn catalogue\(\) -> \[\] &static \[byte\] \{\n    return "(.*?)";', text).group(1)
+
+
+def fields(entry, n):
+    f = entry.split("|")
+    return (f + [""] * n)[:n] if n > len(f) else f
+
+
+def digits(text):
+    n = 0
+    for c in text:
+        n = n * 10 + (int(c) if c.isdigit() else -1)
+    return n
+
+
+class Describe(unittest.TestCase):
+    """`introspect` and `skill` of a tool whose flag table, rules and rules of its own are these, against
+    what the table says, worked out here from the documented format and not from the code."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.cases = cli_cases.describe_cases()
+        cls.exe = build(cls.tmp.name, "describe", cli_cases.describe_program(cls.cases))
+        cls.catalogue = [e for e in catalogue().split(";")]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def say(self, i, which):
+        p = subprocess.run([str(self.exe), str(i), which], capture_output=True, timeout=120)
+        self.assertEqual(p.returncode, 0)
+        return p.stdout.decode()
+
+    def entries(self, table):
+        return table.split(";") if table else []
+
+    def find(self, extra, tag):
+        for e in self.catalogue + self.entries(extra):
+            if fields(e, 1)[0] == tag:
+                return e
+        return None
+
+    def flags(self, table):
+        out = []
+        for e in self.entries(table):
+            f = fields(e, 6)
+            out.append({"name": "--" + f[0], "short": "-" + f[1] if f[1] else None, "kind": f[2], "role": f[3], "default": f[4] or None, "help": f[5]})
+        return out
+
+    def rules(self, rules, extra):
+        out = []
+        for tag in self.entries(rules):
+            e = self.find(extra, tag)
+            if e is None:
+                out.append({"rule": tag, "exit": 1, "repairable": "never", "summary": ""})
+            else:
+                f = fields(e, 4)
+                out.append({"rule": tag, "exit": digits(f[1]), "repairable": f[2], "summary": f[3]})
+        return out
+
+    def codes(self, table, rules):
+        found = {0}
+        if "dry-run|" in table:
+            found.add(9)
+        found |= {r["exit"] for r in rules if 0 <= r["exit"] <= 8}
+        return sorted(found)
+
+    def test_the_lists_written_from_literals_are_whole(self):
+        # `put_list` writes `not_narrowable` and `evidence.offline` from `;`-separated literals in describe.cho.
+        lists = re.findall(r'put_list\(heap, w, "(.*?)"\);\n', (ROOT / "contract" / "describe.cho").read_text())
+        self.assertEqual(len(lists), 2)
+        d = json.loads(self.say(0, "introspect"))
+        self.assertEqual(d["not_narrowable"], lists[0].replace('\\"', '"').split(";"))
+        self.assertEqual(d["evidence"]["offline"], lists[1].split(";"))
+
+    def test_introspect_says_what_the_table_says(self):
+        wrong = []
+        for i, (table, rules, extra) in enumerate(self.cases):
+            d = json.loads(self.say(i, "introspect"))
+            want_rules = self.rules(rules, extra)
+            got = (d["flags"], d["rules"], [c["code"] for c in d["exit_codes"]])
+            want = (self.flags(table), want_rules, self.codes(table, want_rules))
+            if got != want:
+                wrong.append("case %d (%r): %r != %r" % (i, table[:50], got, want))
+        self.assertEqual(wrong[:3], [])
+
+    def test_skill_says_what_the_table_says(self):
+        wrong = []
+        for i, (table, rules, extra) in enumerate(self.cases):
+            text = self.say(i, "skill")
+            want_rules = self.rules(rules, extra)
+            lines = []
+            for f in self.flags(table):
+                line = "- `" + f["name"] + ("" if f["kind"] == "bool" else " <" + f["kind"] + ">") + "`"
+                if f["short"]:
+                    line += " (`" + f["short"] + "`)"
+                line += ": " + f["help"] + (" Default `" + f["default"] + "`." if f["default"] else "")
+                lines.append(line + "\n")
+            rule_lines = []
+            for r in want_rules:
+                line = "- `%s` (exit %d)" % (r["rule"], r["exit"])
+                if self.find(extra, r["rule"]) is not None:
+                    line += ": " + r["summary"]
+                rule_lines.append(line + "\n")
+            got_flags = text.split("## Flags\n\n", 1)[1].split("\nAn unknown flag is refused", 1)[0]
+            got_rules = text.split("## Rules\n\n", 1)[1].split("\n## Authority", 1)[0]
+            got_codes = [int(c) for c in re.findall(r"^- `(\d+)` ", text.split("## Exit codes\n\n", 1)[1].split("\n## Rules", 1)[0], re.M) if int(c) < 10]
+            got = (got_flags, got_rules, got_codes)
+            want = ("".join(lines), "".join(rule_lines), self.codes(table, want_rules))
+            if got != want:
+                wrong.append("case %d (%r): %r != %r" % (i, table[:50], got, want))
+        self.assertEqual(wrong[:3], [])
+
+
+# What the constants were chosen from (Linux x86-64, callgrind, `cancho` 62c2be5; the per-call instruction
+# counts the Cost test prints, at 400 entries = 45,677 table bytes):
 #
-#   linear code:  index, has, kind_of, default_of    0.5 - 1.1 instructions per table byte
-#                 parse (one flag)                    1.6 - 2.1
+#   linear code:  index, has, kind_of, default_of    0.5 - 0.8 instructions per table byte
+#                 text, parse (one flag)              1.6 - 2.1
 #                 nearest                             56  (a Levenshtein distance per entry, linear)
-#                 introspect / skill                  61 / 19 (the JSON or Markdown it writes)
+#                 introspect / skill                  60 / 18 (the JSON or Markdown it writes)
 #   old code:     index, has, parse (one flag)        2,200 per table byte at 400 entries, and 7.1 times
 #                 the cost at 150 entries where the table is 2.7 times as big (quadratic)
 #
-# BYTES_FACTOR is the linear code's dearest call (61) doubled; FIXED is the part of `introspect`
-# that does not depend on the table (the rules catalogue, 275 K - 7 K at 10 entries) rounded up.
+# BYTES_FACTOR is the linear code's dearest call (60) doubled; FIXED is the part of `introspect` that does
+# not depend on the table (the rules catalogue: 199,540 at 10 entries, 1,097 bytes) rounded up.
 BYTES_FACTOR = 120
 FIXED = 300000
 GROWTH = 1.5

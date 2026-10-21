@@ -63,11 +63,11 @@ pub struct Built {
 fn put_list[&h](heap: &!h Heap, w: json.Writer, list: &static [byte]) -> [heap] json.Writer {
     var o = json.begin_array(heap, w);
     if len(list) > 0 {
-        let n = bytes.count_byte(list, ';') + 1;
-        var i = 1;
-        while i <= n {
-            o = json.put_string(heap, o, bytes.field(list, ';', i));
-            i = i + 1;
+        var at = 0;
+        while at <= len(list) {
+            let end = cli.entry_end(list, at);
+            o = json.put_string(heap, o, list[at..end]);
+            at = end + 1;
         }
     }
     return json.end_array(heap, o);
@@ -110,12 +110,16 @@ fn emits(tool: Tool, code: int) -> [] bool {
     if code == 9 {
         return bytes.find(tool.flags, "dry-run|") >= 0;
     }
-    var i = 0;
-    while i < count(tool.rules) {
-        if rules.exit_of_in(tool.extra_rules, bytes.field(tool.rules, ';', i + 1)) == code {
+    if len(tool.rules) == 0 {
+        return false;
+    }
+    var at = 0;
+    while at <= len(tool.rules) {
+        let end = cli.entry_end(tool.rules, at);
+        if rules.exit_of_in(tool.extra_rules, tool.rules[at..end]) == code {
             return true;
         }
-        i = i + 1;
+        at = end + 1;
     }
     return false;
 }
@@ -144,18 +148,22 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
     w = json.put_key(heap, w, "flags");
     w = json.begin_array(heap, w);
     var i = 0;
-    while i < cli.entries(tool.flags) {
+    var at = 0;
+    let flag_count = cli.entries(tool.flags);
+    while i < flag_count {
+        // One pass over the table: each entry is cut where the last one ended.
+        let whole = tool.flags[at..cli.entry_end(tool.flags, at)];
         w = json.begin_object(heap, w);
         w = json.put_key(heap, w, "name");
         var dashed = buffer.empty(heap, 32);
         dashed = buffer.append(heap, dashed, "--");
-        dashed = buffer.append(heap, dashed, cli.name_of(tool.flags, i));
+        dashed = buffer.append(heap, dashed, cli.field_of(whole, 1));
         borrow dashed as &d in {
             w = json.put_string(heap, w, buffer.bytes(d));
         }
         buffer.drop(heap, dashed);
         w = json.put_key(heap, w, "short");
-        let short = cli.short_of(tool.flags, i);
+        let short = cli.field_of(whole, 2);
         if len(short) == 0 {
             w = json.put_null(heap, w);
         } else {
@@ -168,19 +176,20 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
             buffer.drop(heap, s);
         }
         w = json.put_key(heap, w, "kind");
-        w = json.put_string(heap, w, cli.kind_of(tool.flags, i));
+        w = json.put_string(heap, w, cli.field_of(whole, 3));
         w = json.put_key(heap, w, "role");
-        w = json.put_string(heap, w, cli.role_of(tool.flags, i));
+        w = json.put_string(heap, w, cli.field_of(whole, 4));
         w = json.put_key(heap, w, "default");
-        let d = cli.default_of(tool.flags, i);
+        let d = cli.field_of(whole, 5);
         if len(d) == 0 {
             w = json.put_null(heap, w);
         } else {
             w = json.put_string(heap, w, d);
         }
         w = json.put_key(heap, w, "help");
-        w = json.put_string(heap, w, cli.help_of(tool.flags, i));
+        w = json.put_string(heap, w, cli.field_of(whole, 6));
         w = json.end_object(heap, w);
+        at = at + len(whole) + 1;
         i = i + 1;
     }
     w = json.end_array(heap, w);
@@ -234,8 +243,12 @@ pub fn introspect[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer
     w = json.put_key(heap, w, "rules");
     w = json.begin_array(heap, w);
     i = 0;
-    while i < count(tool.rules) {
-        let tag = bytes.field(tool.rules, ';', i + 1);
+    var from = 0;
+    let rule_count = count(tool.rules);
+    while i < rule_count {
+        let rule_end = cli.entry_end(tool.rules, from);
+        let tag = tool.rules[from..rule_end];
+        from = rule_end + 1;
         let at = rules.find_in(tool.extra_rules, tag);
         w = json.begin_object(heap, w);
         w = json.put_key(heap, w, "rule");
@@ -367,30 +380,34 @@ pub fn skill[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer.Buff
     }
     b = md(heap, b, "\nAn error is `{code, rule, message, hint, repair, detail}`. Match on `rule`, not on `message`. When `repair` is `{\"kind\":\"retry\",\"argv\":[...]}` the argv can be run as it stands; it never widens what the tool may touch.\n\n`--format text` is for a person and is lossy; do not parse it.\n\n## Flags\n\n");
     var i = 0;
-    while i < cli.entries(tool.flags) {
+    var at = 0;
+    let flag_count = cli.entries(tool.flags);
+    while i < flag_count {
+        let whole = tool.flags[at..cli.entry_end(tool.flags, at)];
         b = md(heap, b, "- `--");
-        b = md(heap, b, cli.name_of(tool.flags, i));
-        if cli.takes_value(tool.flags, i) {
+        b = md(heap, b, cli.field_of(whole, 1));
+        if !bytes.equal(cli.field_of(whole, 3), "bool") {
             b = md(heap, b, " <");
-            b = md(heap, b, cli.kind_of(tool.flags, i));
+            b = md(heap, b, cli.field_of(whole, 3));
             b = md(heap, b, ">");
         }
         b = md(heap, b, "`");
-        let short = cli.short_of(tool.flags, i);
+        let short = cli.field_of(whole, 2);
         if len(short) > 0 {
             b = md(heap, b, " (`-");
             b = md(heap, b, short);
             b = md(heap, b, "`)");
         }
         b = md(heap, b, ": ");
-        b = md(heap, b, cli.help_of(tool.flags, i));
-        let d = cli.default_of(tool.flags, i);
+        b = md(heap, b, cli.field_of(whole, 6));
+        let d = cli.field_of(whole, 5);
         if len(d) > 0 {
             b = md(heap, b, " Default `");
             b = md(heap, b, d);
             b = md(heap, b, "`.");
         }
         b = md(heap, b, "\n");
+        at = at + len(whole) + 1;
         i = i + 1;
     }
     b = md(heap, b, "\nAn unknown flag is refused (`args.unknown-flag`), never ignored. POSIX spellings are not promised.\n\n## Guarantees\n\n");
@@ -426,8 +443,12 @@ pub fn skill[&h](heap: &!h Heap, tool: Tool, built: Built) -> [heap] buffer.Buff
     }
     b = md(heap, b, "- `132`: the tool trapped. A bug in the tool; there is no JSON.\n- `141`: the reader closed the pipe.\n\n## Rules\n\n");
     i = 0;
-    while i < count(tool.rules) {
-        let tag = bytes.field(tool.rules, ';', i + 1);
+    var from = 0;
+    let rule_count = count(tool.rules);
+    while i < rule_count {
+        let rule_end = cli.entry_end(tool.rules, from);
+        let tag = tool.rules[from..rule_end];
+        from = rule_end + 1;
         let at = rules.find_in(tool.extra_rules, tag);
         b = md(heap, b, "- `");
         b = md(heap, b, tag);

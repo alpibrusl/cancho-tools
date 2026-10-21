@@ -533,6 +533,13 @@ path = ".cancho-vcs/toolbox.cli"
 
 `toolbox.built` is not in the package: each tool generates its own.
 
+**Reading the flag table.** `cli.index_of`, `has`, `text`, `nat` and `parse` walk the table once. A tool that
+loops over the entries itself steps with `cli.entry_end(table, at)` (where the entry starting at `at` ends) and
+reads its fields with `cli.field_of(entry, n)`; `cli.name_of(table, i)` and the other accessors that take an
+index start from the beginning of the table, which is right once and quadratic in a loop over `i`
+(`docs/history.md`; `tests/conformance/test_cli_lookup.py` fails a call that costs more than 120 instructions
+per table byte).
+
 **A tool's own rules.** The 39 shared rules are a catalogue in the package. A tool
 built on it that has rules of its own (a CSV reader's `parse.csv-ragged-row`)
 lists them in `describe.Tool`'s `extra_rules` (`tag|exit|repairable|summary`,

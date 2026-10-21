@@ -117,6 +117,8 @@ def argvs(table, r, count=24):
         if len(n) > 1:
             pool.append(["--" + n[:-1] + "z"])
             pool.append(["--" + n[1:]])
+    for s in [x for x in shorts_in(table) if x and x not in ("-", "=")]:
+        pool.append(["-" + s[0]])
     for s in shorts:
         pool += [["-" + s], ["-" + s, "text"], ["-" + s + "3"], ["-" + s + s], ["-" + s, "-" + s]]
     pool += [["--zzzzzz"], ["-Q"], ["-Q", "--zz=1"], ["operand", "--"], ["a", "b", "-", "c"]]
@@ -148,7 +150,7 @@ def differential_program(table_list):
 
 CODES = {
     1: "entries", 2: "entry", 3: "name_of", 4: "short_of", 5: "kind_of", 6: "role_of", 7: "default_of",
-    8: "help_of", 9: "takes_value", 10: "index_of", 11: "nearest", 20: "slots", 21: "operands",
+    8: "help_of", 9: "takes_value", 10: "index_of", 11: "nearest", 12: "valid", 13: "rules lookup", 14: "rules entries", 15: "entry_end", 16: "field_of", 20: "slots", 21: "operands",
     22: "errors", 23: "has", 24: "text", 25: "nat", 26: "value_index", 27: "value_is_whole",
     30: "no such table", 31: "no mode",
 }
@@ -197,6 +199,43 @@ fn accessors(table: &static [byte]) -> [] int {
         }
         if cli.takes_value(table, i) != cli_old.takes_value(table, i) {
             return 9;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// What `entry_end` is defined to be, by a loop over bytes.
+fn end_by_loop(table: &static [byte], at: int) -> [] int {
+    if at < 0 || at >= len(table) {
+        return len(table);
+    }
+    var j = at;
+    while j < len(table) && int_of(table[j]) != ';' {
+        j = j + 1;
+    }
+    return j;
+}
+
+// `entry_end` at every offset, in and out of the table; `field_of` at every field number of every
+// entry, against `bytes.field`, which it replaces.
+fn cuts(table: &static [byte]) -> [] int {
+    var at = 0 - 3;
+    while at < len(table) + 4 {
+        if cli.entry_end(table, at) != end_by_loop(table, at) {
+            return 15;
+        }
+        at = at + 1;
+    }
+    var i = 0 - 1;
+    while i < cli_old.entries(table) + 1 {
+        let whole = cli_old.entry(table, i);
+        var n = 0 - 2;
+        while n < 9 {
+            if !bytes.equal(cli.field_of(whole, n), bytes.field(whole, '|', n)) {
+                return 16;
+            }
+            n = n + 1;
         }
         i = i + 1;
     }
@@ -340,6 +379,42 @@ fn rules_check[&h](heap: &!h Heap, extra: &static [byte]) -> [heap] int {
     return st;
 }
 
+fn valid_value[&v](kind: &static [byte], value: &v [byte]) -> [] int {
+    if cli.valid(kind, value) != cli_old.valid(kind, value) {
+        return 12;
+    }
+    return 0;
+}
+
+// `valid` for the kinds the table holds and for kinds that are odd on purpose (`choice:` alone,
+// empty choices, one choice, a lone `/`), against values that are, and are not, among them.
+fn values(table: &static [byte]) -> [] int {
+    let kinds = "bool,nat,text,any,path,hex64,choice:,choice:/,choice://,choice:a,choice:a/,choice:/a,choice:a//b,choice:a/b/c,choice:ndjson/text,choice:ab/abc/a";
+    let vals = ",a,b,c,ab,abc,x,ndjson,text,nat,5,12,-1,0123456789,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde";
+    var v = 1;
+    while v <= bytes.count_byte(vals, ',') + 1 {
+        let value = bytes.field(vals, ',', v);
+        var k = 1;
+        while k <= bytes.count_byte(kinds, ',') + 1 {
+            let st = valid_value(bytes.field(kinds, ',', k), value);
+            if st != 0 {
+                return st;
+            }
+            k = k + 1;
+        }
+        var i = 0;
+        while i < cli_old.entries(table) {
+            let st = valid_value(cli_old.kind_of(table, i), value);
+            if st != 0 {
+                return st;
+            }
+            i = i + 1;
+        }
+        v = v + 1;
+    }
+    return 0;
+}
+
 fn readers[&g, &a, &b](args: &g Args, table: &static [byte], pn: &a cli.Parsed, po: &b cli_old.Parsed, name: &static [byte]) -> [args] int {
     if cli.has(pn, table, name) != cli_old.has(po, table, name) {
         return 23;
@@ -429,7 +504,19 @@ fn run[&h, &g](heap: &!h Heap, args: &g Args) -> [heap, args] int {
     if bytes.equal(arg(args, 2), "acc") {
         var st = accessors(table);
         if st == 0 {
+            st = cuts(table);
+        }
+        if st == 0 {
             st = derived(heap, table);
+        }
+        if st == 0 {
+            st = values(table);
+        }
+        if st == 0 {
+            st = rules_check(heap, table);
+        }
+        if st == 0 {
+            st = rules_check(heap, "");
         }
         var k = 3;
         while st == 0 && k < arg_count(args) {
@@ -595,6 +682,110 @@ fn main(world: World) -> [] int {
     }
     release(heap);
     release(args);
+    return status;
+}
+'''
+
+
+# ---- what introspect and skill say of a table, judged by an oracle written here ----------------
+
+RULE_SETS = [
+    "",
+    "args.unknown-flag",
+    "args.unknown-flag;io.not-found;demo.a;demo.b;path.empty;no.such-tag",
+    "demo.b;demo.a;args.bad-value;limit.line-too-long;query.no-such-path",
+    "precondition.no-match;conflict.locked;path.symlink;io.rename-unsupported",
+]
+EXTRA_SETS = [
+    "",
+    "demo.a|8|sometimes|own a;demo.b|3|never|own b;path.empty|8|never|a repeat",
+    "args.unknown-flag|8|never|a repeat;demo.a|6||short",
+    "demo.a|9|always",
+    ";",
+    "demo.b|2|never|b;",
+]
+
+
+def describe_cases():
+    """(flags, rules, extra_rules): every table as the flags of a tool with a middling rule set, and
+    the rule sets against a few flag tables, with and without rules of the tool's own."""
+    out = []
+    for i, t in enumerate(tables()):
+        out.append((t, RULE_SETS[2 + i % 3], EXTRA_SETS[i % len(EXTRA_SETS)]))
+    for rules in RULE_SETS:
+        for extra in EXTRA_SETS:
+            out.append((EDGE[-1], rules, extra))
+    out.append(("a|||||dry-run|x;dry-run||bool|none||the dry run", "args.unknown-flag", ""))
+    out.append(("dry-run||bool|none||no entry holds `dry-run|` at its start but this one", "args.unknown-flag", ""))
+    return out
+
+
+def describe_program(cases):
+    flags, rules, extras = [], [], []
+    for i, (f, r, e) in enumerate(cases):
+        flags.append("    if id == %d {\n        return %s;\n    }\n" % (i, lit(f)))
+        rules.append("    if id == %d {\n        return %s;\n    }\n" % (i, lit(r)))
+        extras.append("    if id == %d {\n        return %s;\n    }\n" % (i, lit(e)))
+    return PROGRAM_DESCRIBE.replace("@@FLAGS@@", "".join(flags)).replace("@@RULES@@", "".join(rules)).replace("@@EXTRAS@@", "".join(extras))
+
+
+PROGRAM_DESCRIBE = r'''edition 5;
+
+import std.bytes;
+import std.io;
+import toolbox.cli;
+import toolbox.describe;
+
+fn flags_by(id: int) -> [] &static [byte] {
+@@FLAGS@@    return "";
+}
+
+fn rules_by(id: int) -> [] &static [byte] {
+@@RULES@@    return "";
+}
+
+fn extras_by(id: int) -> [] &static [byte] {
+@@EXTRAS@@    return "";
+}
+
+fn tool(id: int) -> [] describe.Tool {
+    return describe.Tool { name: "d", version: "0.0.1", summary: "A tool.", usage: "d", output: "document", schema: "d.v1", flags: flags_by(id), operands: "", rules: rules_by(id), extra_rules: extras_by(id), limits: "", reversibility: "reversible-cheap", stdin: "no", guarantees: "" };
+}
+
+fn built() -> [] describe.Built {
+    return describe.Built { authority: "{}", schema: "{}", compiler: "test" };
+}
+
+fn run[&h, &g, &i](heap: &!h Heap, args: &g Args, io: &!i Io) -> [heap, args, io_write] int {
+    if arg_count(args) != 3 {
+        return 2;
+    }
+    var which = 0;
+    if bytes.equal(arg(args, 2), "introspect") {
+        which = 1;
+    } else if bytes.equal(arg(args, 2), "skill") {
+        which = 2;
+    }
+    return describe.answer(heap, io, which, tool(cli.parse_nat(arg(args, 1))), built());
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    release(ffi);
+    release(fs);
+    release(net);
+    release(clock);
+    var status = 0;
+    borrow mut heap as &!h in {
+        borrow args as &g in {
+            borrow mut io as &!i in {
+                status = run(h, g, i);
+            }
+        }
+    }
+    release(heap);
+    release(args);
+    release(io);
     return status;
 }
 '''

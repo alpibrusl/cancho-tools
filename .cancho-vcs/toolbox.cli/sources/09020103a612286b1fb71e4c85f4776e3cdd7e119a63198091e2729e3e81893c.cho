@@ -45,6 +45,16 @@ pub res struct Parsed {
 
 // ---- the table -----------------------------------------------------------
 
+// Every function below that reads an entry reads it where it is: a lookup
+// walks the table once, entry after entry, from the `;` that ended the last
+// one to the `;` that ends this one (`index_of_byte`, which is `memchr`), so
+// its cost is one pass over the table. The accessors that take an index
+// (`name_of(table, i)`) hop over `i` entries to get there, one pass at most.
+// What they must never be is called in a loop over `i`: that is a pass per
+// index, quadratic in the table, and it is what this module did before
+// (`docs/history.md`). A loop over the entries uses `entry_end` to step from
+// one to the next, as `index_of`, `nearest` and `toolbox.describe` do.
+
 pub fn entries(table: &static [byte]) -> [] int {
     if len(table) == 0 {
         return 0;
@@ -52,58 +62,136 @@ pub fn entries(table: &static [byte]) -> [] int {
     return bytes.count_byte(table, ';') + 1;
 }
 
+// Where the entry that starts at `at` ends: the offset of the `;` after it,
+// or the length of the table. The entry after it starts one past that, and
+// there is one after it exactly when the answer is not `len(table)`. An `at`
+// outside the table answers `len(table)`.
+pub fn entry_end(table: &static [byte], at: int) -> [] int {
+    if at < 0 || at >= len(table) {
+        return len(table);
+    }
+    let next = index_of_byte(table[at..len(table)], byte_of(';'));
+    if next < 0 {
+        return len(table);
+    }
+    return at + next;
+}
+
+// The `n`th (from 1) `|`-separated field of one entry, or empty when the
+// entry has fewer: `bytes.field(entry, '|', n)` without its byte-by-byte
+// walk.
+pub fn field_of[&t](whole: &t [byte], n: int) -> [] &t [byte] {
+    if n < 1 {
+        return whole[0..0];
+    }
+    var at = 0;
+    var seen = 1;
+    while seen < n {
+        let next = index_of_byte(whole[at..len(whole)], byte_of('|'));
+        if next < 0 {
+            return whole[0..0];
+        }
+        at = at + next + 1;
+        seen = seen + 1;
+    }
+    let next = index_of_byte(whole[at..len(whole)], byte_of('|'));
+    if next < 0 {
+        return whole[at..len(whole)];
+    }
+    return whole[at..at + next];
+}
+
+// Entry `i`, or empty when the table has no such entry.
 pub fn entry(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(table, ';', i + 1);
+    if i < 0 {
+        return table[0..0];
+    }
+    var at = 0;
+    var k = 0;
+    while k < i {
+        let next = index_of_byte(table[at..len(table)], byte_of(';'));
+        if next < 0 {
+            return table[0..0];
+        }
+        at = at + next + 1;
+        k = k + 1;
+    }
+    return table[at..entry_end(table, at)];
 }
 
 pub fn name_of(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(entry(table, i), '|', 1);
+    return field_of(entry(table, i), 1);
 }
 
 pub fn short_of(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(entry(table, i), '|', 2);
+    return field_of(entry(table, i), 2);
 }
 
 pub fn kind_of(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(entry(table, i), '|', 3);
+    return field_of(entry(table, i), 3);
 }
 
 pub fn role_of(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(entry(table, i), '|', 4);
+    return field_of(entry(table, i), 4);
 }
 
 pub fn default_of(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(entry(table, i), '|', 5);
+    return field_of(entry(table, i), 5);
 }
 
 pub fn help_of(table: &static [byte], i: int) -> [] &static [byte] {
-    return bytes.field(entry(table, i), '|', 6);
+    return field_of(entry(table, i), 6);
 }
 
 pub fn takes_value(table: &static [byte], i: int) -> [] bool {
     return !bytes.equal(kind_of(table, i), "bool");
 }
 
+// Whether the entry `whole` is called `name`: its first field is `name` and
+// nothing more. `name` has no `|` in it (the caller has seen to that), so
+// `name` being the front of the entry and the byte after it a `|` (or the
+// end) is the same as the first field being equal to it.
+fn is_named[&n](whole: &static [byte], name: &n [byte]) -> [] bool {
+    if len(whole) < len(name) {
+        return false;
+    }
+    if !bytes.equal(whole[0..len(name)], name) {
+        return false;
+    }
+    return len(whole) == len(name) || int_of(whole[len(name)]) == '|';
+}
+
 pub fn index_of[&n](table: &static [byte], name: &n [byte]) -> [] int {
+    // No name has a `|` in it, so none can be found.
+    if len(table) == 0 || index_of_byte(name, byte_of('|')) >= 0 {
+        return 0 - 1;
+    }
+    var at = 0;
     var i = 0;
-    let n = entries(table);
-    while i < n {
-        if bytes.equal(name_of(table, i), name) {
+    while at <= len(table) {
+        let end = entry_end(table, at);
+        if is_named(table[at..end], name) {
             return i;
         }
+        at = end + 1;
         i = i + 1;
     }
     return 0 - 1;
 }
 
 fn index_of_short(table: &static [byte], letter: int) -> [] int {
+    if len(table) == 0 {
+        return 0 - 1;
+    }
+    var at = 0;
     var i = 0;
-    let n = entries(table);
-    while i < n {
-        let s = short_of(table, i);
+    while at <= len(table) {
+        let end = entry_end(table, at);
+        let s = field_of(table[at..end], 2);
         if len(s) == 1 && int_of(s[0]) == letter {
             return i;
         }
+        at = end + 1;
         i = i + 1;
     }
     return 0 - 1;
@@ -134,13 +222,17 @@ pub fn parse_nat[&t](text: &t [byte]) -> [] int {
 // Whether `value` is one of `choice:a/b/c`'s choices.
 fn in_choice[&k, &v](kind: &k [byte], value: &v [byte]) -> [] bool {
     let list = kind[7..len(kind)];
-    let n = bytes.count_byte(list, '/') + 1;
-    var i = 1;
-    while i <= n {
-        if bytes.equal(bytes.field(list, '/', i), value) {
+    var at = 0;
+    while at <= len(list) {
+        let next = index_of_byte(list[at..len(list)], byte_of('/'));
+        var end = len(list);
+        if next >= 0 {
+            end = at + next;
+        }
+        if bytes.equal(list[at..end], value) {
             return true;
         }
-        i = i + 1;
+        at = end + 1;
     }
     return false;
 }
@@ -228,20 +320,25 @@ pub fn nearest[&n](table: &static [byte], name: &n [byte]) -> [] int {
     var best = 0 - 1;
     var best_d = 3;
     var tied = false;
-    var i = 0;
-    let n = entries(table);
-    while i < n {
-        if bytes.equal(role_of(table, i), "none") {
-            let d = distance(name, name_of(table, i));
-            if d < best_d {
-                best = i;
-                best_d = d;
-                tied = false;
-            } else if d == best_d {
-                tied = true;
+    if len(table) > 0 {
+        var at = 0;
+        var i = 0;
+        while at <= len(table) {
+            let end = entry_end(table, at);
+            let whole = table[at..end];
+            if bytes.equal(field_of(whole, 4), "none") {
+                let d = distance(name, field_of(whole, 1));
+                if d < best_d {
+                    best = i;
+                    best_d = d;
+                    tied = false;
+                } else if d == best_d {
+                    tied = true;
+                }
             }
+            at = end + 1;
+            i = i + 1;
         }
-        i = i + 1;
     }
     if tied {
         return 0 - 1;

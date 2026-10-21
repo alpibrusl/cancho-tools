@@ -48,6 +48,9 @@ EDGE = [
     ";".join(entry("k%d" % i, chr(97 + i), k, "none", "d%d" % i, "help %d" % i) for i, k in enumerate(KINDS)),
     # a duplicate name: the first one answers
     ";".join([entry("dup", "d", "nat", "none", "1"), entry("dup", "d", "text", "none", "2"), entry("dupe")]),
+    # rule lists of the kind `describe.Tool.extra_rules` holds: a repeat of a shared tag is ignored
+    "args.unknown-flag|8|never|a repeat;demo.ragged|8|sometimes|its own;demo.other|3|never|another;path.empty|8|never|a repeat again",
+    "demo.ragged|8|sometimes|its own",
     # the real shape of a tool's table
     "max-count|m|nat|none|-1|stop after this many;require-match||bool|none||exit 8 when nothing matched;format||choice:ndjson/text|none|ndjson|output form;root||path|root||the directory paths are relative to",
 ]
@@ -157,6 +160,8 @@ import std.bytes;
 import toolbox.cli;
 import toolbox.cli_old;
 import toolbox.fail;
+import toolbox.rules;
+import toolbox.rules_old;
 
 fn table_by(id: int) -> [] &static [byte] {
 @@TABLES@@    return "";
@@ -249,6 +254,90 @@ fn derived[&h](heap: &!h Heap, table: &static [byte]) -> [heap] int {
         i = i + 1;
     }
     return 0;
+}
+
+fn rule_query[&q](extra: &static [byte], q: &q [byte]) -> [] int {
+    if rules.find_in(extra, q) != rules_old.find_in(extra, q) {
+        return 13;
+    }
+    if rules.exit_of_in(extra, q) != rules_old.exit_of_in(extra, q) {
+        return 13;
+    }
+    if rules.find(q) != rules_old.find(q) {
+        return 13;
+    }
+    if rules.exit_of(q) != rules_old.exit_of(q) {
+        return 13;
+    }
+    return 0;
+}
+
+// Every tag of `list` (a catalogue or a tool's own rules), every prefix of it, and the tag with a
+// byte added, asked of both `find_in`s and both `exit_of_in`s with `extra` as the tool's own rules.
+fn rule_names[&h](heap: &!h Heap, extra: &static [byte], list: &static [byte]) -> [heap] int {
+    let n = cli_old.entries(list);
+    var i = 0;
+    while i < n {
+        let name = cli_old.name_of(list, i);
+        var k = 0;
+        while k <= len(name) {
+            let st = rule_query(extra, name[0..k]);
+            if st != 0 {
+                return st;
+            }
+            k = k + 1;
+        }
+        var longer = buffer.empty(heap, len(name) + 2);
+        longer = buffer.append(heap, longer, name);
+        longer = buffer.push(heap, longer, byte_of('x'));
+        var st = 0;
+        borrow longer as &l in {
+            st = rule_query(extra, buffer.bytes(l));
+        }
+        buffer.drop(heap, longer);
+        if st != 0 {
+            return st;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// `toolbox.rules` against `toolbox.rules_old`, with the table as the tool's own rules.
+fn rules_check[&h](heap: &!h Heap, extra: &static [byte]) -> [heap] int {
+    if rules.count() != rules_old.count() || rules.count_in(extra) != rules_old.count_in(extra) {
+        return 14;
+    }
+    var i = 0 - 3;
+    while i < rules_old.count_in(extra) + 3 {
+        if !bytes.equal(rules.entry(i), rules_old.entry(i)) || !bytes.equal(rules.tag_of(i), rules_old.tag_of(i)) {
+            return 14;
+        }
+        if !bytes.equal(rules.repairable_of(i), rules_old.repairable_of(i)) || !bytes.equal(rules.summary_of(i), rules_old.summary_of(i)) {
+            return 14;
+        }
+        if rules.exit_at(i) != rules_old.exit_at(i) {
+            return 14;
+        }
+        if !bytes.equal(rules.entry_in(extra, i), rules_old.entry_in(extra, i)) {
+            return 14;
+        }
+        if !bytes.equal(rules.repairable_in(extra, i), rules_old.repairable_in(extra, i)) || !bytes.equal(rules.summary_in(extra, i), rules_old.summary_in(extra, i)) {
+            return 14;
+        }
+        i = i + 1;
+    }
+    var st = rule_query(extra, "");
+    if st == 0 {
+        st = rule_query(extra, "|");
+    }
+    if st == 0 {
+        st = rule_names(heap, extra, rules_old.catalogue());
+    }
+    if st == 0 {
+        st = rule_names(heap, extra, extra);
+    }
+    return st;
 }
 
 fn readers[&g, &a, &b](args: &g Args, table: &static [byte], pn: &a cli.Parsed, po: &b cli_old.Parsed, name: &static [byte]) -> [args] int {

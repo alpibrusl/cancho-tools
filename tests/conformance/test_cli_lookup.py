@@ -9,7 +9,9 @@ prefixes of other names, short letters that are not letters, every kind, duplica
 seeded random ones -- and asks both modules everything: every accessor at every index (and past both
 ends), `index_of` and `nearest` for every name, every prefix of it, the name plus a byte and the
 name with its first byte replaced, `parse` and every reader on many argument lists. Any difference
-is a failure.
+is a failure. `tests/reference/rules_old.cho` is `toolbox.rules` the same way (its catalogue is read
+by tag with the same per-index scan), and each table also serves as a tool's own rules
+(`extra_rules`) for it.
 
 COST. One program per table size (10, 50, 150, 400 entries) makes N calls of one kind and nothing
 else. Its instructions are counted by `valgrind --tool=callgrind` (exact, and independent of the
@@ -50,7 +52,7 @@ class Differential(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.tables = cli_cases.tables()
-        cls.exe = build(cls.tmp.name, "diffcli", cli_cases.differential_program(cls.tables), [str(ROOT / "tests" / "reference" / "cli_old.cho")])
+        cls.exe = build(cls.tmp.name, "diffcli", cli_cases.differential_program(cls.tables), [str(ROOT / "tests" / "reference" / "cli_old.cho"), str(ROOT / "tests" / "reference" / "rules_old.cho")])
 
     @classmethod
     def tearDownClass(cls):

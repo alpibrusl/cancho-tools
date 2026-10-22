@@ -520,6 +520,67 @@ class Archive(unittest.TestCase):
         self.assertLess(peak_kib * 1024, 2 * cap + (8 << 20))
         self.assertLess(took, 20)
 
+    def test_list_memory_does_not_grow_with_the_archive(self):
+        """`list` reads a piece at a time (docs/archive.md section 12): the peak is the same for a small archive and a large one."""
+        rnd = random.Random(4)
+        words = [bytes(rnd.choice(b"abcdefghijklmnopqrstuvwxyz") for _ in range(rnd.randint(3, 9))) for _ in range(5000)]
+
+        def text(n):
+            out, size = [], 0
+            while size < n:
+                line = b" ".join(rnd.choice(words) for _ in range(10)) + b"\n"
+                out.append(line)
+                size += len(line)
+            return b"".join(out)[:n]
+
+        peaks = {}
+        for label, mib in (("small", 2), ("large", 48)):
+            self.write("%s.tgz" % label, tar_bytes([("a.txt", text(mib << 20)), ("d", None), ("b.txt", b"tail")], gz=True))
+            status, peak = peak_rss([binary("archive"), "--op", "list", "%s.tgz" % label, "--max-bytes", 1 << 30], cwd=self.dir)
+            out = self.archive("--op", "list", "%s.tgz" % label, "--max-bytes", str(1 << 30))
+            check_stream(self, out)
+            self.assertEqual(out.status, 0, out.raw[-300:])
+            self.assertEqual([e["path"] for e in out.entries()], ["a.txt", "d", "b.txt"])
+            self.assertEqual(out.entries()[0]["size"], mib << 20)
+            peaks[label] = peak
+        print("archive: list peak RSS %s KiB for a 2 MiB and a 48 MiB tgz" % peaks, flush=True)
+        self.assertLess(peaks["large"], 8 * 1024)
+        self.assertLess(peaks["large"], peaks["small"] + 2 * 1024)
+
+    def test_a_late_gzip_error_follows_the_entries_already_listed(self):
+        """The error is found at the end of the stream, after the entries before it were printed; the end record says so."""
+        raw = tar_bytes([("a.txt", b"hello"), ("b.txt", b"world" * 1000)])
+        member = bytearray(gzip.compress(raw, 6, mtime=0))
+        member[-8] ^= 0xff
+        self.write("late.tgz", bytes(member))
+        out = self.archive("--op", "list", "late.tgz")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.crc-mismatch"])
+        self.assertEqual([e["path"] for e in out.entries()], ["a.txt", "b.txt"])
+        self.assertEqual(out.end()["ok"], False)
+        self.assertEqual(out.status, 8)
+        # Cut inside the stream: the same, with the DEFLATE rule.
+        whole = gzip.compress(raw, 6, mtime=0)
+        self.write("cut.tgz", whole[: len(whole) // 2])
+        out = self.archive("--op", "list", "cut.tgz")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-deflate"])
+
+    def test_a_pax_header_over_64_kib_is_refused_and_a_cut_one_is_truncated(self):
+        info = tarfile.TarInfo("f.bin")
+        info.size = 3
+        info.pax_headers = {"comment": "x" * 70000}
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w", format=tarfile.PAX_FORMAT) as t:
+            t.addfile(info, io.BytesIO(b"abc"))
+        self.write("fat.tar", buf.getvalue())
+        out = self.archive("--op", "list", "fat.tar")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-header"])
+        self.write("fat-cut.tar", buf.getvalue()[:30000])
+        out = self.archive("--op", "list", "fat-cut.tar")
+        self.assertEqual(out.rules(), ["archive.truncated"])
+
     def test_the_entry_cap_and_the_file_cap(self):
         self.write("many.tar", tar_bytes([("f%d" % i, b"x") for i in range(20)]))
         out = self.archive("--op", "list", "many.tar", "--max-entries", "5")

@@ -621,3 +621,34 @@ pub fn test_the_test_archives_use_what_they_were_built_to_use[&h](heap: &!h Heap
     buffer.drop(heap, odd);
     return 0;
 }
+
+pub fn test_a_pax_header_over_64_kib_is_refused_when_all_there_and_cut_when_not[&h](heap: &!h Heap) -> [heap] int {
+    var body = buffer.empty(heap, 70001);
+    var i = 0;
+    while i < 70000 {
+        body = buffer.push(heap, body, byte_of('x'));
+        i = i + 1;
+    }
+    var t = buffer.empty(heap, 80000);
+    borrow body as &br in {
+        t = special(heap, t, 'x', buffer.bytes(br));
+    }
+    buffer.drop(heap, body);
+    let (t1, w1) = tar.header(heap, t, "f", 3, false, 420);
+    t = tar.body_of(heap, t1, "abc");
+    t = tar.finish(heap, t);
+    borrow t as &tr in {
+        let data = buffer.bytes(tr);
+        // Whole: refused at the header that carries it.
+        let (a, b, failure, at) = by_scan(heap, data, 4096, 10);
+        test.assert_eq(failure, 3);
+        test.assert_eq(at, 0);
+        test.assert_eq(b, 0);
+        // Cut inside the body that was claimed: a cut archive, as for any body that is not all there.
+        let (a2, b2, failure2, at2) = by_scan(heap, data[0..30000], 4096, 10);
+        test.assert_eq(failure2, 1);
+        test.assert_eq(at2, 0);
+    }
+    buffer.drop(heap, t);
+    return 0;
+}

@@ -455,6 +455,11 @@ pub fn parse[&h, &d](heap: &!h Heap, data: &d [byte], most: int) -> [heap] Entri
     return e;
 }
 
+// Whether `data` begins with a whole block of zeros.
+pub fn starts_zero[&d](data: &d [byte]) -> [] bool {
+    return len(data) >= 512 && is_zero(data, 0);
+}
+
 // Whether `data` starts like a tar: a header whose checksum is its bytes', or two zero blocks.
 pub fn looks_like_tar[&d](data: &d [byte]) -> [] bool {
     if len(data) < 512 {
@@ -464,6 +469,419 @@ pub fn looks_like_tar[&d](data: &d [byte]) -> [] bool {
         return len(data) >= 1024 && is_zero(data, 512);
     }
     return checksum_ok(data, 0);
+}
+
+// ---- the incremental reader ----------------------------------------------------------------------------------
+//
+// `scan_feed` reads a tar a piece at a time, in memory that does not grow with the archive: a 512-byte header buffer, the
+// body of one pax or long-name header (at most 64 KiB), and the name of one entry. It makes the entries `parse` makes, with
+// the same names, kinds, sizes, flags and failures, in the same order, and an entry is made only when its whole body (to the
+// block) has been seen, as `parse` makes it only when the body is in the data. docs/archive.md section 12.1.
+//
+// Differences from `parse`, all stated there: the body of a pax or long-name header over 64 KiB is `failure 3` (a header
+// field that cannot be read), and the entries of one `scan_feed` come back in an `Entries` of their own, whose `body` offsets
+// are 0.
+
+pub res struct Scan {
+    hdr: Box[[byte]],
+    st: Box[[int]],
+    // The body of a pax or long-name header being collected.
+    side: buffer.Buffer,
+    // A name (long-name header, pax path) for the next entry.
+    pending: buffer.Buffer,
+    // The name of the entry waiting for its body to pass.
+    cur: buffer.Buffer,
+}
+
+fn c_phase() -> [] int {
+    return 0;
+}
+
+// Bytes of the header held, 0 to 511.
+fn c_hn() -> [] int {
+    return 1;
+}
+
+// Bytes of the body being collected or skipped that are still to come.
+fn c_remaining() -> [] int {
+    return 2;
+}
+
+// Bytes seen, and the offset of the header being read or waited on.
+fn c_pos() -> [] int {
+    return 3;
+}
+
+fn c_header_at() -> [] int {
+    return 4;
+}
+
+fn c_seen() -> [] int {
+    return 5;
+}
+
+fn c_most() -> [] int {
+    return 6;
+}
+
+fn c_has_pending() -> [] int {
+    return 7;
+}
+
+// A pax `size` for the next entry, or -1.
+fn c_pending_size() -> [] int {
+    return 8;
+}
+
+fn c_failure() -> [] int {
+    return 9;
+}
+
+fn c_failure_at() -> [] int {
+    return 10;
+}
+
+// An entry waits for its body to pass: its kind, size, mode, and whether its name was flagged.
+fn c_held() -> [] int {
+    return 11;
+}
+
+fn c_kind() -> [] int {
+    return 12;
+}
+
+fn c_size() -> [] int {
+    return 13;
+}
+
+fn c_mode() -> [] int {
+    return 14;
+}
+
+fn c_flagged() -> [] int {
+    return 15;
+}
+
+// The flag of the pax or long-name header being collected, its declared size, and the padding after it.
+fn c_flag() -> [] int {
+    return 16;
+}
+
+fn c_declared() -> [] int {
+    return 17;
+}
+
+fn c_pad() -> [] int {
+    return 18;
+}
+
+fn ph_header() -> [] int {
+    return 0;
+}
+
+fn ph_collect() -> [] int {
+    return 1;
+}
+
+fn ph_skip() -> [] int {
+    return 2;
+}
+
+// After the end marker: the rest is ignored. And after a failure.
+fn ph_end() -> [] int {
+    return 3;
+}
+
+fn ph_failed() -> [] int {
+    return 4;
+}
+
+fn collect_cap() -> [] int {
+    return 65536;
+}
+
+// An `Entries` with nothing in it.
+pub fn entries_empty[&h](heap: &!h Heap) -> [heap] Entries {
+    return Entries { names: buffer.empty(heap, 256), name_at: vec.empty(heap, 16, 0), name_len: vec.empty(heap, 16, 0), kind: vec.empty(heap, 16, 0), size: vec.empty(heap, 16, 0), body: vec.empty(heap, 16, 0), mode: vec.empty(heap, 16, 0), unsafe: vec.empty(heap, 16, 0), failure: 0, failure_at: 0 };
+}
+
+// A scanner that makes at most `most` entries.
+pub fn scan_open[&h](heap: &!h Heap, most: int) -> [heap] Scan {
+    let st = box_slice(heap, 24, 0);
+    borrow mut st as &!w in {
+        contents(w)[c_most()] = most;
+        contents(w)[c_pending_size()] = 0 - 1;
+    }
+    return Scan { hdr: box_slice(heap, 512, byte_of(0)), st: st, side: buffer.empty(heap, 256), pending: buffer.empty(heap, 1), cur: buffer.empty(heap, 256) };
+}
+
+pub fn scan_drop[&h](heap: &!h Heap, sc: Scan) -> [heap] int {
+    let Scan { hdr, st, side, pending, cur } = sc;
+    unbox_slice(heap, hdr);
+    unbox_slice(heap, st);
+    buffer.drop(heap, side);
+    buffer.drop(heap, pending);
+    buffer.drop(heap, cur);
+    return 0;
+}
+
+// The failure so far (as `Entries.failure`: 0 none) and the offset it was found at.
+pub fn scan_failure[&i](sc: &i Scan) -> [] int {
+    return contents(sc.st)[c_failure()];
+}
+
+pub fn scan_failure_at[&i](sc: &i Scan) -> [] int {
+    return contents(sc.st)[c_failure_at()];
+}
+
+// Whether the end marker has been seen.
+pub fn scan_ended[&i](sc: &i Scan) -> [] bool {
+    return contents(sc.st)[c_phase()] == ph_end();
+}
+
+fn stop[&y](st: &!y [int], why: int) -> [] int {
+    st[c_failure()] = why;
+    st[c_failure_at()] = st[c_header_at()];
+    st[c_phase()] = ph_failed();
+    return why;
+}
+
+// The entry waiting for its body is complete: make it.
+fn emit_held[&h, &y, &k](heap: &!h Heap, st: &!y [int], cur: &k buffer.Buffer, e: Entries) -> [heap] Entries {
+    st[c_held()] = 0;
+    if st[c_seen()] >= st[c_most()] {
+        stop(st, 4);
+        return e;
+    }
+    var held = 0;
+    borrow e as &er in {
+        held = buffer.size(er.names);
+    }
+    st[c_seen()] = st[c_seen()] + 1;
+    return add(heap, e, buffer.bytes(cur), held, st[c_kind()], st[c_size()], 0, st[c_mode()], st[c_flagged()] != 0);
+}
+
+// A pax or long-name header's body is in `side`: take what it says for the next entry.
+fn collected[&h, &y, &s](heap: &!h Heap, st: &!y [int], side: &s buffer.Buffer, pending: buffer.Buffer) -> [heap] buffer.Buffer {
+    var p = pending;
+    let size = st[c_declared()];
+    let data = buffer.bytes(side);
+    if st[c_flag()] == 'x' {
+        let (path_from, path_to) = pax_value(data, 0, size, "path");
+        if path_from >= 0 {
+            buffer.drop(heap, p);
+            p = buffer.append(heap, buffer.empty(heap, path_to - path_from), data[path_from..path_to]);
+            st[c_has_pending()] = 1;
+        }
+        let (size_from, size_to) = pax_value(data, 0, size, "size");
+        if size_from >= 0 {
+            st[c_pending_size()] = decimal(data, size_from, size_to);
+        }
+    } else {
+        buffer.drop(heap, p);
+        p = buffer.append(heap, buffer.empty(heap, size), cstring(data, 0, size));
+        st[c_has_pending()] = 1;
+    }
+    if st[c_pad()] > 0 {
+        st[c_remaining()] = st[c_pad()];
+        st[c_phase()] = ph_skip();
+    } else {
+        st[c_phase()] = ph_header();
+    }
+    return p;
+}
+
+// A whole 512-byte header is in `hdr`.
+fn header_step[&h, &x, &y](heap: &!h Heap, hdr: &x [byte], st: &!y [int], side: buffer.Buffer, pending: buffer.Buffer, cur: buffer.Buffer, e: Entries) -> [heap] (buffer.Buffer, buffer.Buffer, buffer.Buffer, Entries) {
+    var sd = side;
+    var p = pending;
+    var c = cur;
+    var found = e;
+    if is_zero(hdr, 0) {
+        st[c_phase()] = ph_end();
+        return (sd, p, c, found);
+    }
+    if !checksum_ok(hdr, 0) {
+        stop(st, 2);
+        return (sd, p, c, found);
+    }
+    let flag = int_of(hdr[156]);
+    var size = octal(hdr, 124, 12);
+    let mode = octal(hdr, 100, 8);
+    if size < 0 || mode < 0 {
+        stop(st, 3);
+        return (sd, p, c, found);
+    }
+    var body = 0;
+    if has_body(flag) {
+        body = round_up(size);
+    }
+    if flag == 'x' || flag == 'L' {
+        if size > collect_cap() {
+            // Too big to keep: skip it, and refuse it if it is all there (failure 3); if the data ends first, the archive is cut
+            // (failure 1), which is what `parse` says of a body that is not there.
+            st[c_held()] = 2;
+            st[c_remaining()] = body;
+            st[c_phase()] = ph_skip();
+            return (sd, p, c, found);
+        }
+        borrow mut sd as &!w in {
+            buffer.clear(w);
+        }
+        st[c_flag()] = flag;
+        st[c_declared()] = size;
+        st[c_pad()] = body - size;
+        st[c_remaining()] = size;
+        st[c_phase()] = ph_collect();
+        if size == 0 {
+            borrow sd as &sr in {
+                p = collected(heap, st, sr, p);
+            }
+        }
+    } else if flag == 'g' || flag == 'K' {
+        if body > 0 {
+            st[c_remaining()] = body;
+            st[c_phase()] = ph_skip();
+        }
+    } else {
+        if st[c_pending_size()] >= 0 && has_body(flag) {
+            // A pax `size` overrides the field, which is too small for it.
+            size = st[c_pending_size()];
+            body = round_up(size);
+        }
+        st[c_pending_size()] = 0 - 1;
+        // The name: a long name or a pax path, else the prefix and the name.
+        var raw = buffer.empty(heap, 256);
+        if st[c_has_pending()] == 1 {
+            borrow p as &pr in {
+                raw = buffer.append(heap, raw, buffer.bytes(pr));
+            }
+        } else {
+            let has_prefix = bytes.equal(hdr[257..262], "ustar") && int_of(hdr[345]) != 0;
+            if has_prefix {
+                raw = buffer.append(heap, raw, cstring(hdr, 345, 155));
+                raw = buffer.push(heap, raw, byte_of('/'));
+            }
+            raw = buffer.append(heap, raw, cstring(hdr, 0, 100));
+        }
+        buffer.drop(heap, p);
+        p = buffer.empty(heap, 1);
+        st[c_has_pending()] = 0;
+        var flagged = 0;
+        borrow raw as &r in {
+            if unsafe_name(buffer.bytes(r)) {
+                flagged = 1;
+            }
+            buffer.drop(heap, c);
+            c = normalised(heap, buffer.bytes(r));
+        }
+        buffer.drop(heap, raw);
+        st[c_held()] = 1;
+        st[c_kind()] = kind_of(flag);
+        st[c_size()] = size;
+        st[c_mode()] = mode;
+        st[c_flagged()] = flagged;
+        if body > 0 {
+            st[c_remaining()] = body;
+            st[c_phase()] = ph_skip();
+        } else {
+            borrow c as &cr in {
+                found = emit_held(heap, st, cr, found);
+            }
+        }
+    }
+    return (sd, p, c, found);
+}
+
+// Read `data`, the next piece of the tar, and add the entries it completes to `found`.
+pub fn scan_feed[&h, &d](heap: &!h Heap, sc: Scan, data: &d [byte], found: Entries) -> [heap] (Scan, Entries) {
+    let Scan { hdr, st, side, pending, cur } = sc;
+    var sd = side;
+    var p = pending;
+    var c = cur;
+    var e = found;
+    let n = len(data);
+    var i = 0;
+    var h_box = hdr;
+    var s_box = st;
+    borrow mut h_box as &!hw in {
+        borrow mut s_box as &!sw in {
+            let hb = contents(hw);
+            let s = contents(sw);
+            while i < n && s[c_phase()] < ph_end() {
+                let phase = s[c_phase()];
+                if phase == ph_header() {
+                    var take = 512 - s[c_hn()];
+                    if take > n - i {
+                        take = n - i;
+                    }
+                    copy_into(hb[s[c_hn()]..s[c_hn()] + take], data[i..i + take]);
+                    s[c_hn()] = s[c_hn()] + take;
+                    s[c_pos()] = s[c_pos()] + take;
+                    i = i + take;
+                    if s[c_hn()] == 512 {
+                        s[c_hn()] = 0;
+                        s[c_header_at()] = s[c_pos()] - 512;
+                        let (a, b, cc, ee) = header_step(heap, hb, s, sd, p, c, e);
+                        sd = a;
+                        p = b;
+                        c = cc;
+                        e = ee;
+                    }
+                } else if phase == ph_collect() {
+                    var take = s[c_remaining()];
+                    if take > n - i {
+                        take = n - i;
+                    }
+                    sd = buffer.append(heap, sd, data[i..i + take]);
+                    s[c_remaining()] = s[c_remaining()] - take;
+                    s[c_pos()] = s[c_pos()] + take;
+                    i = i + take;
+                    if s[c_remaining()] == 0 {
+                        borrow sd as &sr in {
+                            p = collected(heap, s, sr, p);
+                        }
+                    }
+                } else {
+                    var take = s[c_remaining()];
+                    if take > n - i {
+                        take = n - i;
+                    }
+                    s[c_remaining()] = s[c_remaining()] - take;
+                    s[c_pos()] = s[c_pos()] + take;
+                    i = i + take;
+                    if s[c_remaining()] == 0 {
+                        s[c_phase()] = ph_header();
+                        if s[c_held()] == 1 {
+                            borrow c as &cr in {
+                                e = emit_held(heap, s, cr, e);
+                            }
+                        } else if s[c_held()] == 2 {
+                            s[c_held()] = 0;
+                            stop(s, 3);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return (Scan { hdr: h_box, st: s_box, side: sd, pending: p, cur: c }, e);
+}
+
+// The data has ended: a tar that has not reached its end marker is cut (failure 1, at the header that is missing or whose
+// body is). Answers the failure, 0 for none.
+pub fn scan_finish[&i](sc: &!i Scan) -> [] int {
+    let s = contents(sc.st);
+    if s[c_failure()] != 0 || s[c_phase()] == ph_end() {
+        return s[c_failure()];
+    }
+    s[c_failure()] = 1;
+    if s[c_phase()] == ph_header() {
+        s[c_failure_at()] = s[c_pos()] - s[c_hn()];
+    } else {
+        s[c_failure_at()] = s[c_header_at()];
+    }
+    return 1;
 }
 
 // ---- the writer -------------------------------------------------------------------------------------------

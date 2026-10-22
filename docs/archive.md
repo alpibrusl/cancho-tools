@@ -67,13 +67,14 @@ All **read** from the cancho checkout this was written against (`7e4088b`, 2026-
   `dir_open_new` (`O_EXCL`) and `dir_rename_new` (`renameat2(RENAME_NOREPLACE)`), the machinery `write --create` and
   `move` use (cancho-tools#32, #34). `archive` reuses `toolbox.atomic`'s reading, hashing and temporary names and has its own
   placing step, because `atomic.create` cannot be used for an extract (§6, §11).
-* **Memory is the archive.** A streaming inflater needs a resumable state machine, which a language with no closures
-  and linear resources makes expensive, and the tar reader needs random access to validate before it writes (§4.3).
-  So `archive` holds the expanded archive in memory, up to `--max-bytes`. It therefore **does not claim
-  `bounded_memory`** in the sense `introspect` defines it ("peak memory does not grow with the input's size"):
-  its memory is a small multiple of `--max-bytes`, stated by `introspect` as a limit (`limits`), and
-  `test_archive.py` checks the *bound* on a decompression bomb (§11), not the flatness. This is weaker than the other
-  tools and the design says so rather than rounding up.
+* **Memory is the archive, except for `list`** (§12). A streaming inflater needs a resumable state machine, which a language
+  with no closures and linear resources makes expensive, and the tar reader needs random access to validate before it
+  writes (§4.3). So `extract` and `create` hold the expanded archive in memory, up to `--max-bytes`, and the tool as a whole
+  **does not claim `bounded_memory`** in the sense `introspect` defines it ("peak memory does not grow with the input's
+  size"): their memory is a small multiple of `--max-bytes`, stated by `introspect` as a limit (`limits`), and
+  `test_archive.py` checks the *bound* on a decompression bomb (§11), not the flatness. `list` is the exception since
+  §12: it reads a piece at a time and its peak is flat (2 MiB for a 2 MiB archive and for a 48 MiB one). This is weaker
+  than the other tools and the design says so rather than rounding up.
 
 ### 2.1 The checksum
 
@@ -306,7 +307,7 @@ Each is its own D1 admission. None is in this repository.
    `dir_rename_new` (cancho#351). Worth a cancho issue now; `archive` needs no change when it lands except dropping
    `archive.directory-missing` for a creation, which is a minor version.
 3. **Memory vs. streaming** (§2). Memory bounded by `--max-bytes` (default 64 MiB) is simple; a streaming inflater is a
-   larger piece of work that would restore `bounded_memory`. Accept the weaker guarantee for now?
+   larger piece of work that would restore `bounded_memory`. **Done for `list` (§12); `extract` and `create` are not.**
 4. **Create from stdin / extract from stdin.** Not offered; the MCP route has no pipe for binary data (a `stdin` string
    is text). Accept?
 5. **Ceiling.** Twelve, with `run` and `archive` making eleven (cancho `agent-toolbox.md` D1, amended).
@@ -422,3 +423,87 @@ mutant that looked like it survived once was a stale binary left by the previous
 
 **Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); any `zip`, `xz`,
 `bzip2`, `zstd`; restoring modes and times; a second asker (§1).
+
+## 12. Reading a piece at a time
+
+Status: built for `--op list`; `extract` and `create` still hold the archive (§12.5).
+
+`list` used to read the file whole, inflate it whole and parse the tar whole: 171,444 KiB of peak memory for the 64 MiB
+benchmark archive (§11), and 18,608 KiB to refuse a 512 MiB decompression bomb. It no longer does either.
+
+### 12.1 The pieces
+
+* **`archive.stream`** (`tools/archive/stream.cho`) inflates one gzip member through a 64 KiB input buffer and a 128 KiB output
+  window, driven by a loop in the caller: `step` answers *output* (a piece of at most 32 KiB), *input* (read the file into
+  `room`, tell it how much with `supplied`; 0 is the end of the file), *done*, or an error that is one of
+  `archive.flate.gunzip`'s statuses. There is no coroutine and no closure: the inflater is re-entered **at a symbol
+  boundary**. `codes` asks for input before it starts a symbol it cannot be sure to finish (48 bits are enough for the longest
+  literal/length code, its extra bits, a distance code and its extra bits), a block header waits until 512 bytes are held (a
+  dynamic header is under 300), and what has to be kept between two calls is the bit buffer, the phase and the tables.
+  The window keeps the last 32 KiB as history and slides when 64 KiB have been handed out. The CRC-32 and the length are
+  accumulated on the pieces and checked against the trailer; the trailer is not judged until it is known whether bytes
+  follow it, so the same damage has the same status as in `gunzip`.
+* **`tar.scan_feed`** reads the tar a piece at a time: a 512-byte header buffer, the body of one pax or long-name header,
+  and the name of one entry. It makes the entries `tar.parse` makes, with the same names, kinds, sizes, flags and failures in
+  the same order. An entry is made only when its body (to the block) has been seen, as `parse` makes it only when the body is
+  in the data, so a cut archive lists the same entries and fails at the same offset.
+* **`list_file`** in `archive.cho` ties them: the first two bytes say gzip or not, the first 512 (or 1,024, for a zero first
+  block) bytes of content say tar or one file, and each piece goes to the scanner and each entry it completes is printed.
+
+### 12.2 What is the same, and how that was shown
+
+* **Output.** `list` of twenty cases (GNU tar and gzip of a tree with a link, a single `.gz`, an empty `.gz`, a damaged `.tgz`,
+  a cut `.tgz` and `.tar`, a text file, an empty file, a missing file, a directory, a path outside the root, no operand, an
+  extra operand, `--max-entries` and `--max-bytes` on each) is byte for byte what the previous build printed, but for the
+  differences in §12.3 (two of the twenty showed them, and found one slip of mine: the path in a tar error's detail). All 29 conformance tests of the earlier build pass unchanged.
+* **The inflater.** `tests/stream_test.cho`: streaming equals `gunzip` for inputs from empty to 400 KB (noise, a short
+  alphabet and word text, so stored, fixed and dynamic blocks), at eleven chunk sizes from 1 to 65,536 bytes; and
+  for damage (every byte of the first 200 and last 20 changed, a cut every 13 bytes, a limit, bytes after the member) it
+  gives the same status as `gunzip`. The test found three bugs in the first version, each a real one: giving back the bytes
+  the bit buffer took ahead after the input had moved (a trap, only at small chunk sizes), an empty file reported as
+  truncated rather than as not gzip, and a trailer cut short reported as the wrong status.
+* **The scanner.** `tests/tar_test.cho`: `scan_feed` against `parse` on six archives (the writer's, a GNU long name, a pax
+  path and size, global and link headers, odd and unsafe names, block-sized bodies) at eleven chunk sizes from 1 byte to 88,573, with `--max-entries`
+  of 1, 2 and 1,000, with a cut every 41 bytes, and with one byte changed every 7 bytes (outside bytes 400 to 500 of a block,
+  which no field uses): the same entries (a fingerprint of
+  name, kind, size, mode and flag), the same count, the same failure at the same offset. Five deliberate breaks of the
+  scanner (the pax size ignored, a name kept for the next entry, the entry count off by one, the cut offset wrong, a held
+  entry never made) each turn it red.
+
+### 12.3 What is different
+
+* **Entries come before a late error.** The whole archive was validated before anything was printed; a damaged gzip printed no
+  entries and one error. Now the entries before the damage are printed, and the error follows them: `end` says `ok: false`
+  and `complete: false` as before. A caller that acts on an entry line before it has read the `end` record is acting on an
+  archive that may turn out to be damaged; that was always the contract of a `stream` output and is now visible.
+  When the gzip is damaged the gzip error is the only error (the tar's own failure at that point is not reported), as it was.
+* **A pax or long-name header body over 64 KiB** is `archive.bad-header` (it was read whatever its size). If it is claimed but
+  the data ends first, the archive is `archive.truncated`, as before.
+* **A plain tar larger than `--max-bytes`** lists the entries up to the limit and then reports `limit.archive-too-large`
+  (it printed none).
+* **`--max-bytes` no longer bounds the size of the compressed file**, only what it expands to (a compressed file cannot
+  expand to less than its own length, so a gzip larger than the limit still exceeds it).
+
+### 12.4 What it measured
+
+Linux x86-64, 4 cores, a shared machine; the 64 MiB word text of §11, `tar czf`, 39.6 MB.
+
+| `list` | before | now | `tar tzf` |
+|---|---|---|---|
+| peak resident memory | 171,444 KiB | **2,068 KiB** | |
+| wall time | 1.1 to 1.6 s | **0.80 to 0.83 s** | 0.82 s |
+| the 512 MiB bomb, `--max-bytes 16 MiB` | 18,608 KiB | **2,068 KiB** | |
+| a 2 MiB tgz / a 48 MiB tgz | | 2,132 / 2,068 KiB | |
+
+The time falls, I think, because nothing is allocated, zeroed or copied at the size of the archive (the earlier build grew a
+64 MiB buffer by doubling and walked it a second time for the tar); I did not profile the earlier build to say how much of its
+time that was. The inflater itself is not faster: the `codes` loop is the earlier one, with a check for input at the top of each
+symbol.
+
+### 12.5 What is not done
+
+`extract` still reads, inflates and checks the whole archive before it writes anything (§4.3), and `create` still builds the whole
+tar and the whole gzip in memory. Streaming `extract` is two passes over the file (the first checks every name and every
+destination, as now; the second inflates again and writes each file as it goes), and streaming `create` is a deflate that
+writes its output as it goes into a temporary file that is renamed at the end. Both are possible on these pieces, and
+neither is built: the tool as a whole still does not claim `bounded_memory`.

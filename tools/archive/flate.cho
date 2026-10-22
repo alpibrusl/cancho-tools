@@ -78,7 +78,7 @@ pub fn crc32[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] int {
 
 // ---- the bit reader --------------------------------------------------------------
 
-struct Bits {
+pub struct Bits {
     at: int,
     buf: int,
     count: int,
@@ -87,7 +87,7 @@ struct Bits {
 
 // `n` bits (at most 16), least significant first. `short` is set, and stays set,
 // when the input ends first.
-fn take[&s](src: &s [byte], end: int, b: Bits, n: int) -> [] (Bits, int) {
+pub fn take[&s](src: &s [byte], end: int, b: Bits, n: int) -> [] (Bits, int) {
     var at = b.at;
     var buf = b.buf;
     var count = b.count;
@@ -108,14 +108,14 @@ fn take[&s](src: &s [byte], end: int, b: Bits, n: int) -> [] (Bits, int) {
 // One `[int]` of 320: counts of each code length at 0..16, offsets at 16..32, and the
 // symbols in code order from 32.
 
-fn table_size() -> [] int {
+pub fn table_size() -> [] int {
     return 320;
 }
 
 // Build the table for `n` symbols whose code lengths are `lengths[at..at + n]`. Answers 0
 // for a complete code, a negative number for an over-subscribed one and a positive one
 // for an incomplete one.
-fn construct[&t, &l](table: &!t [int], lengths: &l [int], at: int, n: int) -> [] int {
+pub fn construct[&t, &l](table: &!t [int], lengths: &l [int], at: int, n: int) -> [] int {
     var i = 0;
     while i < 32 {
         table[i] = 0;
@@ -159,7 +159,7 @@ fn construct[&t, &l](table: &!t [int], lengths: &l [int], at: int, n: int) -> []
 
 // Whether `construct`'s answer is usable: a complete code, or the one incomplete
 // code the RFC allows, a single code of length one.
-fn usable[&t](table: &t [int], n: int, answer: int) -> [] bool {
+pub fn usable[&t](table: &t [int], n: int, answer: int) -> [] bool {
     if answer == 0 {
         return true;
     }
@@ -169,7 +169,7 @@ fn usable[&t](table: &t [int], n: int, answer: int) -> [] bool {
 // The lookup table of a code `construct` built: entry `i`, for the next `bits` bits of input (least significant first), is
 // `symbol << 4 | length` when a code of at most `bits` bits begins them, else 0 (a longer code, or no code). Decoding a
 // symbol is then one read of this table instead of a loop over its bits.
-fn build_fast[&t, &f](table: &t [int], fast: &!f [int], bits: int) -> [] int {
+pub fn build_fast[&t, &f](table: &t [int], fast: &!f [int], bits: int) -> [] int {
     let size = 1 << bits;
     var i = 0;
     while i < size {
@@ -199,7 +199,7 @@ fn build_fast[&t, &f](table: &t [int], fast: &!f [int], bits: int) -> [] int {
 }
 
 // The next symbol, or -1 when the bits run out or are not a code of the table.
-fn decode[&s, &t](src: &s [byte], end: int, b: Bits, table: &t [int]) -> [] (Bits, int) {
+pub fn decode[&s, &t](src: &s [byte], end: int, b: Bits, table: &t [int]) -> [] (Bits, int) {
     var cur = b;
     var code = 0;
     var first = 0;
@@ -225,7 +225,7 @@ fn decode[&s, &t](src: &s [byte], end: int, b: Bits, table: &t [int]) -> [] (Bit
 
 // Length and distance codes (RFC 1951 3.2.5): base at 0, extra bits at 32 for lengths of
 // codes 257..285 (index 0..28), and the same at 64 and 96 for the 30 distance codes.
-fn fill_codes[&c](codes: &!c [int]) -> [] int {
+pub fn fill_codes[&c](codes: &!c [int]) -> [] int {
     var i = 0;
     var base = 3;
     while i < 28 {
@@ -413,7 +413,7 @@ fn codes[&h, &s, &a, &t, &d, &f, &g](heap: &!h Heap, src: &s [byte], end: int, b
     return (o, Block { bits: Bits { at: at, buf: buf, count: count, short: short }, produced: made, status: status });
 }
 
-fn fixed_lengths[&l](lengths: &!l [int]) -> [] int {
+pub fn fixed_lengths[&l](lengths: &!l [int]) -> [] int {
     var i = 0;
     while i < 288 {
         if i < 144 {
@@ -441,7 +441,7 @@ fn order_of(i: int) -> [] int {
 }
 
 // A dynamic block's tables, read into `lit` and `dist`. Answers 0, or a status.
-fn dynamic_tables[&s, &a, &t, &l](src: &s [byte], end: int, bits: Bits, lit: &!a [int], dist: &!t [int], lengths: &!l [int]) -> [] (Bits, int) {
+pub fn dynamic_tables[&s, &a, &t, &l](src: &s [byte], end: int, bits: Bits, lit: &!a [int], dist: &!t [int], lengths: &!l [int]) -> [] (Bits, int) {
     var b = bits;
     let (a1, hlit) = take(src, end, b, 5);
     let (a2, hdist) = take(src, end, a1, 5);
@@ -646,7 +646,7 @@ pub res struct Gunzipped {
     name_len: int,
 }
 
-fn le32[&s](src: &s [byte], at: int) -> [] int {
+pub fn le32[&s](src: &s [byte], at: int) -> [] int {
     return int_of(src[at]) | int_of(src[at + 1]) << 8 | int_of(src[at + 2]) << 16 | int_of(src[at + 3]) << 24;
 }
 

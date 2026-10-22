@@ -219,3 +219,27 @@ pub fn test_damage_is_a_status_never_a_trap[&h](heap: &!h Heap) -> [heap] int {
     buffer.drop(heap, z);
     return 0;
 }
+
+pub fn test_a_match_may_not_pass_the_output_cap[&h](heap: &!h Heap) -> [heap] int {
+    // A thousand equal bytes are one literal and matches of up to 258 bytes: a cap inside a match is refused, not overrun.
+    var run = buffer.empty(heap, 1000);
+    var i = 0;
+    while i < 1000 {
+        run = buffer.push(heap, run, byte_of('a'));
+        i = i + 1;
+    }
+    var zipped = buffer.empty(heap, 1);
+    borrow run as &r in {
+        buffer.drop(heap, zipped);
+        zipped = flate.gzip(heap, buffer.bytes(r));
+    }
+    borrow zipped as &z in {
+        test.assert_eq(status_of(heap, buffer.bytes(z), 1000), 0);
+        test.assert_eq(status_of(heap, buffer.bytes(z), 999), 3);
+        test.assert_eq(status_of(heap, buffer.bytes(z), 100), 3);
+        test.assert_eq(status_of(heap, buffer.bytes(z), 258), 3);
+    }
+    buffer.drop(heap, zipped);
+    buffer.drop(heap, run);
+    return 0;
+}

@@ -1,0 +1,240 @@
+edition 7;
+
+import std.buffer;
+import std.bytes;
+import std.test;
+import archive.flate;
+import archive.stream;
+
+// Pseudo-random bytes from a linear congruential generator: `n` of them, `spread` distinct values.
+fn noise[&h](heap: &!h Heap, n: int, spread: int, seed: int) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, n);
+    var x = seed;
+    var i = 0;
+    while i < n {
+        x = x * 1103515245 + 12345 & 0x7fffffff;
+        b = buffer.push(heap, b, byte_of((x >> 8) % spread));
+        i = i + 1;
+    }
+    return b;
+}
+
+// Text-like bytes: words from a small vocabulary, so there are many matches at many distances.
+fn words[&h](heap: &!h Heap, n: int, seed: int) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, n);
+    var x = seed;
+    var have = 0;
+    while have < n {
+        have = have + 7;
+        x = x * 1103515245 + 12345 & 0x7fffffff;
+        let w = (x >> 8) % 40;
+        b = buffer.append(heap, b, "word");
+        b = buffer.push(heap, b, byte_of('a' + w % 26));
+        b = buffer.push(heap, b, byte_of('a' + w / 3));
+        b = buffer.push(heap, b, byte_of(' '));
+    }
+    return b;
+}
+
+// What streaming `gz` through an inflater, `chunk` bytes of input at a time, gives: the output and the final result.
+fn through[&h, &d](heap: &!h Heap, gz: &d [byte], chunk: int, most: int) -> [heap] (buffer.Buffer, int) {
+    var inf = stream.open(heap, most);
+    var out = buffer.empty(heap, 1024);
+    var fed = 0;
+    var result = 0;
+    var going = true;
+    while going {
+        borrow mut inf as &!m in {
+            result = stream.step(m);
+        }
+        if result == stream.output() {
+            borrow inf as &r in {
+                let piece = stream.piece(r);
+                test.assert(len(piece) > 0 && len(piece) <= 32768 + 258);
+                out = buffer.append(heap, out, piece);
+            }
+        } else if result == stream.input() {
+            borrow mut inf as &!m in {
+                var n = 0;
+                let room = stream.room(m);
+                n = len(room);
+                if n > chunk {
+                    n = chunk;
+                }
+                if n > len(gz) - fed {
+                    n = len(gz) - fed;
+                }
+                copy_into(room[0..n], gz[fed..fed + n]);
+                fed = fed + n;
+                stream.supplied(m, n);
+            }
+        } else {
+            going = false;
+        }
+    }
+    stream.drop(heap, inf);
+    return (out, result);
+}
+
+// Streaming `data`, gzipped, at this chunk size gives `data` back and `done`.
+fn streams_to_itself[&h, &d](heap: &!h Heap, data: &d [byte], chunk: int) -> [heap] bool {
+    let zipped = flate.gzip(heap, data);
+    var same = false;
+    borrow zipped as &z in {
+        let (out, result) = through(heap, buffer.bytes(z), chunk, 1073741824);
+        borrow out as &o in {
+            same = result == stream.done() && bytes.equal(buffer.bytes(o), data);
+        }
+        buffer.drop(heap, out);
+    }
+    buffer.drop(heap, zipped);
+    return same;
+}
+
+pub fn test_small_inputs_stream_at_every_chunk_size[&h](heap: &!h Heap) -> [heap] int {
+    var chunk = 1;
+    while chunk < 100000 {
+        test.assert(streams_to_itself(heap, "", chunk));
+        test.assert(streams_to_itself(heap, "a", chunk));
+        test.assert(streams_to_itself(heap, "abcabcabcabcabcabcabcabcabcabc", chunk));
+        test.assert(streams_to_itself(heap, "the quick brown fox jumps over the lazy dog, the quick brown fox jumps over the lazy dog", chunk));
+        chunk = chunk * 7 + 1;
+    }
+    return 0;
+}
+
+pub fn test_inputs_past_the_window_stream[&h](heap: &!h Heap) -> [heap] int {
+    // Noise (stored and fixed blocks), a short alphabet (dynamic blocks, many matches), and words, at sizes either side of the
+    // 32 KiB history, the 64 KiB slide and the 32 KiB piece.
+    var sizes = box_slice(heap, 8, 0);
+    borrow mut sizes as &!w in {
+        contents(w)[0] = 32767;
+        contents(w)[1] = 32768;
+        contents(w)[2] = 32769;
+        contents(w)[3] = 65536;
+        contents(w)[4] = 65537;
+        contents(w)[5] = 98304;
+        contents(w)[6] = 100001;
+        contents(w)[7] = 400000;
+    }
+    var k = 0;
+    while k < 8 {
+        var n = 0;
+        borrow sizes as &s in {
+            n = contents(s)[k];
+        }
+        let a = noise(heap, n, 256, 11 + k);
+        let b = noise(heap, n, 4, 21 + k);
+        let c = words(heap, n, 31 + k);
+        borrow a as &ar in {
+            test.assert(streams_to_itself(heap, buffer.bytes(ar), 65536));
+            test.assert(streams_to_itself(heap, buffer.bytes(ar), 1000));
+        }
+        borrow b as &br in {
+            test.assert(streams_to_itself(heap, buffer.bytes(br), 65536));
+            test.assert(streams_to_itself(heap, buffer.bytes(br), 17));
+        }
+        borrow c as &cr in {
+            test.assert(streams_to_itself(heap, buffer.bytes(cr), 65536));
+            test.assert(streams_to_itself(heap, buffer.bytes(cr), 4093));
+            test.assert(streams_to_itself(heap, buffer.bytes(cr), 3));
+        }
+        buffer.drop(heap, a);
+        buffer.drop(heap, b);
+        buffer.drop(heap, c);
+        k = k + 1;
+    }
+    unbox_slice(heap, sizes);
+    return 0;
+}
+
+// The status of `through` for `zipped`: 0 for a whole member, else the `gunzip` status.
+fn status_through[&h, &z](heap: &!h Heap, zipped: &z [byte], chunk: int, most: int) -> [heap] int {
+    let (out, result) = through(heap, zipped, chunk, most);
+    buffer.drop(heap, out);
+    if result == stream.done() {
+        return 0;
+    }
+    test.assert(stream.is_error(result));
+    return stream.status(result);
+}
+
+fn status_of[&h, &z](heap: &!h Heap, zipped: &z [byte], limit: int) -> [heap] int {
+    let flate.Gunzipped { data, status, name_at, name_len } = flate.gunzip(heap, zipped, limit);
+    buffer.drop(heap, data);
+    return status;
+}
+
+// `zipped` with byte `at` set to `value`.
+fn changed[&h, &z](heap: &!h Heap, zipped: &z [byte], at: int, value: int) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, len(zipped));
+    var i = 0;
+    while i < len(zipped) {
+        if i == at {
+            out = buffer.push(heap, out, byte_of(value));
+        } else {
+            out = buffer.push(heap, out, zipped[i]);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn test_damage_has_the_status_gunzip_gives[&h](heap: &!h Heap) -> [heap] int {
+    let data = words(heap, 6000, 5);
+    var zipped = buffer.empty(heap, 1);
+    borrow data as &d in {
+        buffer.drop(heap, zipped);
+        zipped = flate.gzip(heap, buffer.bytes(d));
+    }
+    borrow zipped as &z in {
+        let all = buffer.bytes(z);
+        let n = len(all);
+        // The whole member, at every chunk size, and its damage: the same status as the whole-input reader.
+        var chunk = 1;
+        while chunk <= 4096 {
+            test.assert_eq(status_through(heap, all, chunk, 1000000), 0);
+            let not_gzip = changed(heap, all, 0, 0x50);
+            borrow not_gzip as &ng in {
+                test.assert_eq(status_through(heap, buffer.bytes(ng), chunk, 1000000), 10);
+            }
+            buffer.drop(heap, not_gzip);
+            chunk = chunk * 8;
+        }
+        // The same damage anywhere: every byte of the first 200 and of the last 20, changed.
+        var at = 0;
+        while at < n {
+            if at < 200 || at + 20 >= n {
+                let bad = changed(heap, all, at, 0xff ^ int_of(all[at]));
+                borrow bad as &br in {
+                    test.assert_eq(status_through(heap, buffer.bytes(br), 5, 1000000), status_of(heap, buffer.bytes(br), 1000000));
+                    test.assert_eq(status_through(heap, buffer.bytes(br), 100000, 1000000), status_of(heap, buffer.bytes(br), 1000000));
+                }
+                buffer.drop(heap, bad);
+            }
+            at = at + 1;
+        }
+        // Every cut is the same status.
+        var cut = 0;
+        while cut < n {
+            test.assert_eq(status_through(heap, all[0..cut], 64, 1000000), status_of(heap, all[0..cut], 1000000));
+            cut = cut + 13;
+        }
+        // The limit.
+        var size = 0;
+        borrow data as &sd in {
+            size = buffer.size(sd);
+        }
+        test.assert_eq(status_through(heap, all, 4096, size - 1), 3);
+        test.assert_eq(status_through(heap, all, 4096, size), 0);
+        // Bytes after the member.
+        var longer = buffer.append(heap, buffer.append(heap, buffer.empty(heap, n + 4), all), "xyz");
+        borrow longer as &lr in {
+            test.assert_eq(status_through(heap, buffer.bytes(lr), 4096, 1000000), 15);
+        }
+        buffer.drop(heap, longer);
+    }
+    buffer.drop(heap, zipped);
+    buffer.drop(heap, data);
+    return 0;
+}

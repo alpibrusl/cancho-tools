@@ -325,3 +325,299 @@ pub fn test_a_long_name_that_claims_more_than_the_data_is_truncated_not_a_trap[&
     }
     return 0;
 }
+
+// ---- the incremental reader against `parse` -------------------------------------------------------------------
+
+// A number that stands for everything `parse` and `scan_feed` say about an entry: its name, kind, size, mode and flag.
+fn fold[&e](entries: &e tar.Entries, from: int) -> [] int {
+    var h = from;
+    var k = 0;
+    while k < tar.count(entries) {
+        let name = tar.name(entries, k);
+        var j = 0;
+        while j < len(name) {
+            h = h * 31 + int_of(name[j]) & 0xffffffffff;
+            j = j + 1;
+        }
+        h = h * 31 + tar.kind(entries, k) & 0xffffffffff;
+        h = h * 31 + tar.size(entries, k) & 0xffffffffff;
+        h = h * 31 + tar.mode(entries, k) & 0xffffffffff;
+        if tar.unsafe_at(entries, k) {
+            h = h * 31 + 7 & 0xffffffffff;
+        }
+        h = h * 31 + 1 & 0xffffffffff;
+        k = k + 1;
+    }
+    return h;
+}
+
+// What `parse` says of `data`: the fingerprint of its entries, how many, the failure, where.
+fn by_parse[&h, &d](heap: &!h Heap, data: &d [byte], most: int) -> [heap] (int, int, int, int) {
+    let e = tar.parse(heap, data, most);
+    var a = 0;
+    var b = 0;
+    var c = 0;
+    var d2 = 0;
+    borrow e as &r in {
+        a = fold(r, 1);
+        b = tar.count(r);
+        c = tar.failure(r);
+        d2 = tar.failure_at(r);
+    }
+    tar.drop(heap, e);
+    return (a, b, c, d2);
+}
+
+// The same by `scan_feed`, `chunk` bytes at a time.
+fn by_scan[&h, &d](heap: &!h Heap, data: &d [byte], chunk: int, most: int) -> [heap] (int, int, int, int) {
+    var sc = tar.scan_open(heap, most);
+    var a = 1;
+    var b = 0;
+    var at = 0;
+    while at < len(data) {
+        var n = chunk;
+        if n > len(data) - at {
+            n = len(data) - at;
+        }
+        let (next, found) = tar.scan_feed(heap, sc, data[at..at + n], tar.entries_empty(heap));
+        sc = next;
+        borrow found as &fr in {
+            a = fold(fr, a);
+            b = b + tar.count(fr);
+        }
+        tar.drop(heap, found);
+        at = at + n;
+    }
+    var failure = 0;
+    var failure_at = 0;
+    borrow mut sc as &!m in {
+        failure = tar.scan_finish(m);
+    }
+    borrow sc as &r in {
+        failure_at = tar.scan_failure_at(r);
+    }
+    tar.scan_drop(heap, sc);
+    return (a, b, failure, failure_at);
+}
+
+fn agree[&h, &d](heap: &!h Heap, data: &d [byte], chunk: int, most: int) -> [heap] bool {
+    let (a1, b1, c1, d1) = by_parse(heap, data, most);
+    let (a2, b2, c2, d2) = by_scan(heap, data, chunk, most);
+    if c1 != 0 {
+        // `parse` keeps the entries before a failure; so does the scanner.
+        return a1 == a2 && b1 == b2 && c1 == c2 && d1 == d2;
+    }
+    return a1 == a2 && b1 == b2 && c2 == 0;
+}
+
+// `data` with the byte at `at` replaced.
+fn with_byte[&h, &d](heap: &!h Heap, data: &d [byte], at: int, value: int) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, len(data));
+    var i = 0;
+    while i < len(data) {
+        if i == at {
+            out = buffer.push(heap, out, byte_of(value));
+        } else {
+            out = buffer.push(heap, out, data[i]);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// A header with the type flag `flag` and a body of `body`, padded: a pax or long-name header, or one of the others.
+fn special[&h, &b](heap: &!h Heap, out: buffer.Buffer, flag: int, body: &b [byte]) -> [heap] buffer.Buffer {
+    let (header, why) = tar.header(heap, out, "special", len(body), false, 420);
+    let buffer.Buffer { held, used } = header;
+    var box = held;
+    borrow mut box as &!w in {
+        let s = contents(w);
+        let at = used - 512;
+        s[at + 156] = byte_of(flag);
+        // The checksum: the sum of the bytes with the field as spaces, six octal digits, a NUL and a space.
+        var sum = 0;
+        var i = 0;
+        while i < 512 {
+            if i >= 148 && i < 156 {
+                sum = sum + 32;
+            } else {
+                sum = sum + int_of(s[at + i]);
+            }
+            i = i + 1;
+        }
+        var k = 5;
+        var v = sum;
+        while k >= 0 {
+            s[at + 148 + k] = byte_of('0' + v % 8);
+            v = v / 8;
+            k = k - 1;
+        }
+        s[at + 154] = byte_of(0);
+        s[at + 155] = byte_of(' ');
+    }
+    return tar.body_of(heap, buffer.Buffer { held: box, used: used }, body);
+}
+
+// Archives that use what the incremental reader has to keep apart: long names, pax paths and sizes, global headers.
+fn rich[&h](heap: &!h Heap, which: int) -> [heap] buffer.Buffer {
+    if which == 0 {
+        return sample(heap);
+    }
+    var t = buffer.empty(heap, 8192);
+    if which == 1 {
+        // A GNU long name (a NUL-ended name in the body of an `L` header), then the entry it names.
+        t = special(heap, t, 'L', "a/very/long/name/that/the/header/field/could/hold/in/the/body/instead.txt\0");
+        let (t1, w1) = tar.header(heap, t, "short", 3, false, 420);
+        t = tar.body_of(heap, t1, "abc");
+        let (t2, w2) = tar.header(heap, t, "after", 0, false, 420);
+        return tar.finish(heap, t2);
+    }
+    if which == 2 {
+        // A pax path and a pax size (the header says 0, the pax record says 7), then a plain entry.
+        t = special(heap, t, 'x', "25 path=px/long/file.txt\n10 size=7\n");
+        let (t1, w1) = tar.header(heap, t, "ignored", 0, false, 420);
+        t = tar.body_of(heap, t1, "1234567");
+        let (t2, w2) = tar.header(heap, t, "plain", 2, false, 420);
+        t = tar.body_of(heap, t2, "hi");
+        return tar.finish(heap, t);
+    }
+    if which == 3 {
+        // A global header and a link header are skipped; unsafe and odd names are flagged and normalised; a directory.
+        t = special(heap, t, 'g', "23 comment=hello there\n");
+        t = special(heap, t, 'K', "ignored link target");
+        let (t1, w1) = tar.header(heap, t, "../escape", 1, false, 420);
+        t = tar.body_of(heap, t1, "x");
+        let (t2, w2) = tar.header(heap, t, "./a//b/./c", 0, false, 420);
+        let (t3, w3) = tar.header(heap, t2, "dir", 0, true, 493);
+        let (t4, w4) = tar.header(heap, t3, "/abs", 0, false, 420);
+        return tar.finish(heap, t4);
+    }
+    if which == 4 {
+        // Only the end marker.
+        return tar.finish(heap, t);
+    }
+    // A 700-byte body, a size that is a whole block, and an empty file.
+    let (t1, w1) = tar.header(heap, t, "big", 700, false, 420);
+    let body = noise(heap, 700, 256, 3);
+    borrow body as &br in {
+        t = tar.body_of(heap, t1, buffer.bytes(br));
+    }
+    buffer.drop(heap, body);
+    let (t2, w2) = tar.header(heap, t, "block", 512, false, 420);
+    let body2 = noise(heap, 512, 256, 4);
+    borrow body2 as &br2 in {
+        t = tar.body_of(heap, t2, buffer.bytes(br2));
+    }
+    buffer.drop(heap, body2);
+    let (t3, w3) = tar.header(heap, t, "empty", 0, false, 420);
+    return tar.finish(heap, t3);
+}
+
+fn noise[&h](heap: &!h Heap, n: int, spread: int, seed: int) -> [heap] buffer.Buffer {
+    var b = buffer.empty(heap, n);
+    var x = seed;
+    var i = 0;
+    while i < n {
+        x = x * 1103515245 + 12345 & 0x7fffffff;
+        b = buffer.push(heap, b, byte_of((x >> 8) % spread));
+        i = i + 1;
+    }
+    return b;
+}
+
+pub fn test_the_scanner_makes_the_entries_parse_makes[&h](heap: &!h Heap) -> [heap] int {
+    var which = 0;
+    while which < 6 {
+        let t = rich(heap, which);
+        borrow t as &d in {
+            let data = buffer.bytes(d);
+            // The whole archive, and with a failure from every kind of cut.
+            var chunk = 1;
+            while chunk < 100000 {
+                test.assert(agree(heap, data, chunk, 1000));
+                test.assert(agree(heap, data, chunk, 1));
+                test.assert(agree(heap, data, chunk, 2));
+                chunk = chunk * 3 + 1;
+            }
+            var cut = 0;
+            while cut < len(data) {
+                test.assert(agree(heap, data[0..cut], 97, 1000));
+                test.assert(agree(heap, data[0..cut], 512, 1000));
+                cut = cut + 41;
+            }
+        }
+        buffer.drop(heap, t);
+        which = which + 1;
+    }
+    return 0;
+}
+
+pub fn test_the_scanner_agrees_with_parse_on_damage[&h](heap: &!h Heap) -> [heap] int {
+    var which = 0;
+    while which < 4 {
+        let t = rich(heap, which);
+        borrow t as &d in {
+            let data = buffer.bytes(d);
+            var at = 0;
+            while at < len(data) {
+                // A byte in a header or its first bytes of body is damaged: both readers see the same archive.
+                if at % 512 < 400 || at % 512 > 500 {
+                    let bad = with_byte(heap, data, at, 0xff ^ int_of(data[at]));
+                    borrow bad as &br in {
+                        test.assert(agree(heap, buffer.bytes(br), 100000, 1000));
+                        test.assert(agree(heap, buffer.bytes(br), 61, 1000));
+                    }
+                    buffer.drop(heap, bad);
+                }
+                at = at + 7;
+            }
+        }
+        buffer.drop(heap, t);
+        which = which + 1;
+    }
+    return 0;
+}
+
+pub fn test_the_test_archives_use_what_they_were_built_to_use[&h](heap: &!h Heap) -> [heap] int {
+    let long = rich(heap, 1);
+    borrow long as &lr in {
+        let e = tar.parse(heap, buffer.bytes(lr), 100);
+        borrow e as &r in {
+            test.assert_eq(tar.failure(r), 0);
+            test.assert_eq(tar.count(r), 2);
+            test.assert(bytes.equal(tar.name(r, 0), "a/very/long/name/that/the/header/field/could/hold/in/the/body/instead.txt"));
+            test.assert(bytes.equal(tar.name(r, 1), "after"));
+            test.assert_eq(tar.size(r, 0), 3);
+        }
+        tar.drop(heap, e);
+    }
+    buffer.drop(heap, long);
+    let pax = rich(heap, 2);
+    borrow pax as &pr in {
+        let e = tar.parse(heap, buffer.bytes(pr), 100);
+        borrow e as &r in {
+            test.assert_eq(tar.failure(r), 0);
+            test.assert_eq(tar.count(r), 2);
+            test.assert(bytes.equal(tar.name(r, 0), "px/long/file.txt"));
+            test.assert_eq(tar.size(r, 0), 7);
+            test.assert(bytes.equal(tar.name(r, 1), "plain"));
+        }
+        tar.drop(heap, e);
+    }
+    buffer.drop(heap, pax);
+    let odd = rich(heap, 3);
+    borrow odd as &or in {
+        let e = tar.parse(heap, buffer.bytes(or), 100);
+        borrow e as &r in {
+            test.assert_eq(tar.failure(r), 0);
+            test.assert_eq(tar.count(r), 4);
+            test.assert(tar.unsafe_at(r, 0));
+            test.assert(bytes.equal(tar.name(r, 1), "a/b/c"));
+            test.assert_eq(tar.kind(r, 2), 2);
+            test.assert(tar.unsafe_at(r, 3));
+        }
+        tar.drop(heap, e);
+    }
+    buffer.drop(heap, odd);
+    return 0;
+}

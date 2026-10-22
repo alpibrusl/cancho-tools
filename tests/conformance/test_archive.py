@@ -21,6 +21,7 @@ import os
 import pathlib
 import random
 import shutil
+import stat
 import struct
 import subprocess
 import tarfile
@@ -213,6 +214,10 @@ class Archive(unittest.TestCase):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
         return p
+
+    def umask(self, value):
+        """The umask of this test, restored after it: the tool inherits it."""
+        self.addCleanup(os.umask, os.umask(value))
 
     def tree(self):
         """The files beneath the work directory as {relative path: bytes}, temporaries included."""
@@ -657,17 +662,134 @@ class Archive(unittest.TestCase):
         # Every problem is reported, not the first.
         self.write("plan2.tar", tar_bytes([("taken.txt", b"x"), ("../x", b"y"), ("missing/dir/f", b"z")]))
         out = self.archive("--op", "extract", "--into", "into", "plan2.tar")
-        self.assertEqual(sorted(out.rules()), ["archive.directory-missing", "archive.unsafe-name", "conflict.exists"])
+        self.assertEqual(sorted(out.rules()), ["archive.unsafe-name", "conflict.exists"])
+        self.assertFalse((self.dir / "into" / "missing").exists(), "a directory was made by a refused extract")
 
-    def test_a_missing_directory_is_named_by_its_shallowest_missing_part(self):
+    def test_a_missing_into_is_named_by_its_shallowest_missing_part_and_is_not_made(self):
         self.write("deep.tar", tar_bytes([("a/b/c/f.txt", b"x"), ("a/b/g.txt", b"y")]))
-        out = self.archive("--op", "extract", "deep.tar")
+        out = self.archive("--op", "extract", "--into", "x/y/z", "deep.tar")
         self.assertEqual(out.rules(), ["archive.directory-missing"])
-        self.assertEqual(out.records[0]["error"]["detail"]["path"], "a")
-        (self.dir / "a" / "b" / "c").mkdir(parents=True)
-        out = self.archive("--op", "extract", "deep.tar")
+        self.assertEqual(out.records[0]["error"]["detail"]["path"], "x")
+        self.assertFalse((self.dir / "x").exists())
+        (self.dir / "x").mkdir()
+        out = self.archive("--op", "extract", "--into", "x/y/z", "deep.tar")
+        self.assertEqual(out.records[0]["error"]["detail"]["path"], "x/y")
+        (self.dir / "x" / "y" / "z").mkdir(parents=True)
+        out = self.archive("--op", "extract", "--into", "x/y/z", "deep.tar")
         self.assertEqual(out.status, 0, out.raw)
-        self.assertEqual((self.dir / "a/b/c/f.txt").read_bytes(), b"x")
+        self.assertEqual((self.dir / "x/y/z/a/b/c/f.txt").read_bytes(), b"x")
+
+    def test_extract_makes_the_directories_an_entry_needs_and_reports_each_once(self):
+        self.umask(0o022)
+        # No directory entries at all: the parents are implied. And a directory entry that is already there, and one that is not.
+        (self.dir / "into" / "have").mkdir(parents=True)
+        self.write("deep.tar", tar_bytes([("a/b/c/f.txt", b"x"), ("a/b/g.txt", b"y"), ("have", None), ("new", None), ("new/sub", None)]))
+        out = self.archive("--op", "extract", "--dry-run", "--into", "into", "deep.tar")
+        check_stream(self, out)
+        self.assertEqual(out.status, 9, out.raw)
+        dry = [(r["type"], r["path"]) for r in out.records if r.get("type") in ("dir", "file")]
+        self.assertFalse((self.dir / "into" / "a").exists(), "a dry run made a directory")
+        out = self.archive("--op", "extract", "--into", "into", "deep.tar")
+        check_stream(self, out)
+        self.assertEqual(out.status, 0, out.raw)
+        wrote = [(r["type"], r["path"]) for r in out.records if r.get("type") in ("dir", "file")]
+        self.assertEqual(wrote, dry)
+        self.assertEqual(wrote.count(("dir", "into/a")), 1)
+        self.assertEqual(
+            [p for t, p in wrote if t == "dir"],
+            ["into/a", "into/a/b", "into/a/b/c", "into/have", "into/new", "into/new/sub"],
+        )
+        self.assertEqual((self.dir / "into/a/b/c/f.txt").read_bytes(), b"x")
+        for d in ["a", "a/b", "a/b/c", "new", "new/sub"]:
+            self.assertEqual(stat.S_IMODE((self.dir / "into" / d).stat().st_mode), 0o755, d)
+
+    def test_extract_restores_the_executable_bit_and_no_other_mode(self):
+        self.umask(0o022)
+        members = []
+        for name, mode in [("plain.txt", 0o644), ("script.sh", 0o755), ("owner-only-exec.sh", 0o700), ("readonly.txt", 0o444), ("group-exec", 0o654)]:
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            info.mode = mode
+            members.append((info, b"x"))
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for info, data in members:
+                t.addfile(info, io.BytesIO(data))
+        self.write("modes.tar", buf.getvalue())
+        out = self.archive("--op", "extract", "modes.tar")
+        self.assertEqual(out.status, 0, out.raw)
+        got = {n: stat.S_IMODE((self.dir / n).stat().st_mode) for n in ["plain.txt", "script.sh", "owner-only-exec.sh", "readonly.txt", "group-exec"]}
+        # The owner's execute bit decides, as `create` decided it; the rest is 0644 less the umask, never the archive's own bits.
+        self.assertEqual(got, {"plain.txt": 0o644, "script.sh": 0o755, "owner-only-exec.sh": 0o755, "readonly.txt": 0o644, "group-exec": 0o644})
+        self.umask(0o077)
+        info = tarfile.TarInfo("umask/x.sh")
+        info.size = 1
+        info.mode = 0o755
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            t.addfile(info, io.BytesIO(b"x"))
+        self.write("umask.tar", buf.getvalue())
+        out = self.archive("--op", "extract", "umask.tar")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual(stat.S_IMODE((self.dir / "umask/x.sh").stat().st_mode), 0o700, "the umask no longer applies")
+        self.assertEqual(stat.S_IMODE((self.dir / "umask").stat().st_mode), 0o700)
+
+    def test_setuid_setgid_and_sticky_entries_are_refused_and_nothing_is_written(self):
+        for mode, label in [(0o4755, "setuid"), (0o2755, "setgid"), (0o1777, "sticky")]:
+            info = tarfile.TarInfo("special")
+            info.size = 1
+            info.mode = mode
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w") as t:
+                ok = tarfile.TarInfo("fine.txt")
+                ok.size = 1
+                t.addfile(ok, io.BytesIO(b"f"))
+                t.addfile(info, io.BytesIO(b"x"))
+            self.write(label + ".tar", buf.getvalue())
+            before = self.tree()
+            out = self.archive("--op", "extract", label + ".tar")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.special-mode"], label)
+            self.assertEqual(out.status, 8, label)
+            self.assertEqual(out.records[0]["error"]["detail"]["path"], "special", label)
+            self.assertEqual(out.records[0]["error"]["detail"]["mode"], mode, label)
+            self.assertEqual(self.tree(), before, label)
+        # A directory entry with a sticky bit is refused the same way.
+        info = tarfile.TarInfo("tmpdir")
+        info.type = tarfile.DIRTYPE
+        info.mode = 0o1777
+        self.write("dir.tar", tar_bytes([info]))
+        out = self.archive("--op", "extract", "dir.tar")
+        self.assertEqual(out.rules(), ["archive.special-mode"])
+        self.assertFalse((self.dir / "tmpdir").exists())
+
+    def test_a_file_where_a_directory_is_needed_is_a_conflict_and_nothing_is_made(self):
+        (self.dir / "into").mkdir()
+        self.write("into/a", b"a file")
+        os.symlink(self.dir / "into", self.dir / "link")
+        self.write("clash.tar", tar_bytes([("fresh/f.txt", b"x"), ("a/b/f.txt", b"y")]))
+        self.write("dirfile.tar", tar_bytes([("a", None)]))
+        before = self.tree()
+        out = self.archive("--op", "extract", "--into", "into", "clash.tar")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["conflict.exists"])
+        self.assertEqual(out.records[0]["error"]["detail"]["path"], "into/a")
+        self.assertEqual(self.tree(), before)
+        # A directory entry whose name is held by a file.
+        out = self.archive("--op", "extract", "--into", "into", "dirfile.tar")
+        self.assertEqual(out.rules(), ["conflict.exists"])
+        self.assertEqual(self.tree(), before)
+
+    def test_a_name_that_is_a_file_and_a_directory_in_one_archive_is_a_duplicate(self):
+        self.write("both.tar", tar_bytes([("x", b"file"), ("x/y.txt", b"under it")]))
+        out = self.archive("--op", "extract", "both.tar")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.duplicate-entry"])
+        self.assertEqual(out.records[0]["error"]["detail"]["path"], "x")
+        self.assertEqual(list(self.dir.glob("x*")), [])
+        self.write("both2.tar", tar_bytes([("p/q", b"file"), ("p/q", None)]))
+        out = self.archive("--op", "extract", "both2.tar")
+        self.assertEqual(out.rules(), ["archive.duplicate-entry"])
 
     def test_extract_never_replaces_and_a_dry_run_writes_nothing(self):
         self.write("one.tar", tar_bytes([("f.txt", b"new")]))
@@ -793,7 +915,8 @@ class Archive(unittest.TestCase):
         seen = {
             "archive.not-an-archive", "archive.bad-gzip", "archive.crc-mismatch", "archive.bad-deflate",
             "archive.bad-checksum", "archive.bad-header", "archive.truncated", "archive.unsafe-name",
-            "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.name-too-long",
+            "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.special-mode",
+            "archive.name-too-long",
             "limit.archive-too-large", "limit.too-many-entries",
         }
         self.assertEqual(declared, seen)
@@ -827,7 +950,15 @@ class Archive(unittest.TestCase):
         self.write("../x.tar" if False else "up.tar", tar_bytes([("../x", b"1")]))
         reached |= set(self.archive("--op", "extract", "up.tar").rules())
         self.write("dir.tar", tar_bytes([("d/f", b"1")]))
-        reached |= set(self.archive("--op", "extract", "dir.tar").rules())
+        reached |= set(self.archive("--op", "extract", "--into", "nowhere", "dir.tar").rules())
+        suid = tarfile.TarInfo("s")
+        suid.size = 1
+        suid.mode = 0o4755
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            t.addfile(suid, io.BytesIO(b"x"))
+        self.write("suid.tar", buf.getvalue())
+        reached |= set(self.archive("--op", "extract", "suid.tar").rules())
         self.write("t/" + "n" * 101, b"1")
         reached |= set(self.archive("--op", "create", "n.tar", "t/" + "n" * 101 if False else "t").rules())
         reached |= set(self.archive("--op", "list", "dir.tar", "--max-entries", "1", "--max-bytes", "10").rules())

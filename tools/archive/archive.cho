@@ -1,4 +1,4 @@
-edition 7;
+edition 9;
 
 // `archive` -- list, extract and create tar archives, gzip-compressed or not, and gzip or
 // gunzip one file.
@@ -37,7 +37,7 @@ import toolbox.place;
 import toolbox.text;
 
 fn extra() -> [] &static [byte] {
-    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|a directory an entry needs does not exist, and cancho has no mkdir;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
+    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
 }
 
 fn flag_table() -> [] &static [byte] {
@@ -45,7 +45,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "archive", version: "0.1.0", summary: "List, extract and create tar archives, gzip-compressed or not, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted)", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
+    return describe.Tool { name: "archive", version: "0.2.0", summary: "List, extract and create tar archives, gzip-compressed or not, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted)", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -309,8 +309,8 @@ fn joined[&h, &p, &n](heap: &!h Heap, prefix: &p [byte], name: &n [byte]) -> [he
 // it may be another extract's, in the middle of its write, and a lock file per extracted file is more
 // than an extract should leave. The step that failed is 1 (temporary exists, or cannot be made), 2 (write),
 // 3 (sync) or 4 (rename).
-fn place_file[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte]) -> [dir_write, file_write] (int, int) {
-    match dir_open_new(dir, temp) {
+fn place_file[&f, &p, &t, &d](dir: &f Dir, name: &p [byte], temp: &t [byte], data: &d [byte], mode: int) -> [dir_write, file_write] (int, int) {
+    match dir_open_new_mode(dir, temp, mode) {
         Opened::Failed(reason) => {
             return (reason, 1);
         }
@@ -387,12 +387,12 @@ fn placing_error[&h, &p](heap: &!h Heap, e: fail.Errors, errno: int, step: int, 
 }
 
 // Write `data` as the new file `shown` beneath `root`. True when it was written.
-fn put_new[&h, &f, &r, &p, &d](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool, buffer.Buffer) {
+fn put_new[&h, &f, &r, &p, &d](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], mode: int, errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool, buffer.Buffer) {
     var digest = atomic.sha256_hex(heap, data);
     var e = errs;
     var ok = false;
     borrow digest as &hx in {
-        let (after, wrote) = put_new_with(heap, fs, root, shown, data, buffer.bytes(hx), e);
+        let (after, wrote) = put_new_with(heap, fs, root, shown, data, buffer.bytes(hx), mode, e);
         e = after;
         ok = wrote;
     }
@@ -401,7 +401,7 @@ fn put_new[&h, &f, &r, &p, &d](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], s
 
 // `put_new`, for a caller that has the data's SHA-256 (hex) already: the digest names the temporary file, and hashing a
 // whole archive a second time was a quarter of the time `create` took.
-fn put_new_with[&h, &f, &r, &p, &d, &x](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], digest: &x [byte], errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool) {
+fn put_new_with[&h, &f, &r, &p, &d, &x](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], shown: &p [byte], data: &d [byte], digest: &x [byte], mode: int, errs: fail.Errors) -> [heap, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, bool) {
     var e = errs;
     var ok = false;
     match place.parent(fs, root, shown, shown) {
@@ -414,7 +414,7 @@ fn put_new_with[&h, &f, &r, &p, &d, &x](heap: &!h Heap, fs: &f Fs(""), root: &r 
             borrow dir as &dd in {
                 let temp = atomic.temp_path(heap, leaf, digest);
                 borrow temp as &tp in {
-                    let (errno, step) = place_file(dd, leaf, buffer.bytes(tp), data);
+                    let (errno, step) = place_file(dd, leaf, buffer.bytes(tp), data, mode);
                     if errno == 0 {
                         ok = true;
                     } else {
@@ -819,6 +819,29 @@ fn destination[&h, &i, &n](heap: &!h Heap, into: &i [byte], name: &n [byte]) -> 
     return joined(heap, into, name);
 }
 
+// The modes extract gives what it makes, as `create` writes them (docs/archive.md §13): 0644, and 0755 for an executable
+// file and for every directory.
+fn mode_file() -> [] int {
+    return 420;
+}
+
+fn mode_executable() -> [] int {
+    return 493;
+}
+
+// The setuid, setgid and sticky bits of a tar mode (0o7000): never restored, so an entry that has one is refused.
+fn special_bits() -> [] int {
+    return 3584;
+}
+
+// The mode a file entry is made with: its owner's execute bit (0o100) decides, as `create` decided it.
+fn file_mode(entry_mode: int) -> [] int {
+    if entry_mode & 64 != 0 {
+        return mode_executable();
+    }
+    return mode_file();
+}
+
 // The end of the shallowest directory in `dir` (a relative path) that does not exist: `len(dir)` when
 // every one does, so a report names the directory to make first.
 fn first_missing[&f, &r, &t](fs: &f Fs(""), root: &r [byte], dir: &t [byte]) -> [fs_read(""), dir_read] int {
@@ -852,46 +875,101 @@ fn was_seen[&k](m: map.Map[int], key: &k [byte]) -> [] (map.Map[int], bool) {
     return (m, found);
 }
 
-// Check one entry against the filesystem: its parent directory exists, and a file's name is free.
-fn check_entry[&h, &f, &r, &t](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], target: &t [byte], directory: bool, reported: map.Map[int], errs: fail.Errors) -> [heap, fs_read(""), dir_read] (fail.Errors, map.Map[int]) {
+// How many bytes of `into` are the destination root the archive does not make: none for `.` or an empty one.
+fn into_length[&n](into: &n [byte]) -> [] int {
+    if len(into) == 0 || bytes.equal(into, ".") {
+        return 0;
+    }
+    return len(into);
+}
+
+// The directory an entry needs: itself if it is one, else the directory that holds it.
+fn needed_directory[&t](target: &t [byte], directory: bool) -> [] &t [byte] {
+    if directory {
+        return target;
+    }
+    return place.parent_of(target);
+}
+
+// Make the directory `rel` beneath the root: (the errno, whether it was made). One that exists already is no error when it is a
+// directory, as `mkdir -p` has it; a file or a link in its place is `EEXIST`.
+fn make_directory[&f, &r, &p](fs: &f Fs(""), root: &r [byte], rel: &p [byte]) -> [fs_read(""), dir_read, dir_write] (int, bool) {
+    match place.parent(fs, root, rel, rel) {
+        DirOpened::Failed(reason) => {
+            return (reason, false);
+        }
+        DirOpened::Ok(opened) => {
+            var dir = opened;
+            var errno = 0;
+            var made = false;
+            borrow dir as &d in {
+                match dir_mkdir(d, place.leaf(rel), mode_executable()) {
+                    Done::Ok(n) => {
+                        made = true;
+                    }
+                    Done::Failed(reason) => {
+                        errno = reason;
+                        if reason == 17 {
+                            match dir_stat(d, place.leaf(rel)) {
+                                DirStat::Ok(kind, size, mtime) => {
+                                    if kind == dirs.kind_directory() {
+                                        errno = 0;
+                                    }
+                                }
+                                DirStat::Failed(other) => {
+                                    errno = other;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            dir_close(dir);
+            return (errno, made);
+        }
+    }
+}
+
+// Check what one entry needs of the filesystem: the directories above it that exist are directories (a file or a link in the way is
+// `conflict.exists`), and a file's own name is free. Directories that do not exist are the archive's to make (docs/archive.md §13).
+fn check_entry[&h, &f, &r, &t](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], target: &t [byte], directory: bool, below: int, reported: map.Map[int], errs: fail.Errors) -> [heap, fs_read(""), dir_read] (fail.Errors, map.Map[int]) {
     var e = errs;
     var seen = reported;
     if bytes.equal(target, ".") {
         return (e, seen);
     }
-    if directory {
-        match place.open_directory(fs, root, target, target) {
-            DirOpened::Ok(opened) => {
-                dir_close(opened);
-            }
-            DirOpened::Failed(reason) => {
-                if reason == 2 || reason == 20 {
-                    let gone = target[0..first_missing(fs, root, target)];
-                    let (after_seen, already) = was_seen(seen, gone);
-                    seen = after_seen;
-                    if !already {
-                        e = refuse(heap, e, "archive.directory-missing", "a directory the archive needs does not exist, and cancho has no mkdir", "create the directory first, then extract again", gone, "", 0);
-                        seen = map.put(heap, seen, gone, 1);
+    let wanted = needed_directory(target, directory);
+    var whole = true;
+    var i = below;
+    while i <= len(wanted) && whole && !bytes.equal(wanted, ".") {
+        if i > below && (i == len(wanted) || int_of(wanted[i]) == '/') {
+            match place.open_directory(fs, root, wanted[0..i], wanted[0..i]) {
+                DirOpened::Ok(opened) => {
+                    dir_close(opened);
+                }
+                DirOpened::Failed(reason) => {
+                    whole = false;
+                    if reason == 20 {
+                        let (after_seen, already) = was_seen(seen, wanted[0..i]);
+                        seen = after_seen;
+                        if !already {
+                            e = fail.simple(heap, e, "conflict.exists", "a file or a link is where a directory is needed; archive never replaces one", "move it aside with `move`, or extract elsewhere with --into", "path", wanted[0..i]);
+                            seen = map.put(heap, seen, wanted[0..i], 1);
+                        }
+                    } else if reason != 2 {
+                        e = fail.io_error(heap, e, reason, true, wanted[0..i]);
                     }
-                } else {
-                    e = fail.io_error(heap, e, reason, true, target);
                 }
             }
         }
+        i = i + 1;
+    }
+    if directory || !whole {
         return (e, seen);
     }
     match place.parent(fs, root, target, target) {
         DirOpened::Failed(reason) => {
-            if reason == 2 || reason == 20 {
-                let up = place.parent_of(target);
-                let missing = up[0..first_missing(fs, root, up)];
-                let (after_seen, already) = was_seen(seen, missing);
-                seen = after_seen;
-                if !already {
-                    e = refuse(heap, e, "archive.directory-missing", "a directory an entry needs does not exist, and cancho has no mkdir", "create the directory first, then extract again", missing, "", 0);
-                    seen = map.put(heap, seen, missing, 1);
-                }
-            } else {
+            if reason != 2 && reason != 20 {
                 e = fail.io_error(heap, e, reason, true, target);
             }
         }
@@ -915,15 +993,82 @@ fn check_entry[&h, &f, &r, &t](heap: &!h Heap, fs: &f Fs(""), root: &r [byte], t
     return (e, seen);
 }
 
+// Make (or, with `dry`, find that extract would make) every directory of `wanted` beneath the first `below` bytes, shallowest first,
+// and report each one made once. `announced` holds what has been dealt with: 1 reported, 2 found to exist and not yet reported.
+fn ensure_directories[&h, &i, &f, &r, &w](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], wanted: &w [byte], below: int, dry: bool, known: map.Map[int], errs: fail.Errors, c: Count) -> [heap, io_write, fs_read(""), dir_read, dir_write] (fail.Errors, Count, map.Map[int], bool) {
+    var e = errs;
+    var count = c;
+    var announced = known;
+    var ok = true;
+    var at = below;
+    while at <= len(wanted) && ok && !count.broken && !bytes.equal(wanted, ".") {
+        if at > below && (at == len(wanted) || int_of(wanted[at]) == '/') {
+            let (after_seen, already) = was_seen(announced, wanted[0..at]);
+            announced = after_seen;
+            if !already {
+                var errno = 0;
+                var made = false;
+                if dry {
+                    match place.open_directory(fs, root, wanted[0..at], wanted[0..at]) {
+                        DirOpened::Ok(opened) => {
+                            dir_close(opened);
+                        }
+                        DirOpened::Failed(reason) => {
+                            if reason == 2 {
+                                made = true;
+                            } else {
+                                errno = reason;
+                            }
+                        }
+                    }
+                } else {
+                    let (why, did) = make_directory(fs, root, wanted[0..at]);
+                    errno = why;
+                    made = did;
+                }
+                if errno != 0 {
+                    e = fail.io_error(heap, e, errno, true, wanted[0..at]);
+                    ok = false;
+                } else if made {
+                    let wrote = put_dir(heap, io, wanted[0..at]);
+                    count = Count { entries: count.entries + 1, bytes: count.bytes, emitted: count.emitted, broken: !wrote };
+                    announced = map.put(heap, announced, wanted[0..at], 1);
+                } else {
+                    announced = map.put(heap, announced, wanted[0..at], 2);
+                }
+            }
+        }
+        at = at + 1;
+    }
+    return (e, count, announced, ok);
+}
+
 // Extract (or, with --dry-run, plan) the entries of `entries`, whose bodies are in `data`, beneath `into`.
 fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], into: &n [byte], entries: &x tar.Entries, data: &d [byte], dry: bool, errs: fail.Errors, c: Count) -> [heap, io_write, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, Count) {
     var e = errs;
     var count = c;
+    let below = into_length(into);
     // 1. The plan: every entry checked, every problem reported, nothing written.
     var seen_names = map.empty(heap, 64, 0, 7);
     var missing = map.empty(heap, 16, 0, 11);
     var k = 0;
     var clean = true;
+    // The destination root is the caller's: it and everything above it must exist.
+    if below > 0 {
+        match place.open_directory(fs, root, into, into) {
+            DirOpened::Ok(opened) => {
+                dir_close(opened);
+            }
+            DirOpened::Failed(reason) => {
+                if reason == 2 {
+                    e = refuse(heap, e, "archive.directory-missing", "the --into directory, or one above it, does not exist; extract makes what an archive holds, never the place it goes", "create the directory first, then extract again", into[0..first_missing(fs, root, into)], "", 0);
+                } else {
+                    e = fail.io_error(heap, e, reason, true, into);
+                }
+                clean = false;
+            }
+        }
+    }
     while k < tar.count(entries) {
         let name = tar.name(entries, k);
         let kind = tar.kind(entries, k);
@@ -934,6 +1079,10 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
             e = refuse(heap, e, "archive.entry-kind", "an entry is not a regular file or a directory; archive extracts nothing else", "list the archive to see its entries", name, "", 0);
             clean = false;
         } else {
+            if tar.mode(entries, k) & special_bits() != 0 {
+                e = refuse(heap, e, "archive.special-mode", "an entry has a setuid, setgid or sticky bit; archive never restores one, and does not drop it silently either", "extract it with another tool, or archive the file without the bit", name, "mode", tar.mode(entries, k));
+                clean = false;
+            }
             if kind == tar.kind_file() {
                 let (after_names, twice) = was_seen(seen_names, name);
                 seen_names = after_names;
@@ -946,7 +1095,7 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
             }
             let target = destination(heap, into, name);
             borrow target as &t in {
-                let (after, reported) = check_entry(heap, fs, root, buffer.bytes(t), kind == tar.kind_directory(), missing, e);
+                let (after, reported) = check_entry(heap, fs, root, buffer.bytes(t), kind == tar.kind_directory(), below, missing, e);
                 e = after;
                 missing = reported;
             }
@@ -954,24 +1103,73 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
         }
         k = k + 1;
     }
-    map.drop(heap, seen_names);
     map.drop(heap, missing);
+    // A name that is a file in one entry and a directory (or the parent of an entry) in another cannot be extracted.
+    var clashes = map.empty(heap, 16, 0, 13);
+    k = 0;
+    while k < tar.count(entries) {
+        let name = tar.name(entries, k);
+        let kind = tar.kind(entries, k);
+        if !tar.unsafe_at(entries, k) && (kind == tar.kind_file() || kind == tar.kind_directory()) {
+            var cut = 0;
+            while cut <= len(name) {
+                if cut > 0 && (cut < len(name) && int_of(name[cut]) == '/' || cut == len(name) && kind == tar.kind_directory()) {
+                    let (after_names, is_file) = was_seen(seen_names, name[0..cut]);
+                    seen_names = after_names;
+                    if is_file {
+                        let (after_clashes, told) = was_seen(clashes, name[0..cut]);
+                        clashes = after_clashes;
+                        if !told {
+                            e = refuse(heap, e, "archive.duplicate-entry", "a name is a file in one entry and a directory in another", "", name[0..cut], "", 0);
+                            clashes = map.put(heap, clashes, name[0..cut], 1);
+                            clean = false;
+                        }
+                    }
+                }
+                cut = cut + 1;
+            }
+        }
+        k = k + 1;
+    }
+    map.drop(heap, clashes);
+    map.drop(heap, seen_names);
     borrow e as &er in {
         clean = clean && fail.count(er) == 0;
         count = sync(heap, io, er, count);
     }
-    // 2. Only a clean plan is written.
+    // 2. Only a clean plan is written; the directories an entry needs are made as it comes.
+    var announced = map.empty(heap, 64, 0, 17);
     k = 0;
     while clean && k < tar.count(entries) && !count.broken {
         let name = tar.name(entries, k);
         let target = destination(heap, into, name);
         borrow target as &t in {
-            if tar.kind(entries, k) == tar.kind_directory() {
-                if !bytes.equal(buffer.bytes(t), ".") {
-                    let wrote = put_dir(heap, io, buffer.bytes(t));
-                    count = Count { entries: count.entries + 1, bytes: count.bytes, emitted: count.emitted, broken: !wrote };
+            let directory = tar.kind(entries, k) == tar.kind_directory();
+            if !bytes.equal(buffer.bytes(t), ".") {
+                let (after, moved, after_known, ok) = ensure_directories(heap, io, fs, root, needed_directory(buffer.bytes(t), directory), below, dry, announced, e, count);
+                e = after;
+                count = moved;
+                announced = after_known;
+                if !ok {
+                    clean = false;
                 }
-            } else {
+            }
+            if clean && directory {
+                if !bytes.equal(buffer.bytes(t), ".") {
+                    // A directory the entry names that already existed is reported once, as it always was.
+                    let (after_known, told) = was_seen(announced, buffer.bytes(t));
+                    announced = after_known;
+                    var existed = false;
+                    borrow announced as &ar in {
+                        existed = map.get(ar, buffer.bytes(t), 0) == 2;
+                    }
+                    if !told || existed {
+                        let wrote = put_dir(heap, io, buffer.bytes(t));
+                        count = Count { entries: count.entries + 1, bytes: count.bytes, emitted: count.emitted, broken: !wrote };
+                        announced = map.put(heap, announced, buffer.bytes(t), 1);
+                    }
+                }
+            } else if clean {
                 let at = tar.body(entries, k);
                 let size = tar.size(entries, k);
                 let content = data[at..at + size];
@@ -983,7 +1181,7 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
                     }
                     buffer.drop(heap, digest);
                 } else {
-                    let (after, ok, digest) = put_new(heap, fs, root, buffer.bytes(t), content, e);
+                    let (after, ok, digest) = put_new(heap, fs, root, buffer.bytes(t), content, file_mode(tar.mode(entries, k)), e);
                     e = after;
                     if ok {
                         borrow digest as &hx in {
@@ -1000,6 +1198,7 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
         buffer.drop(heap, target);
         k = k + 1;
     }
+    map.drop(heap, announced);
     borrow e as &er in {
         count = sync(heap, io, er, count);
     }
@@ -1307,7 +1506,7 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
                     count = Count { entries: gathered.entries, bytes: gathered.bytes, emitted: count.emitted, broken: count.broken };
                     if !dry {
                         borrow digest as &dg in {
-                            let (after, wrote) = put_new_with(heap, fs, root, path.shown(tp), buffer.bytes(ar), buffer.bytes(dg), e);
+                            let (after, wrote) = put_new_with(heap, fs, root, path.shown(tp), buffer.bytes(ar), buffer.bytes(dg), mode_file(), e);
                             e = after;
                             if !wrote {
                                 count = Count { entries: count.entries, bytes: count.bytes, emitted: count.emitted, broken: count.broken };
@@ -1529,13 +1728,14 @@ fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io)
 }
 
 fn main(world: World) -> [] int {
-    let Split { io, ffi, fs, heap, args, net, clock, signals, exec } = split(world);
+    let Split { io, ffi, fs, heap, args, net, clock, signals, exec, tty } = split(world);
     // No foreign code, no network, no clock, no signals, no programs.
     release(ffi);
     release(net);
     release(clock);
     release(signals);
     release(exec);
+    release(tty);
     var status = 0;
     borrow mut heap as &!h in {
         borrow args as &g in {

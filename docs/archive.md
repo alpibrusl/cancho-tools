@@ -53,7 +53,7 @@ All **read** from the cancho checkout this was written against (`7e4088b`, 2026-
   `zlib`/`flate`/`gzip`; at the compiler this repository is pinned to (`62c2be5`) it has no `crc.cho` either (the
   newer compiler of 2026-10-19 does). DEFLATE (RFC 1951), gzip (RFC 1952) and CRC-32 are written in this package
   (`tools/archive/flate.cho`) and move into `std` when a second program wants them, which is cancho `AGENTS.md` §7's rule.
-* **There is no `mkdir`.** `crates/cancho-ir/src/builtin.rs` names these filesystem builtins: `fs_read`, `fs_write`,
+* **There was no `mkdir` (now there is, §13).** *As first written:* `crates/cancho-ir/src/builtin.rs` names these filesystem builtins: `fs_read`, `fs_write`,
   `fs_rename`, `fs_remove`, `open_dir`, `dir_enter`, `dir_open_read`, `dir_open_new`, `dir_open_append`, `dir_rename`,
   `dir_rename_new`, `dir_remove`, `dir_sync`, `dir_list`, `dir_next`, `dir_stat`, `dir_mode`, `dir_own_mode`. None
   creates a directory. **Consequence for `extract`:** it writes regular files, and every directory an entry needs
@@ -136,17 +136,21 @@ its output is larger than gzip's, §11).
 2. Walk every header. Collect every error; for each entry compute its destination beneath `--into` by the `path.*`
    rules (`archive.unsafe-name` for a name that is absolute, has an empty or `..` component, has a NUL, or is over
    4,096 bytes; two *files* whose names normalise equal are `archive.duplicate-entry`; a directory may repeat, as tars do).
-3. Check the plan against the filesystem: every parent directory exists (else `archive.directory-missing`, with the
-   list), no destination exists (else `conflict.exists`, one error per path, so the agent sees them all).
+3. Check the plan against the filesystem (as amended by §13): `--into` and everything above it exist (else
+   `archive.directory-missing`, naming the shallowest missing one; extract never makes its destination root), a name an
+   entry needs as a directory that holds a file or a link is `conflict.exists`, no file destination exists (else
+   `conflict.exists`, one error per path, so the agent sees them all), a name that is a file in one entry and a directory
+   (or the parent of an entry) in another is `archive.duplicate-entry`, and an entry whose mode has a setuid, setgid or
+   sticky bit is `archive.special-mode`.
 4. **Only if the plan is clean** write the files, each atomically (a synced temporary renamed with the kernel refusing a taken name, §6), in archive order, and
    report each. A failure in the middle (a full disk) leaves the files written so far, each whole, and the `end` record
    says `complete:false` and how many were written: the same honesty as `write`, with no pretence of an all-or-nothing
    extract (a rename of a directory would give it, and `mkdir` is the missing builtin of §2).
-5. **Mode, owner and mtime are not restored.** A file gets what `dir_open_new` creates (measured: 0644 under a umask of
-   022), so the execute bit of an entry is lost on extract; there is no `chmod`, `chown` or `utimens` in the language,
-   and a restored mtime would make extract depend on the archive in a way the deterministic-output gate would have to
-   carve out. `create` does read the execute bit (`dir_mode`) and writes 0755 for such a file and for every directory,
-   0644 otherwise.
+5. **Owner and mtime are not restored; the permission bits are (§13).** *As first written:* a file got what `dir_open_new`
+   creates (measured: 0644 under a umask of 022), so the execute bit of an entry was lost on extract; there was no `chmod`,
+   `chown` or `utimens` in the language, and a restored mtime would make extract depend on the archive in a way the
+   deterministic-output gate would have to carve out. `create` reads the execute bit (`dir_mode`) and writes 0755 for such
+   a file and for every directory, 0644 otherwise; `extract` now applies the same two modes.
 
 Race: between step 3 and step 4 another process can create a destination. `dir_rename_new` makes that a
 `conflict.exists` for that one file and never a lost file (the same measured property as `write --create`, cancho-tools#34).
@@ -180,7 +184,8 @@ shared catalogue and its 39 fixtures are untouched; `test_archive.py` holds a fi
 | `archive.unsafe-name` | 4 | an entry name is absolute, has `..` or a NUL (4, as `path.outside-root`: a confinement refusal) |
 | `archive.entry-kind` | 8 | an entry is a link, device, FIFO, sparse or unknown type |
 | `archive.duplicate-entry` | 8 | two entries name the same file |
-| `archive.directory-missing` | 8 | a directory the plan needs does not exist (§2: no `mkdir`); the detail names the shallowest missing one |
+| `archive.directory-missing` | 8 | `--into`, or a directory above it, does not exist (§13: extract makes the directories an entry needs beneath `--into`, never `--into`); the detail names the shallowest missing one |
+| `archive.special-mode` | 8 | (extract) an entry's mode has a setuid, setgid or sticky bit (§13); nothing was extracted |
 | `archive.name-too-long` | 8 | (create) a name does not fit a ustar header |
 | `limit.archive-too-large` | 8 | expanded size would pass `--max-bytes` (or the file grew while it was read) |
 | `limit.too-many-entries` | 8 | more than `--max-entries` entries, or a tree deeper than 64 |
@@ -230,7 +235,7 @@ Also: a dry run makes no mutating call (`strace`); every flag error is a tag wit
 ## 8. Non-goals
 
 `zip`, `xz`, `bzip2`, `zstd`; multi-member gzip and concatenated gzip; random access into a `.tar.gz`; archiving links
-or devices; restoring owner, mtime or special modes; extracting to a path that needs directories created (§2);
+or devices; restoring owner, mtime or special modes; extracting into a `--into` that does not exist (§13);
 streaming from standard input (a path only; `--stdin` can be added if an asker appears); encryption.
 
 ## 9. `curl` and `ssh`: another project, and would cancho help?
@@ -304,7 +309,7 @@ Each is its own D1 admission. None is in this repository.
 1. **A second asker for `archive`** (§1)? Proposed on request, not on a count.
 2. **A `dir_mkdir` builtin in cancho.** Without it `extract` cannot create directories (§2). The cost is a builtin on
    both Rust backends and the compiler in cancho (`CONTRIBUTING.md`, "The compiler in cancho"), edition-gated like
-   `dir_rename_new` (cancho#351). Worth a cancho issue now; `archive` needs no change when it lands except dropping
+   `dir_rename_new` (cancho#351). **Done: `dir_mkdir` (cancho#595) and `dir_open_new_mode` (cancho#596) are built, and §13 uses them.** Worth a cancho issue now; `archive` needs no change when it lands except dropping
    `archive.directory-missing` for a creation, which is a minor version.
 3. **Memory vs. streaming** (§2). Memory bounded by `--max-bytes` (default 64 MiB) is simple; a streaming inflater is a
    larger piece of work that would restore `bounded_memory`. **Done for `list` (§12); `extract` and `create` are not.**
@@ -507,3 +512,29 @@ tar and the whole gzip in memory. Streaming `extract` is two passes over the fil
 destination, as now; the second inflates again and writes each file as it goes), and streaming `create` is a deflate that
 writes its output as it goes into a temporary file that is renamed at the end. Both are possible on these pieces, and
 neither is built: the tool as a whole still does not claim `bounded_memory`.
+
+## 13. Extract makes directories and restores modes
+
+> **Status: built on the compiler of cancho#602 (`dir_mkdir`, cancho#595; `dir_open_new_mode`, cancho#596).** This section
+> amends §2, §4.3 and §5; those sections say where they were first written otherwise.
+
+`extract` was limited by the language, not by choice (§2): it could not make a directory, so an archive of a tree could only
+be unpacked into a tree that already existed, and it dropped the execute bit. Both are now possible.
+
+* **Directories.** A directory an entry needs beneath `--into` and the filesystem lacks is made as the entry is written
+  (`mkdir -p`: each missing component, shallowest first, mode `0755` less the umask), once, and reported as
+  `{"type":"dir","path"}` like a directory entry. An entry that names a directory that exists is reported as before and
+  nothing is made. `--dry-run` reports the same records and makes nothing.
+* **`--into` is not made.** The destination root is the caller's choice, so a missing `--into` (or a missing directory above
+  it) stays `archive.directory-missing`, and its detail now says that. Everything beneath it is the archive's.
+* **A file where a directory is needed** is `conflict.exists`, found in the plan, so nothing is written. Within the archive, a
+  name that is a file in one entry and a directory (or the parent of an entry) in another is `archive.duplicate-entry`.
+* **Modes.** A file is made with `0755` when its entry's mode has the owner's execute bit and `0644` otherwise, which is what
+  `create` writes; the mode is given at creation (`dir_open_new_mode`), so the temporary file never exists with other bits,
+  and the umask applies as always. Owner and mtime are still not restored.
+* **Special bits are refused, not stripped.** An entry whose mode has a setuid, setgid or sticky bit (`0o7000`) is
+  `archive.special-mode`, found in the plan, so nothing is written: dropping the bit silently would extract something other
+  than the archive says, and restoring it would be the one thing an unpacker must never do on its own.
+* **A race** between the plan and the write (another process made a directory in the meantime) is fine when what exists is a
+  directory, as `mkdir -p` treats it, and `conflict.exists` when it is not.
+* **Version.** `0.1.0` to `0.2.0`: `archive.directory-missing` no longer fires for what extract can make, and a new rule exists.

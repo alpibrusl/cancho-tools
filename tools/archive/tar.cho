@@ -455,6 +455,11 @@ pub fn parse[&h, &d](heap: &!h Heap, data: &d [byte], most: int) -> [heap] Entri
     return e;
 }
 
+// Whether `data` begins with a whole block of zeros.
+pub fn starts_zero[&d](data: &d [byte]) -> [] bool {
+    return len(data) >= 512 && is_zero(data, 0);
+}
+
 // Whether `data` starts like a tar: a header whose checksum is its bytes', or two zero blocks.
 pub fn looks_like_tar[&d](data: &d [byte]) -> [] bool {
     if len(data) < 512 {
@@ -713,7 +718,11 @@ fn header_step[&h, &x, &y](heap: &!h Heap, hdr: &x [byte], st: &!y [int], side: 
     }
     if flag == 'x' || flag == 'L' {
         if size > collect_cap() {
-            stop(st, 3);
+            // Too big to keep: skip it, and refuse it if it is all there (failure 3); if the data ends first, the archive is cut
+            // (failure 1), which is what `parse` says of a body that is not there.
+            st[c_held()] = 2;
+            st[c_remaining()] = body;
+            st[c_phase()] = ph_skip();
             return (sd, p, c, found);
         }
         borrow mut sd as &!w in {
@@ -847,6 +856,9 @@ pub fn scan_feed[&h, &d](heap: &!h Heap, sc: Scan, data: &d [byte], found: Entri
                             borrow c as &cr in {
                                 e = emit_held(heap, s, cr, e);
                             }
+                        } else if s[c_held()] == 2 {
+                            s[c_held()] = 0;
+                            stop(s, 3);
                         }
                     }
                 }

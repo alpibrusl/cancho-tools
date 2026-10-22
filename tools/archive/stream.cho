@@ -1,0 +1,698 @@
+edition 7;
+
+module archive.stream;
+
+// `archive.stream` -- a gzip member inflated a piece at a time, in memory that does not grow with the archive.
+//
+// docs/archive.md section 12 is the design. `archive.flate.inflate` needs the whole input and keeps the whole output (its memory
+// is the archive); this one owns a 64 KiB input buffer and a 128 KiB window of output, and is driven by a loop:
+//
+//     let s = stream.open(heap, most);
+//     loop {
+//         match stream.step(&!s) {
+//             stream.output()  => use stream.output(&s) (at most 32 KiB, the bytes since the last call), then step again
+//             stream.input()   => read a file into stream.room(&!s), then stream.supplied(&!s, n)  (n = 0 is the end of the file)
+//             stream.done()    => the member is whole, its CRC-32 and length checked, and nothing follows it
+//             anything else    => stream.status(result) is an `archive.flate.gunzip` status: 1 invalid, 2 truncated, 3 past
+//                                  `most`, 10 not gzip, 11 unsupported, 12 cut short, 13 CRC-32, 14 length, 15 bytes after
+//         }
+//     }
+//
+// There is no coroutine and no closure: the inflater is re-entered at a symbol boundary. `codes` never consumes the bits of a
+// symbol it cannot finish (it asks for input before it starts one), and a block header is not read until 512 bytes are in hand
+// (a dynamic header is under 300), so what has to be kept between two calls is the bit buffer, the phase and the tables.
+//
+// The window keeps the last 32 KiB of output as history for back-references; when 64 KiB have been handed out the history is
+// moved to the front (`copy_within`) and the next piece is written after it.
+
+import archive.flate;
+
+pub res struct Inflater {
+    lit: Box[[int]],
+    dist: Box[[int]],
+    // The code lengths (at 0), then the lookup tables of the literal/length code (at 400, 1024 entries) and of the distance code
+    // (at 1424, 256 entries), as `archive.flate.inflate` lays them out.
+    lengths: Box[[int]],
+    consts: Box[[int]],
+    crc: Box[[int]],
+    state: Box[[int]],
+    inb: Box[[byte]],
+    win: Box[[byte]],
+    name: Box[[byte]],
+}
+
+fn input_size() -> [] int {
+    return 65536;
+}
+
+fn window_size() -> [] int {
+    return 131072;
+}
+
+fn name_room() -> [] int {
+    return 1024;
+}
+
+// How much output a call to `step` produces at most (a match may run 258 past it).
+fn quantum() -> [] int {
+    return 32768;
+}
+
+// ---- the state slice --------------------------------------------------------------------------------------
+
+// The next unread byte of the input, and the end of what is held.
+fn s_at() -> [] int {
+    return 0;
+}
+
+fn s_end() -> [] int {
+    return 1;
+}
+
+// The bit buffer, and how many bits it holds.
+fn s_buf() -> [] int {
+    return 2;
+}
+
+fn s_count() -> [] int {
+    return 3;
+}
+
+// The window: bytes written, and where the piece not yet handed out begins.
+fn s_made() -> [] int {
+    return 4;
+}
+
+fn s_from() -> [] int {
+    return 5;
+}
+
+fn s_last() -> [] int {
+    return 6;
+}
+
+fn s_phase() -> [] int {
+    return 7;
+}
+
+fn s_eof() -> [] int {
+    return 8;
+}
+
+// Bytes of a stored block still to copy.
+fn s_stored() -> [] int {
+    return 9;
+}
+
+// Bytes handed out in all, the running CRC-32 (before the final xor), and the most allowed.
+fn s_total() -> [] int {
+    return 10;
+}
+
+fn s_crc() -> [] int {
+    return 11;
+}
+
+fn s_limit() -> [] int {
+    return 12;
+}
+
+fn s_name_len() -> [] int {
+    return 13;
+}
+
+fn p_head() -> [] int {
+    return 0;
+}
+
+fn p_block() -> [] int {
+    return 1;
+}
+
+fn p_codes() -> [] int {
+    return 2;
+}
+
+fn p_stored() -> [] int {
+    return 3;
+}
+
+fn p_trailer() -> [] int {
+    return 4;
+}
+
+fn p_done() -> [] int {
+    return 5;
+}
+
+// ---- results ------------------------------------------------------------------------------------------------
+
+// Internal: go round again.
+fn go_on() -> [] int {
+    return 0 - 1;
+}
+
+pub fn output() -> [] int {
+    return 0;
+}
+
+pub fn input() -> [] int {
+    return 1;
+}
+
+pub fn done() -> [] int {
+    return 2;
+}
+
+fn failed(status: int) -> [] int {
+    return 100 + status;
+}
+
+// Whether `result` is an error.
+pub fn is_error(result: int) -> [] bool {
+    return result >= 100;
+}
+
+// The `archive.flate.gunzip` status an error stands for.
+pub fn status(result: int) -> [] int {
+    return result - 100;
+}
+
+// ---- the resource -----------------------------------------------------------------------------------------------
+
+// A new inflater for one gzip member, which will hand out at most `most` bytes in all.
+pub fn open[&h](heap: &!h Heap, most: int) -> [heap] Inflater {
+    var inf = Inflater { lit: box_slice(heap, flate.table_size(), 0), dist: box_slice(heap, flate.table_size(), 0), lengths: box_slice(heap, 1680, 0), consts: box_slice(heap, 128, 0), crc: box_slice(heap, 256, 0), state: box_slice(heap, 16, 0), inb: box_slice(heap, input_size(), byte_of(0)), win: box_slice(heap, window_size(), byte_of(0)), name: box_slice(heap, name_room(), byte_of(0)) };
+    borrow mut inf as &!m in {
+        flate.fill_codes(contents(m.consts));
+        flate.crc_fill(contents(m.crc));
+        let st = contents(m.state);
+        st[s_crc()] = 0xffffffff;
+        st[s_limit()] = most;
+        st[s_phase()] = p_head();
+    }
+    return inf;
+}
+
+pub fn drop[&h](heap: &!h Heap, inf: Inflater) -> [heap] int {
+    let Inflater { lit, dist, lengths, consts, crc, state, inb, win, name } = inf;
+    unbox_slice(heap, lit);
+    unbox_slice(heap, dist);
+    unbox_slice(heap, lengths);
+    unbox_slice(heap, consts);
+    unbox_slice(heap, crc);
+    unbox_slice(heap, state);
+    unbox_slice(heap, inb);
+    unbox_slice(heap, win);
+    unbox_slice(heap, name);
+    return 0;
+}
+
+// Where the next input goes: read into this, then say how much with `supplied`.
+pub fn room[&i](inf: &!i Inflater) -> [] &!i [byte] {
+    let end = contents(inf.state)[s_end()];
+    let s = contents(inf.inb);
+    return s[end..input_size()];
+}
+
+// `n` bytes were written into `room`; 0 says the file has ended.
+pub fn supplied[&i](inf: &!i Inflater, n: int) -> [] int {
+    let st = contents(inf.state);
+    if n == 0 {
+        st[s_eof()] = 1;
+    } else {
+        st[s_end()] = st[s_end()] + n;
+    }
+    return 0;
+}
+
+// The piece of output the last `step` produced.
+pub fn piece[&i](inf: &i Inflater) -> [] &i [byte] {
+    let st = contents(inf.state);
+    return contents(inf.win)[st[s_from()]..st[s_made()]];
+}
+
+// The name in the gzip header (FNAME), up to 1024 bytes of it, or empty.
+pub fn header_name[&i](inf: &i Inflater) -> [] &i [byte] {
+    return contents(inf.name)[0..contents(inf.state)[s_name_len()]];
+}
+
+// Bytes handed out so far.
+pub fn total[&i](inf: &i Inflater) -> [] int {
+    return contents(inf.state)[s_total()];
+}
+
+// ---- phases ---------------------------------------------------------------------------------------------------------
+
+// Move what is unread to the front of the input, so `room` has the most room, and ask for more.
+fn want[&s, &r](st: &!s [int], inb: &!r [byte]) -> [] int {
+    // Whole bytes the bit buffer took ahead go back to the input first: they are about to be moved, and the bit buffer would
+    // otherwise name bytes that are gone (the end of the stream gives them back to find the trailer). The bits of a byte only
+    // partly used stay in the buffer: the oldest `count % 8` of them.
+    let ahead = st[s_count()] / 8;
+    if ahead > 0 {
+        st[s_at()] = st[s_at()] - ahead;
+        st[s_count()] = st[s_count()] - ahead * 8;
+        st[s_buf()] = st[s_buf()] & (1 << st[s_count()]) - 1;
+    }
+    let at = st[s_at()];
+    let end = st[s_end()];
+    if at > 0 {
+        copy_within(inb, 0, at, end - at);
+        st[s_end()] = end - at;
+        st[s_at()] = 0;
+    }
+    return input();
+}
+
+// Hand out `win[from..made]`: count it, check the bound.
+fn emit[&s, &w, &c](st: &!s [int], win: &w [byte], table: &c [int]) -> [] int {
+    let from = st[s_from()];
+    let made = st[s_made()];
+    if st[s_total()] + (made - from) > st[s_limit()] {
+        return failed(3);
+    }
+    st[s_crc()] = flate.crc_update(table, st[s_crc()], win[from..made]);
+    st[s_total()] = st[s_total()] + (made - from);
+    return output();
+}
+
+// The gzip header (RFC 1952): everything up to the first block, from the front of the input.
+fn head[&s, &r, &n](st: &!s [int], inb: &!r [byte], name: &!n [byte]) -> [] int {
+    let end = st[s_end()];
+    let eof = st[s_eof()];
+    if end >= 2 && (int_of(inb[0]) != 0x1f || int_of(inb[1]) != 0x8b) {
+        return failed(10);
+    }
+    if end < 2 && eof == 1 {
+        return failed(10);
+    }
+    // No member is shorter than 18 bytes (a header, a stored empty block, a trailer), as `archive.flate.gunzip` says.
+    if end < 18 {
+        if eof == 1 {
+            return failed(12);
+        }
+        return want(st, inb);
+    }
+    let flags = int_of(inb[3]);
+    if int_of(inb[2]) != 8 || flags & 0xe0 != 0 {
+        return failed(11);
+    }
+    var at = 10;
+    var more = false;
+    if flags & 4 != 0 {
+        if at + 2 > end {
+            more = true;
+        } else {
+            at = at + 2 + (int_of(inb[at]) | int_of(inb[at + 1]) << 8);
+        }
+    }
+    var name_from = 0;
+    var name_size = 0;
+    if flags & 8 != 0 && !more {
+        name_from = at;
+        while at < end && int_of(inb[at]) != 0 {
+            at = at + 1;
+        }
+        name_size = at - name_from;
+        if at >= end {
+            more = true;
+        } else {
+            at = at + 1;
+        }
+    }
+    if flags & 16 != 0 && !more {
+        while at < end && int_of(inb[at]) != 0 {
+            at = at + 1;
+        }
+        if at >= end {
+            more = true;
+        } else {
+            at = at + 1;
+        }
+    }
+    if flags & 2 != 0 && !more {
+        at = at + 2;
+    }
+    if at > end {
+        more = true;
+    }
+    if more {
+        if eof == 1 {
+            return failed(12);
+        }
+        if at > input_size() || end >= input_size() {
+            return failed(11);
+        }
+        return want(st, inb);
+    }
+    var kept = name_size;
+    if kept > name_room() {
+        kept = name_room();
+    }
+    copy_into(name[0..kept], inb[name_from..name_from + kept]);
+    st[s_name_len()] = kept;
+    st[s_at()] = at;
+    st[s_buf()] = 0;
+    st[s_count()] = 0;
+    st[s_phase()] = p_block();
+    return go_on();
+}
+
+// Align to a byte, give back whole bytes the bit buffer took ahead, and go to the trailer.
+fn finish_stream[&s](st: &!s [int]) -> [] int {
+    st[s_at()] = st[s_at()] - st[s_count()] / 8;
+    st[s_buf()] = 0;
+    st[s_count()] = 0;
+    st[s_phase()] = p_trailer();
+    return 0;
+}
+
+// A block header, and for a compressed block its tables.
+fn block_head[&s, &r, &a, &t, &g](st: &!s [int], inb: &!r [byte], lit: &!a [int], dist: &!t [int], lengths: &!g [int]) -> [] int {
+    let at = st[s_at()];
+    let end = st[s_end()];
+    let count = st[s_count()];
+    if end - at + count / 8 < 512 && st[s_eof()] == 0 {
+        return want(st, inb);
+    }
+    var b = flate.Bits { at: at, buf: st[s_buf()], count: count, short: false };
+    let (n1, is_final) = flate.take(inb, end, b, 1);
+    let (n2, kind) = flate.take(inb, end, n1, 2);
+    b = n2;
+    if b.short {
+        return failed(2);
+    }
+    st[s_last()] = is_final;
+    if kind == 0 {
+        // Stored: drop the bits of the current byte, give back whole bytes the reader took ahead.
+        let pos = b.at - b.count / 8;
+        if pos + 4 > end {
+            return failed(2);
+        }
+        let size = int_of(inb[pos]) | int_of(inb[pos + 1]) << 8;
+        let inverse = int_of(inb[pos + 2]) | int_of(inb[pos + 3]) << 8;
+        if size ^ inverse != 0xffff {
+            return failed(1);
+        }
+        st[s_at()] = pos + 4;
+        st[s_buf()] = 0;
+        st[s_count()] = 0;
+        st[s_stored()] = size;
+        st[s_phase()] = p_stored();
+        return go_on();
+    }
+    if kind == 3 {
+        return failed(1);
+    }
+    if kind == 1 {
+        flate.fixed_lengths(lengths);
+        flate.construct(lit, lengths, 0, 288);
+        flate.construct(dist, lengths, 288, 30);
+    } else {
+        let (after, why) = flate.dynamic_tables(inb, end, b, lit, dist, lengths);
+        b = after;
+        if why != 0 {
+            return failed(why);
+        }
+    }
+    flate.build_fast(lit, lengths[400..1424], 10);
+    flate.build_fast(dist, lengths[1424..1680], 8);
+    st[s_at()] = b.at;
+    st[s_buf()] = b.buf;
+    st[s_count()] = b.count;
+    st[s_phase()] = p_codes();
+    return go_on();
+}
+
+// The symbols of a compressed block into the window, until `until` bytes have been made, the block ends, or the input runs
+// out. Answers the bits, the bytes made, and why it stopped: 0 the block ended, 4 `until` was reached, 5 the input has to be
+// refilled (nothing of the symbol it stopped at was taken), 1 invalid, 2 cut short.
+fn codes[&s, &a, &t, &d, &f, &g, &w](src: &s [byte], end: int, bits: flate.Bits, lit: &a [int], dist: &t [int], consts: &d [int], flit: &f [int], fdist: &g [int], win: &!w [byte], made0: int, until: int, more: bool) -> [] (flate.Bits, int, int) {
+    var at = bits.at;
+    var buf = bits.buf;
+    var count = bits.count;
+    var short = false;
+    var made = made0;
+    var status = 4;
+    var going = true;
+    while going && made < until {
+        while count <= 48 && at < end {
+            buf = buf | int_of(src[at]) << count;
+            count = count + 8;
+            at = at + 1;
+        }
+        if count < 48 && more {
+            // Not enough to be sure of a whole symbol: ask before taking any of it.
+            going = false;
+            status = 5;
+        } else {
+            var symbol = 0;
+            var extra = 0;
+            var far = 0;
+            var more_bits = 0;
+            if count >= 48 {
+                // 48 bits are enough for a literal/length code (15), its extra bits (5), a distance code (15) and its extra
+                // bits (13), so none of the reads below can run out of input.
+                let e = flit[buf & 1023];
+                if e != 0 {
+                    symbol = e >> 4;
+                    buf = buf >> (e & 15);
+                    count = count - (e & 15);
+                } else {
+                    let (nb, sy) = flate.decode(src, end, flate.Bits { at: at, buf: buf, count: count, short: short }, lit);
+                    at = nb.at;
+                    buf = nb.buf;
+                    count = nb.count;
+                    short = nb.short;
+                    symbol = sy;
+                }
+                if symbol > 256 && symbol <= 285 {
+                    let k = symbol - 257;
+                    let width = consts[32 + k];
+                    extra = buf & (1 << width) - 1;
+                    buf = buf >> width;
+                    count = count - width;
+                    let e2 = fdist[buf & 255];
+                    if e2 != 0 {
+                        far = e2 >> 4;
+                        buf = buf >> (e2 & 15);
+                        count = count - (e2 & 15);
+                    } else {
+                        let (nb, sy) = flate.decode(src, end, flate.Bits { at: at, buf: buf, count: count, short: short }, dist);
+                        at = nb.at;
+                        buf = nb.buf;
+                        count = nb.count;
+                        short = nb.short;
+                        far = sy;
+                    }
+                    if far >= 0 && far < 30 {
+                        let width2 = consts[96 + far];
+                        more_bits = buf & (1 << width2) - 1;
+                        buf = buf >> width2;
+                        count = count - width2;
+                    }
+                }
+            } else {
+                // The last bytes of the stream: the careful way, which knows what running out means.
+                var bb = flate.Bits { at: at, buf: buf, count: count, short: short };
+                let (b1, sy) = flate.decode(src, end, bb, lit);
+                bb = b1;
+                symbol = sy;
+                if symbol > 256 && symbol <= 285 {
+                    let (a1, ex) = flate.take(src, end, bb, consts[32 + symbol - 257]);
+                    bb = a1;
+                    extra = ex;
+                    let (a2, fr) = flate.decode(src, end, bb, dist);
+                    bb = a2;
+                    far = fr;
+                    if far >= 0 && far < 30 {
+                        let (a3, mo) = flate.take(src, end, bb, consts[96 + far]);
+                        bb = a3;
+                        more_bits = mo;
+                    }
+                }
+                at = bb.at;
+                buf = bb.buf;
+                count = bb.count;
+                short = bb.short;
+            }
+            if symbol < 0 {
+                going = false;
+                if short {
+                    status = 2;
+                } else {
+                    status = 1;
+                }
+            } else if symbol < 256 {
+                win[made] = byte_of(symbol);
+                made = made + 1;
+            } else if symbol == 256 {
+                going = false;
+                status = 0;
+            } else if symbol > 285 {
+                going = false;
+                status = 1;
+            } else if far < 0 || far >= 30 {
+                going = false;
+                if short {
+                    status = 2;
+                } else {
+                    status = 1;
+                }
+            } else {
+                let length = consts[symbol - 257] + extra;
+                let distance = consts[64 + far] + more_bits;
+                if short {
+                    going = false;
+                    status = 2;
+                } else if distance > made {
+                    going = false;
+                    status = 1;
+                } else {
+                    var n = 0;
+                    while n < length {
+                        win[made] = win[made - distance];
+                        made = made + 1;
+                        n = n + 1;
+                    }
+                }
+            }
+        }
+    }
+    return (flate.Bits { at: at, buf: buf, count: count, short: short }, made, status);
+}
+
+fn codes_phase[&s, &r, &a, &t, &g, &d, &w, &c](st: &!s [int], inb: &!r [byte], lit: &a [int], dist: &t [int], lengths: &g [int], consts: &d [int], win: &!w [byte], table: &c [int]) -> [] int {
+    let from = st[s_from()];
+    let (b, made, why) = codes(inb, st[s_end()], flate.Bits { at: st[s_at()], buf: st[s_buf()], count: st[s_count()], short: false }, lit, dist, consts, lengths[400..1424], lengths[1424..1680], win, st[s_made()], from + quantum(), st[s_eof()] == 0);
+    st[s_at()] = b.at;
+    st[s_buf()] = b.buf;
+    st[s_count()] = b.count;
+    st[s_made()] = made;
+    if why == 1 || why == 2 {
+        return failed(why);
+    }
+    if why == 0 {
+        if st[s_last()] == 1 {
+            finish_stream(st);
+        } else {
+            st[s_phase()] = p_block();
+        }
+        if made > from {
+            return emit(st, win, table);
+        }
+        return go_on();
+    }
+    if why == 5 {
+        if made > from {
+            return emit(st, win, table);
+        }
+        return want(st, inb);
+    }
+    return emit(st, win, table);
+}
+
+// A stored block: copy from the input into the window, a piece at a time.
+fn stored_phase[&s, &r, &w, &c](st: &!s [int], inb: &!r [byte], win: &!w [byte], table: &c [int]) -> [] int {
+    let remaining = st[s_stored()];
+    let from = st[s_from()];
+    let made = st[s_made()];
+    if remaining == 0 {
+        if st[s_last()] == 1 {
+            finish_stream(st);
+        } else {
+            st[s_phase()] = p_block();
+        }
+        if made > from {
+            return emit(st, win, table);
+        }
+        return go_on();
+    }
+    if made - from >= quantum() {
+        return emit(st, win, table);
+    }
+    let at = st[s_at()];
+    let avail = st[s_end()] - at;
+    if avail == 0 {
+        if made > from {
+            return emit(st, win, table);
+        }
+        if st[s_eof()] == 1 {
+            return failed(2);
+        }
+        return want(st, inb);
+    }
+    var k = remaining;
+    if k > avail {
+        k = avail;
+    }
+    if k > from + quantum() - made {
+        k = from + quantum() - made;
+    }
+    copy_into(win[made..made + k], inb[at..at + k]);
+    st[s_at()] = at + k;
+    st[s_made()] = made + k;
+    st[s_stored()] = remaining - k;
+    return go_on();
+}
+
+fn le32[&r](inb: &r [byte], at: int) -> [] int {
+    return flate.le32(inb, at);
+}
+
+// The trailer: CRC-32 and length, and nothing after them. The bytes after are looked for before the trailer is judged, as
+// `archive.flate.gunzip` does, so the same damage has the same status.
+fn trailer_phase[&s, &r](st: &!s [int], inb: &!r [byte]) -> [] int {
+    let at = st[s_at()];
+    let have = st[s_end()] - at;
+    if have >= 9 {
+        return failed(15);
+    }
+    if st[s_eof()] == 0 {
+        return want(st, inb);
+    }
+    if have < 8 {
+        // `archive.flate.gunzip` reads the stream up to eight bytes before the end, so a stream that needs those is cut.
+        return failed(2);
+    }
+    if st[s_crc()] ^ 0xffffffff != le32(inb, at) {
+        return failed(13);
+    }
+    if st[s_total()] & 0xffffffff != le32(inb, at + 4) {
+        return failed(14);
+    }
+    st[s_at()] = at + 8;
+    st[s_phase()] = p_done();
+    return done();
+}
+
+// Run until there is a piece of output, the input has to be refilled, the member ends, or it is damaged.
+pub fn step[&i](inf: &!i Inflater) -> [] int {
+    let st = contents(inf.state);
+    st[s_from()] = st[s_made()];
+    if st[s_made()] > 65536 {
+        // Keep the last 32 KiB as history and move it to the front.
+        copy_within(contents(inf.win), 0, st[s_made()] - 32768, 32768);
+        st[s_made()] = 32768;
+        st[s_from()] = 32768;
+    }
+    var result = go_on();
+    while result < 0 {
+        let phase = st[s_phase()];
+        if phase == p_head() {
+            result = head(st, contents(inf.inb), contents(inf.name));
+        } else if phase == p_block() {
+            result = block_head(st, contents(inf.inb), contents(inf.lit), contents(inf.dist), contents(inf.lengths));
+        } else if phase == p_codes() {
+            result = codes_phase(st, contents(inf.inb), contents(inf.lit), contents(inf.dist), contents(inf.lengths), contents(inf.consts), contents(inf.win), contents(inf.crc));
+        } else if phase == p_stored() {
+            result = stored_phase(st, contents(inf.inb), contents(inf.win), contents(inf.crc));
+        } else if phase == p_trailer() {
+            result = trailer_phase(st, contents(inf.inb));
+        } else {
+            result = done();
+        }
+    }
+    return result;
+}

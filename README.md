@@ -19,7 +19,7 @@
 | `write` | `cp`, `>`, `tee` | replace a file atomically, only if it holds what the caller says |
 | `replace` | `sed -i` | replace exact text an expected number of times, atomically |
 | `move` | `mv` | rename a file or directory in place, never over an existing name |
-| `archive` | `tar`, `gzip`, `gunzip` | list, extract and create tar archives, gzip-compressed or not, checked whole before any file is written ([docs/archive.md](docs/archive.md)) |
+| `archive` | `tar`, `gzip`, `unzip`, `zstd` | list, extract and create tar archives, gzip- or zstd-compressed or not, and zips; read bzip2 and xz; checked whole before any file is written ([docs/archive.md](docs/archive.md)) |
 | `run` | `exec`, `timeout` | **opt-in:** start one program from the deployer's directory with exact arguments, a fixed environment, a deadline and an output cap ([docs/next-tools.md](docs/next-tools.md) section 3) |
 
 ## One complete flow: two agents, one file
@@ -203,7 +203,7 @@ What "designed for agents" means here, what a test checks on every binary, and w
 * **Same-directory renames only.** `move` takes a new name, not a new directory.
 * **`seek` takes named files,** not a directory: `list` then `seek` is the pattern for now.
 * **No process spawning, no network, no clock** in any tool but one: `run`, which is opt-in, holds `exec` for its programs directory and a `clock` for its deadline, and says it is `irreversible-consequential`. No other tool's authority holds them (`tools.toml`).
-* **`archive` cannot make directories.** cancho has no `mkdir`, so `extract` writes files into directories that exist and names the ones that do not ([docs/archive.md](docs/archive.md) section 2). It holds the archive in memory, up to `--max-bytes`, so its memory is that bound and not a constant.
+* **`archive` holds the archive in memory,** up to `--max-bytes`, so its memory is that bound and not a constant. `extract` makes the directories an entry needs beneath `--into`, never `--into` itself ([docs/archive.md](docs/archive.md) section 13). It does not write bzip2 or xz.
 * **SHA-256 is cancho's own** until it moves into the standard library ([cancho#219](https://github.com/alpibrusl/cancho/issues/219)).
 
 The list of open work is in [issues](https://github.com/alpibrusl/cancho-tools/issues).

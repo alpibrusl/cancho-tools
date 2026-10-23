@@ -3,8 +3,10 @@
 
 Every tool page is generated from the tool's own `introspect` output, the
 same tables that drive its parser (D11), so the site cannot drift from the
-binaries the build produced. The front page is README.md. Nothing here is
-hand-maintained except the stylesheet.
+binaries the build produced. The front page (docs/landing/) is a designed page
+whose demo, matrix and numbers come from the built tools, which it runs in a
+temporary directory; README.md is rendered as docs.html. Hand-written: the
+stylesheets and the landing page's template.
 
     python3 scripts/site.py                  # build/ -> site/
     python3 scripts/site.py --build build --out site
@@ -18,10 +20,12 @@ and shown as text, never dropped.
 import argparse
 import html
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -240,11 +244,216 @@ def markdown(text):
     return "\n".join(out)
 
 
+# --- The landing page -----------------------------------------------------------
+
+# What each tool replaces and how it is put to a reader: the one hand-kept table of the front page.
+BLURBS = {
+    "seek": ("grep -F", "Find literal text in files. A stream of matches, with a cursor when it is cut short."),
+    "list": ("ls, find, tree", "The entries beneath a directory, sorted and depth-bounded. Links are never followed."),
+    "peek": ("sed -n, head, tail", "A range of lines or bytes, with numbers and a cursor to carry on from."),
+    "jsonq": ("jq", "One value from one strict JSON document, by RFC 6901 pointer."),
+    "tally": ("sort | uniq -c", "Distinct lines or fields, counted and ranked."),
+    "hash": ("sha256sum", "SHA-256 or SHA-512 of files of any size, and --verify."),
+    "write": ("cp, >, tee", "Replace a file atomically, only if it holds what you say it does."),
+    "replace": ("sed -i", "Replace exact text an expected number of times, atomically."),
+    "move": ("mv", "Rename a file or directory in place, never over an existing name."),
+    "archive": ("tar, gzip, zip", "List, extract and create tar, zip, gzip and zstd; read bzip2 and xz. Checked whole before a file is written."),
+    "run": ("exec, timeout", "Opt-in. Start one program from a fixed directory with exact arguments, a fixed environment, a deadline and an output cap."),
+}
+
+# README's "How fast" rows: (what, cancho tool, [(incumbent, seconds)], cancho seconds, strings that must still be in README).
+SPEED = [
+    ("seek", 0.49, [("grep", 0.51), ("rg", 0.39)], ["**0.49 s**", "0.51 s", "0.39 s"]),
+    ("peek", 0.08, [("sed+wc", 0.13)], ["**0.08 s**", "0.13 s"]),
+    ("tally", 0.16, [("cut|sort|uniq", 0.68)], ["**0.16 s**", "0.68 s"]),
+    ("jsonq", 0.14, [("jq", 0.73)], ["**0.14 s**", "0.73 s"]),
+    ("list", 0.144, [("find", 0.146)], ["**0.144 s**", "0.146 s"]),
+    ("hash", 0.52, [("sha256sum", 0.17)], ["0.52 s", "0.17 s"]),
+]
+
+PROMPT = r"""Try cancho-tools on one small task. Work in a new empty directory, never use sudo, and report honestly: do not retry a failing command in a loop and do not hide a failure.
+
+1. Check that git, cargo (Rust) and clang exist. If one is missing, stop and tell me which; do not install system packages yourself.
+2. Get the sources and build, as the Quick start of the README says:
+   git clone https://github.com/alpibrusl/cancho
+   git clone https://github.com/alpibrusl/cancho-tools && cd cancho-tools
+   REV=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho.toml)
+   (cd ../cancho && git fetch -q origin && git checkout "$REV" && cargo build --release -p cancho)
+   export PATH=$PWD/../cancho/target/release:$PWD/build:$PATH
+   cancho build
+3. Ask a tool what it is: `seek introspect` (JSON: flags, rules, exit codes, authority).
+4. Reproduce the race on a scratch file, with the tools only:
+   printf 'shopping list\n' > notes.txt
+   hash --root . notes.txt                          # note the hex: H1
+   printf 'shopping list\n- milk\n'  | write --root . --if-sha256 H1 --stdin notes.txt   # expect changed:true
+   printf 'shopping list\n- bread\n' | write --root . --if-sha256 H1 --stdin notes.txt   # expect exit 5, rule precondition.hash-mismatch
+   Read actual_sha256 from the refusal's detail, re-apply both lines and retry with that hash.
+5. Tell me: the exit status and the `rule` of the refusal in step 4, the final contents of notes.txt, and anything that failed, with the exact error.
+Docs: README.md, docs/reference.md, docs/agent-first.md."""
+
+
+def short(h):
+    return h[:12] + "\u2026"
+
+
+def sh(cmd, cwd, stdin=None):
+    r = subprocess.run(cmd, shell=True, cwd=cwd, input=stdin, capture_output=True, text=True)
+    return r.stdout, r.returncode
+
+
+def real_flow(build):
+    """Run the two-agents-one-file race with the built tools in a temporary directory; answer what the page replays."""
+    b = str(build.resolve())
+    start = "shopping list\n"
+    a_text, b_text = start + "- milk (agent A)\n", start + "- bread (agent B)\n"
+    lost = lambda t: [(x, "") for x in t.rstrip("\n").split("\n")]
+    ev = lambda t, k="": (t, k)
+
+    def state(file, a, b2, verdict):
+        return {"file": file, "a": a, "b": b2, "verdict": verdict}
+
+    first = state([("shopping list", "")], [ev("read notes.txt")], [ev("read notes.txt")], ["Both agents have read the file.", ""])
+    # Plain writes.
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "notes.txt").write_text(start)
+        sh("printf 'shopping list\\n- milk (agent A)\\n' > notes.txt", d)
+        sh("printf 'shopping list\\n- bread (agent B)\\n' > notes.txt", d)
+        final, _ = sh("cat notes.txt", d)
+    assert final == b_text, final
+    plain = [
+        {"l": ["d", "$ printf 'shopping list\\n- milk (agent A)\\n'  > notes.txt   # agent A"],
+         "s": state([("shopping list", ""), ("- milk (agent A)", "a")], [ev("read notes.txt"), ev("write: ok", "ok")], [ev("read notes.txt")], ["Agent A wrote its line.", ""])},
+        {"l": ["d", "$ printf 'shopping list\\n- bread (agent B)\\n' > notes.txt   # agent B"],
+         "s": state([("shopping list", ""), ("- milk (agent A)", "gone"), ("- bread (agent B)", "b")], [ev("read notes.txt"), ev("write: ok", "ok")], [ev("read notes.txt"), ev("write: ok", "ok")],
+                    ["Agent A's line is gone, and nobody was told.", "bad"])},
+        {"l": ["d", "$ cat notes.txt"]},
+    ] + [{"l": ["w", x]} for x in final.rstrip("\n").split("\n")]
+    plain[-1]["s"] = plain[1]["s"]  # the cat shows what the last write left
+
+    # Guarded writes.
+    with tempfile.TemporaryDirectory() as d:
+        Path(d, "notes.txt").write_text(start)
+        out, _ = sh(f"{b}/hash --root . notes.txt", d)
+        h = json.loads(out.splitlines()[0])
+        h1 = h["hex"]
+        wa, rc_a = sh(f"{b}/write --root . --if-sha256 {h1} --stdin notes.txt", d, stdin=a_text)
+        ja = json.loads(wa)["data"]
+        wb, rc_b = sh(f"{b}/write --root . --if-sha256 {h1} --stdin notes.txt", d, stdin=b_text)
+        jb = json.loads(wb)
+        err = jb["error"]
+        h2 = err["detail"]["actual_sha256"]
+        merged = a_text + "- bread (agent B)\n"
+        wc, rc_c = sh(f"{b}/write --root . --if-sha256 {h2} --stdin notes.txt", d, stdin=merged)
+        jc = json.loads(wc)["data"]
+        final2, _ = sh("cat notes.txt", d)
+    assert (rc_a, rc_b, rc_c) == (0, 5, 0), (rc_a, rc_b, rc_c)
+    assert err["rule"] == "precondition.hash-mismatch" and ja["after_sha256"] == h2 and final2 == merged
+    compact = lambda o: json.dumps(o, separators=(",", ":"), ensure_ascii=False)
+    pipe = "$ \u2026 | write --root . --if-sha256 %s --stdin notes.txt   # %s"
+    both = state([("shopping list", ""), ("- milk (agent A)", "a"), ("- bread (agent B)", "b")], [ev("read, hash H1"), ev("write if H1: ok", "ok")],
+                 [ev("read, hash H1"), ev("write if H1: refused", "bad"), ev("re-read, hash H2"), ev("write if H2: ok", "ok")], ["Both lines kept. B was told why, and what changed.", "ok"])
+    guarded = [
+        {"l": ["d", "$ hash --root . notes.txt                 # A and B both read it: H1 is its hash"],
+         "s": state([("shopping list", "")], [ev("read notes.txt, hash H1")], [ev("read notes.txt, hash H1")], ["Both agents hold the hash of what they read.", ""])},
+        {"l": ["a", compact({"type": "hash", "path": h["path"], "algo": h["algo"], "hex": short(h1), "bytes": h["bytes"]})]},
+        {"l": ["d", pipe % ("H1", "agent A adds its line")]},
+        {"l": ["a", compact({"path": ja["path"], "changed": ja["changed"], "bytes": ja["bytes"], "after_sha256": short(ja["after_sha256"])})],
+         "s": state([("shopping list", ""), ("- milk (agent A)", "a")], [ev("read, hash H1"), ev("write if H1: ok", "ok")], [ev("read, hash H1")], ["Agent A's write went through.", ""])},
+        {"l": ["d", pipe % ("H1", "agent B, stale")]},
+        {"l": ["b", compact({"rule": err["rule"], "hint": err["hint"], "repair": err["repair"]["kind"],
+                             "detail": {"expected_sha256": short(err["detail"]["expected_sha256"]), "actual_sha256": short(h2), "size": err["detail"]["size"]}})]},
+        {"l": ["d", "# exit status 5"],
+         "s": state([("shopping list", ""), ("- milk (agent A)", "a")], [ev("read, hash H1"), ev("write if H1: ok", "ok")],
+                    [ev("read, hash H1"), ev("write if H1: refused", "bad"), ev("the refusal says what changed: H2")], ["Agent B was refused, and nothing was lost.", "ok"])},
+        {"l": ["d", pipe % ("H2", "agent B re-reads (H2 came with the refusal), re-applies, retries")]},
+        {"l": ["a", compact({"path": jc["path"], "changed": jc["changed"], "bytes": jc["bytes"], "after_sha256": short(jc["after_sha256"])})],
+         "s": both},
+        {"l": ["d", "$ cat notes.txt"]},
+    ] + [{"l": ["w", x]} for x in final2.rstrip("\n").split("\n")]
+    guarded[-1]["s"] = both
+
+    refusal = json.dumps({"ok": False, "command": "write", "error": {
+        "code": err["code"], "rule": err["rule"], "hint": err["hint"], "repair": err["repair"],
+        "detail": {"path": err["detail"]["path"], "expected_sha256": short(err["detail"]["expected_sha256"]),
+                   "actual_sha256": short(h2), "size": err["detail"]["size"]}}}, indent=2, ensure_ascii=False)
+    return {"plain": {"start": first, "items": plain}, "guarded": {"start": first, "items": guarded}}, refusal
+
+
+def authority_matrix(tools):
+    cols = [("reads files", {"file_read", "dir_read"}), ("reads stdin", {"io_read"}), ("changes files", {"file_write", "dir_write"}),
+            ("starts programs", {"exec"}), ("reads the clock", {"clock"}), ("uses the network", None)]
+    net = lambda n: re.match(r"^(net|tcp|udp|sock|conn|listen|dns|http)", n) is not None
+    rows = []
+    for d in tools:
+        names = {x["name"] for x in d["authority"]["labels"]}
+        cells = []
+        for title, effs in cols:
+            on = any(net(n) for n in names) if effs is None else bool(names & effs)
+            cells.append(f'<td><span class="dot {"x" if effs is None and on else "on" if on else ""}" title="{html.escape(title)}: {"yes" if on else "no"}"></span><span class="sr" hidden>{"yes" if on else "no"}</span></td>')
+        kind = d["reversibility"].split("-")[1]
+        rows.append(f'<tr{" class=opt" if d["tool"] == "run" else ""}><td><a href="{d["tool"]}.html">{d["tool"]}</a></td>' + "".join(cells) +
+                    f'<td><span class="rev {kind}">{html.escape(d["reversibility"])}</span></td></tr>')
+    head = "".join(f"<th>{t}</th>" for t, _ in cols)
+    n_net = sum(1 for d in tools if any(net(x["name"]) for x in d["authority"]["labels"]))
+    note = ("Dots are what the compiler found each program may do; a row is read from the binary's own <code>introspect</code>. "
+            + ("None of them can reach the network. " if n_net == 0 else f"{n_net} of them can reach the network. ")
+            + "<code>run</code> is opt-in and the only one that starts programs or reads the clock. Not shown: how much of each it may touch (every label is bounded; see a tool's page).")
+    return f'<table><thead><tr><th>tool</th>{head}<th>if it goes wrong</th></tr></thead><tbody>{"".join(rows)}</tbody></table>', note, n_net
+
+
+def speed_bars(readme):
+    for _, _, _, needles in SPEED:
+        for needle in needles:
+            if needle not in readme:
+                sys.exit(f"site: README.md no longer says {needle!r}; update SPEED in scripts/site.py with its 'How fast' table")
+    out = ["<h3>Time to answer, 64 MiB (shorter is faster)</h3>"]
+    for tool, mine, others, _ in SPEED:
+        top = max([mine] + [v for _, v in others])
+        rows = [(tool, mine, "")] + [(n, v, " inc") for n, v in others]
+        bars = "".join(f'<div class="bar1{c}" style="--w:{v / top * 100:.1f}%"><span>{n} {v:g} s</span></div>' for n, v, c in rows)
+        out.append(f'<div class="brow"><span>{tool}</span><div class="tr">{bars}</div></div>')
+    return "".join(out)
+
+
+SHOWN = ["seek", "list", "peek", "jsonq", "tally", "hash", "write", "replace", "move", "archive", "run"]  # reads first, then what changes things
+
+
+def landing_page(tools, readme, build):
+    tools = sorted(tools, key=lambda d: SHOWN.index(d["tool"]))
+    tpl = (ROOT / "docs" / "landing" / "landing.html").read_text()
+    flow, refusal = real_flow(build)
+    matrix, matrix_note, n_net = authority_matrix(tools)
+    kind = {"cheap": ("read-only", "r"), "bounded": ("changes files", "w"), "consequential": ("runs programs", "x")}
+    cards = []
+    for d in tools:
+        name = d["tool"]
+        vs, line = BLURBS[name]
+        label, cls = kind[d["reversibility"].split("-")[1]]
+        extra = '<span class="tag">opt-in</span>' if name == "run" else ""
+        cards.append(f'<a class="tool{" opt" if name == "run" else ""}" href="{name}.html"><b>{name}</b><span class="vs">instead of {html.escape(vs)}</span>'
+                     f'<p>{html.escape(line)}</p><span class="tags"><span class="tag {cls}">{label}</span>{extra}<span class="tag">{len(d["rules"])} rules</span></span></a>')
+    rules = sum(len(d["rules"]) for d in tools)
+    schemas = len({s for d in tools for s in d["schemas"]})
+    n = len(tools)
+    stats = "".join(f'<div class="num"><b>{v}</b><span>{html.escape(t)}</span></div>' for v, t in [
+        (n, f"tools: {n - 1} by default, and run, which is opt-in"),
+        (rules, "named refusals, each with an exit status and a repair kind"),
+        (n_net, "tools that can reach the network, by the authority the compiler derived"),
+        (schemas, "published JSON schemas the outputs are checked against"),
+    ])
+    pills = "".join(f"<span>{html.escape(x)}</span>" for x in [f"{n} tools", "JSON out", "refusals with a rule", "no network", "EUPL-1.2"] if x != "no network" or n_net == 0)
+    body = (tpl.replace("{{PILLS}}", pills).replace("{{N_TOOLS}}", str(n)).replace("{{TOOLS}}", "".join(cards))
+            .replace("{{MATRIX}}", matrix).replace("{{MATRIX_NOTE}}", matrix_note).replace("{{STATS}}", stats)
+            .replace("{{BARS}}", speed_bars(readme)).replace("{{REFUSAL}}", html.escape(refusal))
+            .replace("{{PROMPT}}", html.escape(PROMPT)).replace("{{FLOW}}", json.dumps(flow).replace("</", "<\\/")))
+    return body
+
+
 # --- Pages ---------------------------------------------------------------------
 
 def page(title, body, current=None, description=""):
     marked = ' aria-current="page"'
-    nav = "".join(f'<a href="{t}.html"{marked if t == current else ""}>{t}</a>' for t in TOOLS)
+    nav = "".join(f'<a href="{t}.html"{marked if t == current else ""}>{t}</a>' for t in TOOLS) + f'<a href="docs.html"{marked if current == "docs" else ""}>docs</a>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -349,7 +558,7 @@ def index_page(readme, tools):
     # The README's own tool table stays; the cards come first, as the way in.
     first_h2 = body.find("<h2")
     body = body[:first_h2] + f'<h2 id="tools-at-a-glance">The tools at a glance</h2><div class="cards">{cards}</div>' + body[first_h2:]
-    return page("cancho-tools", body, description="An agent toolbox in cancho: nine unix-like tools with a JSON contract.")
+    return page("cancho-tools docs", body, current="docs", description="The cancho-tools README: the tools, the contract, how to build and use them.")
 
 
 def main():
@@ -373,9 +582,13 @@ def main():
         for schema, body in d["schemas"].items():
             (out / "schemas" / f"{schema}.json").write_text(json.dumps(body, indent=2) + "\n")
     (out / "assets").mkdir()
-    for f in sorted((ROOT / "docs" / "assets").glob("*.png")):
+    for f in sorted((ROOT / "docs" / "assets").iterdir()):
         shutil.copy(f, out / "assets" / f.name)
-    (out / "index.html").write_text(index_page((ROOT / "README.md").read_text(), tools))
+    for f in ("landing.css", "landing.js"):
+        shutil.copy(ROOT / "docs" / "landing" / f, out / "assets" / f)
+    readme = (ROOT / "README.md").read_text()
+    (out / "docs.html").write_text(index_page(readme, tools))
+    (out / "index.html").write_text(landing_page(tools, readme, build))
     (out / ".nojekyll").write_text("")
     print(f"site: {len(tools)} tools -> {out}")
 

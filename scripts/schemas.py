@@ -159,7 +159,7 @@ SCHEMAS = {
         "dir": obj({"type": {"const": "dir"}, "path": TB}),
     }, {
         "op": {"enum": ["list", "extract", "create"]},
-        "format": {"enum": ["tar", "tgz", "gz", "zip", "none"]},
+        "format": {"enum": ["tar", "tgz", "gz", "zip", "tbz", "bz2", "none"]},
         "entries": NAT, "bytes": NAT, "errors": NAT, "dry_run": {"type": "boolean"},
         "archive_sha256": HEX64,
     }, optional=("archive_sha256",)),

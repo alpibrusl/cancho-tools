@@ -1,0 +1,539 @@
+edition 7;
+
+module archive.bzip2;
+
+// `archive.bzip2` -- one bzip2 stream decompressed from memory (docs/archive.md section 16).
+//
+// The stream is `BZh` and a level `1`..`9` (the block size is 100,000 times it), then blocks, then an end marker and a combined CRC.
+// A block is: a 48-bit magic and its CRC-32, a randomised bit, the position of the original first row (`origPtr`), the set of bytes used,
+// the Huffman tables (2 to 6, chosen for each run of 50 symbols by a move-to-front coded selector), the symbols (a run-length of the zero
+// move-to-front index in two symbols, RUNA and RUNB, and the end of block), then the inverse Burrows-Wheeler transform and a last
+// run-length step (four equal bytes are followed by a count of more). Both CRC-32s are bzip2's (most significant bit first).
+//
+// Nothing is trusted: a count, a length, an index or a position outside what the format allows is `invalid`; a stream that stops early is
+// `truncated`; the expansion is bounded by `limit`; the block CRC-32s and the combined one are checked; and bytes after the stream (a
+// second stream is a concatenation, not one archive) are refused as they are for gzip.
+//
+// Statuses (the numbers `flate.gunzip` uses): 0 whole, 1 invalid, 2 truncated, 3 past `limit`, 10 not bzip2, 11 unsupported (a randomised
+// block, a form no current bzip2 writes), 13 CRC-32, 15 bytes after the stream.
+
+import std.buffer;
+
+// Whether `src` starts like a bzip2 stream: `BZh` and a level.
+pub fn looks_like[&s](src: &s [byte]) -> [] bool {
+    return len(src) >= 4 && int_of(src[0]) == 'B' && int_of(src[1]) == 'Z' && int_of(src[2]) == 'h' && int_of(src[3]) >= '1' && int_of(src[3]) <= '9';
+}
+
+// ---- the bit reader (most significant bit first) -----------------------------------------------------------------------
+
+struct Bits {
+    at: int,
+    buf: int,
+    count: int,
+    // Set when more bits were asked for than the input holds.
+    short: bool,
+}
+
+fn fill[&s](src: &s [byte], b: Bits, n: int) -> [] Bits {
+    var at = b.at;
+    var buf = b.buf;
+    var count = b.count;
+    while count < n && at < len(src) {
+        buf = buf << 8 | int_of(src[at]);
+        at = at + 1;
+        count = count + 8;
+    }
+    return Bits { at: at, buf: buf, count: count, short: b.short || count < n };
+}
+
+// `n` bits (at most 32).
+fn take[&s](src: &s [byte], b: Bits, n: int) -> [] (Bits, int) {
+    let f = fill(src, b, n);
+    if f.short {
+        return (f, 0);
+    }
+    let left = f.count - n;
+    let value = f.buf >> left & (1 << n) - 1;
+    return (Bits { at: f.at, buf: f.buf & (1 << left) - 1, count: left, short: false }, value);
+}
+
+// ---- the CRC-32 (most significant bit first) -------------------------------------------------------------------------------
+
+fn crc_fill[&t](table: &!t [int]) -> [] int {
+    var i = 0;
+    while i < 256 {
+        var c = i << 24;
+        var k = 0;
+        while k < 8 {
+            if c & 0x80000000 != 0 {
+                c = c << 1 & 0xffffffff ^ 0x04c11db7;
+            } else {
+                c = c << 1 & 0xffffffff;
+            }
+            k = k + 1;
+        }
+        table[i] = c;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---- Huffman tables ------------------------------------------------------------------------------------------------------------
+
+// The decode tables of group `g` from its code lengths (`bzip2`'s `hbCreateDecodeTables`): `limit`, `base` and `perm` are laid out in
+// rows of 24, 24 and 258 entries.
+fn make_tables[&l, &m, &b, &p](lengths: &l [int], g: int, alpha: int, limit: &!m [int], base: &!b [int], perm: &!p [int]) -> [] (int, int) {
+    var min_len = 32;
+    var max_len = 0;
+    var i = 0;
+    while i < alpha {
+        let n = lengths[g * 258 + i];
+        if n > max_len {
+            max_len = n;
+        }
+        if n < min_len {
+            min_len = n;
+        }
+        i = i + 1;
+    }
+    var pp = 0;
+    var len_now = min_len;
+    while len_now <= max_len {
+        var j = 0;
+        while j < alpha {
+            if lengths[g * 258 + j] == len_now {
+                perm[g * 258 + pp] = j;
+                pp = pp + 1;
+            }
+            j = j + 1;
+        }
+        len_now = len_now + 1;
+    }
+    var k = 0;
+    while k < 24 {
+        base[g * 24 + k] = 0;
+        limit[g * 24 + k] = 0;
+        k = k + 1;
+    }
+    i = 0;
+    while i < alpha {
+        base[g * 24 + lengths[g * 258 + i] + 1] = base[g * 24 + lengths[g * 258 + i] + 1] + 1;
+        i = i + 1;
+    }
+    k = 1;
+    while k < 24 {
+        base[g * 24 + k] = base[g * 24 + k] + base[g * 24 + k - 1];
+        k = k + 1;
+    }
+    var vec = 0;
+    len_now = min_len;
+    while len_now <= max_len {
+        vec = vec + (base[g * 24 + len_now + 1] - base[g * 24 + len_now]);
+        limit[g * 24 + len_now] = vec - 1;
+        vec = vec << 1;
+        len_now = len_now + 1;
+    }
+    len_now = min_len + 1;
+    while len_now <= max_len {
+        base[g * 24 + len_now] = (limit[g * 24 + len_now - 1] + 1 << 1) - base[g * 24 + len_now];
+        len_now = len_now + 1;
+    }
+    return (min_len, max_len);
+}
+
+// ---- the stream --------------------------------------------------------------------------------------------------------------------
+
+// Decompress the bzip2 stream that is all of `src`, producing at most `limit` bytes. Answers the output and a status.
+pub fn decompress[&h, &s](heap: &!h Heap, src: &s [byte], limit: int) -> [heap] (buffer.Buffer, int) {
+    var out = buffer.empty(heap, 4096);
+    if !looks_like(src) {
+        return (out, 10);
+    }
+    let block_max = (int_of(src[3]) - '0') * 100000;
+    var status = 0;
+    var bits = Bits { at: 4, buf: 0, count: 0, short: false };
+    var combined = 0;
+    var made = 0;
+    var going = true;
+    // The arrays too big for a region (it is one 64 KiB chunk) are on the heap.
+    let tt_box = box_slice(heap, block_max, 0);
+    let sel_box = box_slice(heap, 32768, 0);
+    let mtf_box = box_slice(heap, 32768, 0);
+    borrow mut tt_box as &!ttw in {
+        borrow mut sel_box as &!selw in {
+            borrow mut mtf_box as &!mtfw in {
+                region r {
+                    let crc_table = alloc_slice[r](256, 0);
+                    crc_fill(crc_table);
+                    let tt = contents(ttw);
+                    let unzftab = alloc_slice[r](256, 0);
+                    let seq_to_unseq = alloc_slice[r](256, 0);
+                    let mtf = alloc_slice[r](256, 0);
+                    let selector = contents(selw);
+                    let selector_mtf = contents(mtfw);
+                    let lengths = alloc_slice[r](6 * 258, 0);
+                    let limits = alloc_slice[r](6 * 24, 0);
+                    let bases = alloc_slice[r](6 * 24, 0);
+                    let perms = alloc_slice[r](6 * 258, 0);
+                    let min_lens = alloc_slice[r](6, 0);
+                    let max_lens = alloc_slice[r](6, 0);
+                    let cftab = alloc_slice[r](257, 0);
+                    while going && status == 0 {
+                        // The block magic, or the end of the stream's.
+                        let (b1, hi) = take(src, bits, 24);
+                        let (b2, lo) = take(src, b1, 24);
+                        bits = b2;
+                        if bits.short {
+                            status = 2;
+                            going = false;
+                        } else if hi == 0x177245 && lo == 0x385090 {
+                            let (b3, stored) = take(src, bits, 32);
+                            bits = b3;
+                            if bits.short {
+                                status = 2;
+                            } else if stored != combined {
+                                status = 13;
+                                // The rest of the last byte is padding; anything after it is not this stream.
+                            } else if bits.at < len(src) {
+                                status = 15;
+                            }
+                            going = false;
+                        } else if hi != 0x314159 || lo != 0x265359 {
+                            status = 1;
+                            going = false;
+                        } else {
+                            let (b3, block_crc) = take(src, bits, 32);
+                            let (b4, randomised) = take(src, b3, 1);
+                            let (b5, orig_ptr) = take(src, b4, 24);
+                            bits = b5;
+                            if bits.short {
+                                status = 2;
+                            } else if randomised != 0 {
+                                status = 11;
+                            }
+                            // The set of bytes used.
+                            var n_in_use = 0;
+                            if status == 0 {
+                                let (c1, used16) = take(src, bits, 16);
+                                bits = c1;
+                                var i = 0;
+                                while i < 16 && !bits.short {
+                                    if used16 >> 15 - i & 1 != 0 {
+                                        let (c2, used) = take(src, bits, 16);
+                                        bits = c2;
+                                        var j = 0;
+                                        while j < 16 {
+                                            if used >> 15 - j & 1 != 0 {
+                                                seq_to_unseq[n_in_use] = i * 16 + j;
+                                                n_in_use = n_in_use + 1;
+                                            }
+                                            j = j + 1;
+                                        }
+                                    }
+                                    i = i + 1;
+                                }
+                                if bits.short {
+                                    status = 2;
+                                } else if n_in_use == 0 {
+                                    status = 1;
+                                }
+                            }
+                            let alpha = n_in_use + 2;
+                            // The tables and the selectors.
+                            var n_groups = 0;
+                            var n_selectors = 0;
+                            if status == 0 {
+                                let (c1, groups) = take(src, bits, 3);
+                                let (c2, selectors) = take(src, c1, 15);
+                                bits = c2;
+                                n_groups = groups;
+                                n_selectors = selectors;
+                                if bits.short {
+                                    status = 2;
+                                } else if n_groups < 2 || n_groups > 6 || n_selectors < 1 {
+                                    status = 1;
+                                }
+                            }
+                            if status == 0 {
+                                var i = 0;
+                                while i < n_selectors && status == 0 {
+                                    var j = 0;
+                                    var more = true;
+                                    while more && status == 0 {
+                                        let (c1, bit) = take(src, bits, 1);
+                                        bits = c1;
+                                        if bits.short {
+                                            status = 2;
+                                        } else if bit == 0 {
+                                            more = false;
+                                        } else {
+                                            j = j + 1;
+                                            if j >= n_groups {
+                                                status = 1;
+                                            }
+                                        }
+                                    }
+                                    selector_mtf[i] = j;
+                                    i = i + 1;
+                                }
+                            }
+                            if status == 0 {
+                                // Undo the move-to-front of the selectors.
+                                var pos = alloc_slice[r](6, 0);
+                                var i = 0;
+                                while i < n_groups {
+                                    pos[i] = i;
+                                    i = i + 1;
+                                }
+                                i = 0;
+                                while i < n_selectors {
+                                    var v = selector_mtf[i];
+                                    let tmp = pos[v];
+                                    while v > 0 {
+                                        pos[v] = pos[v - 1];
+                                        v = v - 1;
+                                    }
+                                    pos[0] = tmp;
+                                    selector[i] = tmp;
+                                    i = i + 1;
+                                }
+                            }
+                            if status == 0 {
+                                var t = 0;
+                                while t < n_groups && status == 0 {
+                                    let (c1, start) = take(src, bits, 5);
+                                    bits = c1;
+                                    var curr = start;
+                                    var i = 0;
+                                    while i < alpha && status == 0 {
+                                        var more = true;
+                                        while more && status == 0 {
+                                            if bits.short {
+                                                status = 2;
+                                            } else if curr < 1 || curr > 20 {
+                                                status = 1;
+                                            } else {
+                                                let (c2, bit) = take(src, bits, 1);
+                                                bits = c2;
+                                                if bits.short {
+                                                    status = 2;
+                                                } else if bit == 0 {
+                                                    more = false;
+                                                } else {
+                                                    let (c3, direction) = take(src, bits, 1);
+                                                    bits = c3;
+                                                    if direction == 0 {
+                                                        curr = curr + 1;
+                                                    } else {
+                                                        curr = curr - 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        lengths[t * 258 + i] = curr;
+                                        i = i + 1;
+                                    }
+                                    if status == 0 {
+                                        let (low, high) = make_tables(lengths, t, alpha, limits, bases, perms);
+                                        min_lens[t] = low;
+                                        max_lens[t] = high;
+                                    }
+                                    t = t + 1;
+                                }
+                            }
+                            // The symbols: run-length of zeros (RUNA, RUNB), move-to-front indexes, the end of block.
+                            var n_block = 0;
+                            if status == 0 {
+                                var i = 0;
+                                while i < 256 {
+                                    mtf[i] = i;
+                                    unzftab[i] = 0;
+                                    i = i + 1;
+                                }
+                                let eob = n_in_use + 1;
+                                var group_no = 0 - 1;
+                                var group_pos = 0;
+                                var run_total = 0;
+                                var run_weight = 1;
+                                var in_run = false;
+                                var reading = true;
+                                while reading && status == 0 {
+                                    if group_pos == 0 {
+                                        group_no = group_no + 1;
+                                        if group_no >= n_selectors {
+                                            status = 1;
+                                        }
+                                        group_pos = 50;
+                                    }
+                                    var symbol = 0;
+                                    if status == 0 {
+                                        group_pos = group_pos - 1;
+                                        let g = selector[group_no];
+                                        var zn = min_lens[g];
+                                        let (c1, first) = take(src, bits, zn);
+                                        bits = c1;
+                                        var zvec = first;
+                                        var found = false;
+                                        while !found && !bits.short && status == 0 {
+                                            if zn > 20 {
+                                                status = 1;
+                                            } else if zvec <= limits[g * 24 + zn] {
+                                                found = true;
+                                            } else {
+                                                zn = zn + 1;
+                                                if zn > 20 {
+                                                    status = 1;
+                                                } else {
+                                                    let (c2, bit) = take(src, bits, 1);
+                                                    bits = c2;
+                                                    zvec = zvec << 1 | bit;
+                                                }
+                                            }
+                                        }
+                                        if bits.short {
+                                            status = 2;
+                                        }
+                                        if status == 0 {
+                                            let index = zvec - bases[g * 24 + zn];
+                                            if index < 0 || index >= 258 {
+                                                status = 1;
+                                            } else {
+                                                symbol = perms[g * 258 + index];
+                                            }
+                                        }
+                                    }
+                                    if status == 0 {
+                                        if symbol <= 1 {
+                                            // RUNA adds the weight, RUNB twice it: a run of the byte at the front.
+                                            if !in_run {
+                                                in_run = true;
+                                                run_total = 0;
+                                                run_weight = 1;
+                                            }
+                                            run_total = run_total + run_weight * (symbol + 1);
+                                            run_weight = run_weight * 2;
+                                            if run_total > block_max {
+                                                status = 1;
+                                            }
+                                        } else {
+                                            if in_run {
+                                                // The run ends: that many of the byte at the front of the list.
+                                                let byte = seq_to_unseq[mtf[0]];
+                                                if n_block + run_total > block_max {
+                                                    status = 1;
+                                                } else {
+                                                    unzftab[byte] = unzftab[byte] + run_total;
+                                                    var k = 0;
+                                                    while k < run_total {
+                                                        tt[n_block + k] = byte;
+                                                        k = k + 1;
+                                                    }
+                                                    n_block = n_block + run_total;
+                                                }
+                                                in_run = false;
+                                            }
+                                            if status == 0 {
+                                                if symbol == eob {
+                                                    reading = false;
+                                                } else if n_block >= block_max {
+                                                    status = 1;
+                                                } else {
+                                                    var v = symbol - 1;
+                                                    let front = mtf[v];
+                                                    while v > 0 {
+                                                        mtf[v] = mtf[v - 1];
+                                                        v = v - 1;
+                                                    }
+                                                    mtf[0] = front;
+                                                    let byte = seq_to_unseq[front];
+                                                    unzftab[byte] = unzftab[byte] + 1;
+                                                    tt[n_block] = byte;
+                                                    n_block = n_block + 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if status == 0 && (orig_ptr >= n_block || n_block == 0) {
+                                status = 1;
+                            }
+                            // The inverse transform, the last run-length step, and the block's CRC-32.
+                            if status == 0 {
+                                cftab[0] = 0;
+                                var i = 0;
+                                while i < 256 {
+                                    cftab[i + 1] = cftab[i] + unzftab[i];
+                                    i = i + 1;
+                                }
+                                i = 0;
+                                while i < n_block {
+                                    let byte = tt[i] & 0xff;
+                                    tt[cftab[byte]] = tt[cftab[byte]] | i << 8;
+                                    cftab[byte] = cftab[byte] + 1;
+                                    i = i + 1;
+                                }
+                                var t_pos = tt[orig_ptr] >> 8;
+                                var crc = 0xffffffff;
+                                var same = 0;
+                                var previous = 0 - 1;
+                                var k = 0;
+                                while k < n_block && status == 0 {
+                                    t_pos = tt[t_pos];
+                                    let byte = t_pos & 0xff;
+                                    t_pos = t_pos >> 8;
+                                    k = k + 1;
+                                    if same == 4 {
+                                        // This byte is a count of more copies of the previous one.
+                                        var more = byte;
+                                        if made + more <= limit {
+                                            while more > 0 {
+                                                out = buffer.push(heap, out, byte_of(previous));
+                                                crc = crc << 8 & 0xffffffff ^ crc_table[(crc >> 24 ^ previous) & 0xff];
+                                                more = more - 1;
+                                            }
+                                            made = made + byte;
+                                        } else {
+                                            status = 3;
+                                        }
+                                        same = 0;
+                                        previous = 0 - 1;
+                                    } else {
+                                        if byte == previous {
+                                            same = same + 1;
+                                        } else {
+                                            same = 1;
+                                            previous = byte;
+                                        }
+                                        if made + 1 <= limit {
+                                            out = buffer.push(heap, out, byte_of(byte));
+                                            crc = crc << 8 & 0xffffffff ^ crc_table[(crc >> 24 ^ byte) & 0xff];
+                                            made = made + 1;
+                                        } else {
+                                            status = 3;
+                                        }
+                                    }
+                                }
+                                if status == 0 {
+                                    crc = crc ^ 0xffffffff;
+                                    if crc != block_crc {
+                                        status = 13;
+                                    } else {
+                                        combined = (combined << 1 | combined >> 31) & 0xffffffff ^ crc;
+                                    }
+                                }
+                            }
+                            if status != 0 {
+                                going = false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, tt_box);
+    unbox_slice(heap, sel_box);
+    unbox_slice(heap, mtf_box);
+    return (out, status);
+}

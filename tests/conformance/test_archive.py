@@ -14,6 +14,7 @@
 """
 
 import base64
+import bz2
 import gzip
 import hashlib
 import io
@@ -754,6 +755,213 @@ class Archive(unittest.TestCase):
                     name = f["path"] if isinstance(f["path"], str) else os.fsdecode(base64.b64decode(f["path"]["b64"]))
                     pathlib.Path(self.dir / name).unlink(missing_ok=True)
 
+    # ---- bzip2 (docs/archive.md section 16) ------------------------------------------------------------------------------------
+
+    def bz2_data(self):
+        rnd = random.Random(11)
+        return {
+            "text": b"the quick brown fox jumps over the lazy dog\n" * 9000,
+            "random": bytes(rnd.randrange(256) for _ in range(120000)),
+            "runs": b"".join(bytes([rnd.randrange(1, 256)]) * rnd.randrange(1, 700) for _ in range(900)),
+            "two": bytes(rnd.choice(b"ab") for _ in range(130000)),
+            "one": b"x",
+            "ones": b"\x01" * 300000,
+        }
+
+    def test_bzip2_what_others_write_archive_reads(self):
+        for name, data in self.bz2_data().items():
+            for level in (1, 9):
+                self.write("in.bz2", bz2.compress(data, level))
+                shutil.rmtree(self.dir / "o", ignore_errors=True)
+                (self.dir / "o").mkdir()
+                out = self.archive("--op", "list", "in.bz2")
+                check_stream(self, out)
+                self.assertEqual(out.status, 0, (name, level, out.raw[-300:]))
+                self.assertEqual(out.end()["format"], "bz2")
+                self.assertEqual([(r["path"], r["size"]) for r in out.records if r.get("type") == "entry"], [("in", len(data))])
+                out = self.archive("--op", "extract", "--into", "o", "in.bz2")
+                check_stream(self, out)
+                self.assertEqual(out.status, 0, (name, level, out.raw[-300:]))
+                self.assertEqual((self.dir / "o" / "in").read_bytes(), data, (name, level))
+        # The command-line bzip2 and an empty stream.
+        (self.dir / "cli.txt").write_bytes(b"made by bzip2(1)\n" * 500)
+        subprocess.run(["bzip2", "-kf", str(self.dir / "cli.txt")], check=True)
+        (self.dir / "o").mkdir(exist_ok=True)
+        out = self.archive("--op", "extract", "--into", "o", "cli.txt.bz2")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual((self.dir / "o" / "cli.txt").read_bytes(), b"made by bzip2(1)\n" * 500)
+        self.write("empty.bz2", bz2.compress(b""))
+        out = self.archive("--op", "extract", "--into", "o", "empty.bz2")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual((self.dir / "o" / "empty").read_bytes(), b"")
+
+    def test_a_tar_bzip2_lists_extracts_and_selects(self):
+        self.umask(0o022)
+        files = self.corpus(self.dir)
+        subprocess.run(["tar", "-cjf", "mine.tar.bz2", "src", "empty"], cwd=self.dir, check=True)
+        out = self.archive("--op", "list", "mine.tar.bz2")
+        check_stream(self, out)
+        self.assertEqual(out.end()["format"], "tbz")
+        listed = [r["path"] for r in out.records if r.get("type") == "entry"]
+        for name in files:
+            if name.startswith("src/"):
+                self.assertIn(name, listed)
+        (self.dir / "o").mkdir()
+        out = self.archive("--op", "extract", "--into", "o", "mine.tar.bz2")
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        for name, data in files.items():
+            if name.startswith("src/"):
+                self.assertEqual((self.dir / "o" / name).read_bytes(), data, name)
+        self.assertTrue(os.access(self.dir / "o/src/run.sh", os.X_OK))
+        out = self.archive("--op", "list", "mine.tar.bz2", "src/sub")
+        self.assertTrue(all(r["path"].startswith("src/sub") for r in out.records if r.get("type") == "entry"))
+        # What archive makes, bzip2 compresses, and archive reads back: a tar through bzip2(1).
+        self.archive("--op", "create", "--as", "tar", "plain.tar", "src")
+        subprocess.run(["bzip2", "-kf", str(self.dir / "plain.tar")], check=True)
+        (self.dir / "o2").mkdir()
+        out = self.archive("--op", "extract", "--into", "o2", "plain.tar.bz2")
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        self.assertEqual((self.dir / "o2/src/a.txt").read_bytes(), (self.dir / "src/a.txt").read_bytes())
+
+    def test_bzip2_damage_extra_bytes_and_unsupported_forms_are_tags(self):
+        data = b"hello hello hello world\n" * 200
+        good = bz2.compress(data)
+        # Bytes after the stream, and a second stream.
+        for label, blob in [("trailing", good + b"xyz"), ("concatenated", good + good)]:
+            self.write("x.bz2", blob)
+            out = self.archive("--op", "extract", "x.bz2")
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], label)
+            self.assertFalse((self.dir / "x").exists(), label)
+        # Cut anywhere before the end: truncated (or, inside the magic, a stream no longer told from other bytes).
+        self.write("cut.bz2", good[:-9])
+        self.assertEqual(self.archive("--op", "extract", "cut.bz2").rules(), ["archive.truncated"])
+        # The CRCs.
+        raw = bytearray(good)
+        raw[10] ^= 0xff  # the block CRC
+        self.write("crc.bz2", bytes(raw))
+        self.assertEqual(self.archive("--op", "extract", "crc.bz2").rules(), ["archive.crc-mismatch"])
+        raw = bytearray(good)
+        raw[-3] ^= 0xff  # the combined CRC
+        self.write("crc2.bz2", bytes(raw))
+        self.assertEqual(self.archive("--op", "extract", "crc2.bz2").rules(), ["archive.crc-mismatch"])
+        # A randomised block is a form no current bzip2 writes.
+        raw = bytearray(good)
+        raw[14] |= 0x80
+        self.write("rand.bz2", bytes(raw))
+        self.assertEqual(self.archive("--op", "extract", "rand.bz2").rules(), ["archive.unsupported"])
+        # Not a stream at all after a valid-looking header.
+        self.write("junk.bz2", b"BZh9" + bytes(40))
+        self.assertEqual(self.archive("--op", "extract", "junk.bz2").rules(), ["archive.bad-bzip2"])
+
+    def test_bzip2_header_counts_out_of_range_are_tags_not_traps(self):
+        good = bz2.compress(b"hello hello hello world\n" * 200)
+        total = len(good) * 8
+        value = int.from_bytes(good, "big")
+
+        def field(pos, n):
+            return value >> (total - pos - n) & (1 << n) - 1
+
+        def with_field(pos, n, new):
+            cleared = value & ~(((1 << n) - 1) << (total - pos - n))
+            return (cleared | new << (total - pos - n)).to_bytes(len(good), "big")
+
+        # The block header starts after `BZh9`: magic, CRC, randomised bit, origin pointer, the bytes in use, then the table count.
+        pos = 32 + 48 + 32 + 1 + 24
+        used = field(pos, 16)
+        pos += 16 + 16 * bin(used).count("1")
+        self.assertIn(field(pos, 3), (2, 3))
+        for groups in (0, 1, 7):
+            self.write("groups.bz2", with_field(pos, 3, groups))
+            out = self.archive("--op", "extract", "groups.bz2")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], groups)
+        # No byte in use at all.
+        self.write("nouse.bz2", with_field(32 + 48 + 32 + 1 + 24, 16, 0))
+        out = self.archive("--op", "extract", "nouse.bz2")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-bzip2"])
+
+    def test_bzip2_code_lengths_and_blocks_past_their_bounds_are_tags_not_traps(self):
+        good = bz2.compress(b"hello hello hello world\n" * 200)
+        total = len(good) * 8
+        value = int.from_bytes(good, "big")
+
+        def field(pos, n):
+            return value >> (total - pos - n) & (1 << n) - 1
+
+        def with_field(pos, n, new):
+            cleared = value & ~(((1 << n) - 1) << (total - pos - n))
+            return (cleared | new << (total - pos - n)).to_bytes(len(good), "big")
+
+        pos = 32 + 48 + 32 + 1 + 24
+        pos += 16 + 16 * bin(field(pos, 16)).count("1")
+        pos += 3
+        selectors = field(pos, 15)
+        pos += 15
+        for _ in range(selectors):
+            while field(pos, 1):
+                pos += 1
+            pos += 1
+        # `pos` is now the first table's 5-bit starting length: 0 and 21 and up are not code lengths.
+        for start in (0, 21, 31):
+            self.write("len.bz2", with_field(pos, 5, start))
+            out = self.archive("--op", "extract", "len.bz2")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], start)
+        # A block bigger than the level says: level 9 data (one block of a few hundred KB) under a level 1 header.
+        rnd = random.Random(21)
+        words = [bytes(rnd.choice(b"abcdefghij") for _ in range(rnd.randrange(2, 9))) for _ in range(300)]
+        texty = b" ".join(rnd.choice(words) for _ in range(120000))
+        for label, data in [("text", texty), ("runs", b"aaab" * 200000)]:
+            blob = bytearray(bz2.compress(data, 9))
+            self.assertEqual(bytes(blob[:4]), b"BZh9")
+            self.assertGreater(len(data), 150000, label)
+            blob[3] = ord("1")
+            self.write("big.bz2", bytes(blob))
+            out = self.archive("--op", "extract", "--max-bytes", "1073741824", "big.bz2")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], label)
+
+    def test_bzip2_output_is_capped_to_the_byte(self):
+        # Exactly the cap is allowed and one byte more is not, whether the last bytes come from a repeat count or are plain.
+        for label, data in [("repeat", b"a" * 1000), ("plain", b"abcde" * 300)]:
+            self.write("cap.bz2", bz2.compress(data))
+            (self.dir / "o").mkdir(exist_ok=True)
+            shutil.rmtree(self.dir / "o")
+            (self.dir / "o").mkdir()
+            out = self.archive("--op", "extract", "--into", "o", "--max-bytes", str(len(data) - 1), "cap.bz2")
+            self.assertEqual(out.rules(), ["limit.archive-too-large"], label)
+            out = self.archive("--op", "extract", "--into", "o", "--max-bytes", str(len(data)), "cap.bz2")
+            self.assertEqual(out.status, 0, (label, out.raw))
+            self.assertEqual((self.dir / "o" / "cap").read_bytes(), data, label)
+
+    def test_a_bzip2_bomb_is_refused_in_the_memory_of_a_block_not_of_the_expansion(self):
+        self.write("bomb.bz2", bz2.compress(b"a" * (96 * 1024 * 1024), 9))
+        status, peak_kib = peak_rss([binary("archive"), "--op", "extract", "--max-bytes", "1048576", "bomb.bz2"], cwd=self.dir)
+        self.assertEqual(status, 8)
+        self.assertLess(peak_kib, 24 * 1024, "the expansion was held, not refused at the cap")
+
+    def test_a_bzip2_bomb_is_bounded_and_every_cut_and_flip_is_a_tag(self):
+        self.write("bomb.bz2", bz2.compress(b"a" * (96 * 1024 * 1024), 9))
+        out = self.archive("--op", "extract", "--max-bytes", "1048576", "bomb.bz2")
+        self.assertEqual(out.rules(), ["limit.archive-too-large"])
+        self.assertFalse((self.dir / "bomb").exists())
+        blob = bz2.compress(b"hello world, hello bzip2 " * 40 + bytes(range(256)), 1)
+        for cut in range(0, len(blob)):
+            self.write("cut.bz2", blob[:cut])
+            check_stream(self, self.archive("--op", "list", "cut.bz2"))
+        rnd = random.Random(5)
+        for at in range(0, len(blob)):
+            mutated = bytearray(blob)
+            mutated[at] ^= rnd.choice([1, 0x80, 0xff, 0x55, 0x10])
+            self.write("flip.bz2", bytes(mutated))
+            for op in ["list", "extract"]:
+                out = self.archive("--op", op, "flip.bz2", "--into", ".") if op == "extract" else self.archive("--op", op, "flip.bz2")
+                check_stream(self, out)
+                for f in out.files():
+                    name = f["path"] if isinstance(f["path"], str) else os.fsdecode(base64.b64decode(f["path"]["b64"]))
+                    pathlib.Path(self.dir / name).unlink(missing_ok=True)
+
     def test_a_size_past_the_data_is_truncated(self):
         raw = bytearray(tar_bytes([("a.txt", b"hello")]))
         raw[124:135] = b"77777777777"
@@ -1292,7 +1500,7 @@ class Archive(unittest.TestCase):
             "archive.not-an-archive", "archive.bad-gzip", "archive.crc-mismatch", "archive.bad-deflate",
             "archive.bad-checksum", "archive.bad-header", "archive.truncated", "archive.unsafe-name",
             "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.special-mode",
-            "archive.no-match", "archive.unsupported", "archive.name-too-long",
+            "archive.no-match", "archive.unsupported", "archive.bad-bzip2", "archive.name-too-long",
             "limit.archive-too-large", "limit.too-many-entries",
         }
         self.assertEqual(declared, seen)
@@ -1336,6 +1544,8 @@ class Archive(unittest.TestCase):
         self.write("suid.tar", buf.getvalue())
         reached |= set(self.archive("--op", "extract", "suid.tar").rules())
         reached |= set(self.archive("--op", "list", "suid.tar", "nothing-like-this").rules())
+        self.write("bad.bz2", b"BZh9" + bytes(40))
+        reached |= set(self.archive("--op", "list", "bad.bz2").rules())
         self.make_zip("enc.zip", [("a", b"x", 0o644)])
         raw = bytearray((self.dir / "enc.zip").read_bytes())
         cd = struct.unpack("<I", raw[raw.rfind(b"PK\x05\x06") + 16:raw.rfind(b"PK\x05\x06") + 20])[0]

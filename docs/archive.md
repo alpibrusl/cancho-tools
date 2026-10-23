@@ -188,6 +188,7 @@ shared catalogue and its 39 fixtures are untouched; `test_archive.py` holds a fi
 | `archive.no-match` | 8 | (list, extract) a selected path matches no entry of the archive (§14); an extract writes nothing |
 | `archive.bad-bzip2` | 8 | a bzip2 stream that is not valid, or bytes after it (§16) |
 | `archive.bad-xz` | 8 | an xz stream that is not valid, or bytes after it (§17) |
+| `archive.bad-zstd` | 8 | a zstd frame that is not valid, or bytes after it (§18) |
 | `archive.special-mode` | 8 | (extract) an entry's mode has a setuid, setgid or sticky bit (§13); nothing was extracted |
 | `archive.name-too-long` | 8 | (create) a name does not fit a ustar header |
 | `limit.archive-too-large` | 8 | expanded size would pass `--max-bytes` (or the file grew while it was read) |
@@ -237,7 +238,7 @@ Also: a dry run makes no mutating call (`strace`); every flag error is a tag wit
 
 ## 8. Non-goals
 
-`zip`, `xz`, `bzip2`, `zstd`; multi-member gzip and concatenated gzip; random access into a `.tar.gz`; archiving links
+writing `bzip2`, `xz` and `zstd` (§16.3, §17.3, §18.3); multi-member gzip and concatenated gzip; random access into a `.tar.gz`; archiving links
 or devices; restoring owner, mtime or special modes; extracting into a `--into` that does not exist (§13);
 streaming from standard input (a path only; `--stdin` can be added if an asker appears); encryption.
 
@@ -429,8 +430,8 @@ test was written for each and the runner now also runs the cancho unit tests. On
 (a stored block cannot out-grow the file that holds it) and is killed by a unit test that passes the limit directly. A
 mutant that looked like it survived once was a stale binary left by the previous mutant; the runner now rebuilds the real one at the end.
 
-**Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); any `zip`, `xz`,
-`bzip2`, `zstd`; restoring modes and times; a second asker (§1).
+**Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); writing `bzip2`, `xz` and
+`zstd`; restoring times; a second asker (§1).
 
 ## 12. Reading a piece at a time
 
@@ -671,3 +672,49 @@ decisions and not omissions.
 `tar -cJf` trees; every cut and every changed byte of a small stream gives a tag and never a trap; 17 mutants of the reader (`scripts/archive_mutants.py`).
 **Found by testing:** the range coder owes one normalisation after a chunk's last symbol (a chunk whose final range was small ended one byte "early"); it
 showed with `--block-size=100000` and not with the default block size.
+
+## 18. zstd
+
+> **Status: built (0.7.0), reading only.** `list` and `extract` read `.tar.zst` (format `tzst`) and a single `.zst` file (format `zst`), recognised by
+> the four-byte magic `28 B5 2F FD`. Everything in §13 and §14 applies. `create` does not write zstd (§18.3).
+
+### 18.1 What is read
+
+One Zstandard frame (RFC 8878): the header (the window size, the content size when it is there, a dictionary id), blocks, and the optional XXH64 checksum
+of the content. Every block kind is read: raw, a run of one byte, and compressed, whose literals are raw, one byte repeated, or Huffman coded (a tree
+sent in the block, with its weights either four-bit or themselves FSE coded, or the previous block's tree; one stream or four), and whose sequences use
+the predefined tables, one repeated symbol, a table sent in the block, or the previous block's table, with the three last offsets kept from block to
+block. The decompressed content is a tar or one file named as the archive without `.zst` (§4.1).
+
+### 18.2 What is refused, and bounds
+
+* **A dictionary** (a dictionary id that is not 0) is `archive.unsupported`: the frame cannot be decoded without it.
+* **Bytes after the frame, a second frame, a skippable frame,** are `archive.bad-zstd`, as for gzip, bzip2 and xz.
+* **A checksum that is not the content's** is `archive.crc-mismatch`; a frame that stops early is `archive.truncated`; anything else that is not a
+  zstd frame (a reserved block type or descriptor bit, a block larger than the window or 128 KiB, a content size that is not the content's, a table
+  or tree that is not valid, a bitstream not consumed exactly, a match that reaches before the start of the content or past the window, a repeat
+  offset of zero) is `archive.bad-zstd`.
+* **The expansion is bounded** by `--max-bytes`: the content size in the header is checked against it before anything is made, and every block
+  is checked before it is written, so a 96 MiB run of one byte compressed to a few KiB (measured: the test) is refused at the cap in the memory of the
+  cap. The content is its own window and is copied once into the output, so peak memory is the output and one block.
+* **`list` of a zstd reads and expands the whole file**, as bzip2's and xz's do; there is no streaming of zstd here.
+
+### 18.3 What is not done
+
+Writing zstd: an encoder is a match finder, a Huffman builder and an FSE builder, and the first of the three is where the compression is. Raw and RLE
+blocks alone would be a valid zstd that compresses nothing, which is a worse promise than none; a real writer is its own piece of work, after this
+reader has been used. Dictionaries, several frames, and streaming are refused above and listed so that the next reader knows they are decisions.
+
+### 18.4 Measured
+
+32 MiB of text-like data at level 6 (12.0 MiB compressed, with a checksum) expands in 0.8 s here (Python's C `zstandard`: 0.06 s) at a peak of 93 MiB, and is
+byte for byte the original. Checked against the `zstandard` package (levels -5 to 22 with and without the checksum and the content size, windows from 1 KiB to
+128 MiB, long-distance matching, streamed frames, an empty frame; text, records, random bytes, long runs) and `tar` trees; every cut and every changed byte of a small
+frame gives a tag and never a trap, as do some 25,000 random mutations of real frames (a scratch fuzz, not kept); 46 mutants of the reader
+(`scripts/archive_mutants.py`) are killed, and the 12 that are not tried are listed in that script with why. The tests that kill the guards of the literals and sequences
+sections build blocks by hand (a table that is one repeated symbol makes the bitstream the offset's extra bits and an end marker; a Huffman tree of two
+symbols makes a one-bit code), and one of them is a property test of the three repeat offsets against a ten-line model. Tests that need `zstandard` are skipped
+when it is not installed.
+**Found by testing:** the predefined match-length distribution has seven `-1` entries at its end, not five (a block decoded wrongly, found by the first real
+frame); and a table description that ran past its end asked for a negative number of bits, a trap that only a block placed last in the input could reach
+(found by cutting a real block at every length and ending the input there).

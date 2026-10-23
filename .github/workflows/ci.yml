@@ -44,7 +44,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q jq strace ripgrep valgrind
-          pip install jsonschema
+          pip install jsonschema zstandard
 
       - name: Formatting
         working-directory: tools
@@ -125,7 +125,7 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q valgrind
-          pip install jsonschema
+          pip install jsonschema zstandard
 
       - name: Every mutant of the table scans is killed
         working-directory: tools

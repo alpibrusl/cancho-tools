@@ -77,6 +77,11 @@
       "bounded": true
     }
   ],
+  "never_touches": [
+    "the network",
+    "signals",
+    "foreign code"
+  ],
   "foreign_symbols": [],
   "pure": [
     "alphabet",

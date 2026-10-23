@@ -28,6 +28,7 @@ import archive.bzip2;
 import archive.flate;
 import archive.select;
 import archive.stream;
+import archive.xz;
 import archive.tar;
 import archive.zip;
 import toolbox.atomic;
@@ -41,7 +42,7 @@ import toolbox.place;
 import toolbox.text;
 
 fn extra() -> [] &static [byte] {
-    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.no-match|8|never|a selected path matches no entry of the archive;archive.unsupported|8|never|the archive uses encryption, zip64, several disks, a zip method other than stored and deflate, or a randomised bzip2 block;archive.bad-bzip2|8|never|a bzip2 stream that is not valid, or bytes after it;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
+    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.no-match|8|never|a selected path matches no entry of the archive;archive.unsupported|8|never|the archive uses encryption, zip64, several disks, a zip method other than stored and deflate, a randomised bzip2 block, or an xz filter other than LZMA2;archive.bad-bzip2|8|never|a bzip2 stream that is not valid, or bytes after it;archive.bad-xz|8|never|an xz stream that is not valid, or bytes after it;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
 }
 
 fn flag_table() -> [] &static [byte] {
@@ -49,7 +50,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "archive", version: "0.5.0", summary: "List, extract and create tar archives, gzip- or bzip2-compressed or not, and zips, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz|zip] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.unsupported;archive.bad-bzip2;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
+    return describe.Tool { name: "archive", version: "0.6.0", summary: "List, extract and create tar archives, gzip-, bzip2- or xz-compressed or not, and zips, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz|zip] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.unsupported;archive.bad-bzip2;archive.bad-xz;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -132,6 +133,25 @@ fn bzip2_error[&h, &p](heap: &!h Heap, e: fail.Errors, status: int, shown: &p [b
     return refuse(heap, e, "archive.bad-bzip2", "the bzip2 stream is not valid", "the archive is damaged", shown, "", 0);
 }
 
+fn xz_error[&h, &p](heap: &!h Heap, e: fail.Errors, status: int, shown: &p [byte], most: int) -> [heap] fail.Errors {
+    if status == 3 {
+        return too_large(heap, e, shown, most);
+    }
+    if status == 2 {
+        return refuse(heap, e, "archive.truncated", "the xz stream ends before its end marker", "", shown, "", 0);
+    }
+    if status == 13 {
+        return refuse(heap, e, "archive.crc-mismatch", "the data does not match an xz block's check, a CRC-32, or the index", "the archive is damaged", shown, "", 0);
+    }
+    if status == 11 {
+        return refuse(heap, e, "archive.unsupported", "the xz stream uses a filter other than LZMA2 (BCJ, delta), or a check type this tool does not know", "extract it with the tool that made it", shown, "", 0);
+    }
+    if status == 15 {
+        return refuse(heap, e, "archive.bad-xz", "bytes follow the xz stream", "a concatenation of xz files is not one archive: unpack each", shown, "", 0);
+    }
+    return refuse(heap, e, "archive.bad-xz", "the xz stream is not valid", "the archive is damaged", shown, "", 0);
+}
+
 fn tar_error[&h, &p](heap: &!h Heap, e: fail.Errors, failure: int, at: int, shown: &p [byte], most: int) -> [heap] fail.Errors {
     if failure == 1 {
         return refuse(heap, e, "archive.truncated", "the archive ends inside a header or body, or before its end marker", "", shown, "offset", at);
@@ -182,6 +202,12 @@ fn format_name(format: int) -> [] &static [byte] {
     if format == 6 {
         return "bz2";
     }
+    if format == 7 {
+        return "txz";
+    }
+    if format == 8 {
+        return "xz";
+    }
     return "none";
 }
 
@@ -201,6 +227,8 @@ fn gz_label[&h, &s, &p](heap: &!h Heap, header: &s [byte], shown: &p [byte]) -> 
         label = buffer.append(heap, label, leaf[0..len(leaf) - 3]);
     } else if bytes.ends_with(leaf, ".bz2") && len(leaf) > 4 {
         label = buffer.append(heap, label, leaf[0..len(leaf) - 4]);
+    } else if bytes.ends_with(leaf, ".xz") && len(leaf) > 3 {
+        label = buffer.append(heap, label, leaf[0..len(leaf) - 3]);
     } else {
         label = buffer.append(heap, label, "data");
     }
@@ -223,6 +251,10 @@ fn load[&h, &g, &f, &r](heap: &!h Heap, args: &g Args, fs: &f Fs(""), root: &r [
             var bz = false;
             borrow data as &dr in {
                 bz = bzip2.looks_like(buffer.bytes(dr));
+            }
+            var xzf = false;
+            borrow data as &dr in {
+                xzf = xz.looks_like(buffer.bytes(dr));
             }
             if errno != 0 {
                 e = fail.io_error(heap, e, errno, false, path.shown(rp));
@@ -251,6 +283,33 @@ fn load[&h, &g, &f, &r](heap: &!h Heap, args: &g Args, fs: &f Fs(""), root: &r [
                         format = 5;
                     } else {
                         format = 6;
+                        buffer.drop(heap, label);
+                        label = gz_label(heap, "", path.shown(rp));
+                    }
+                }
+            } else if xzf {
+                var expanded = buffer.empty(heap, 1);
+                var status = 0;
+                borrow data as &dr in {
+                    let (made, why) = xz.decompress(heap, buffer.bytes(dr), most);
+                    buffer.drop(heap, expanded);
+                    expanded = made;
+                    status = why;
+                }
+                if status != 0 {
+                    e = xz_error(heap, e, status, path.shown(rp), most);
+                    buffer.drop(heap, expanded);
+                } else {
+                    var is_tar = false;
+                    borrow expanded as &xr in {
+                        is_tar = tar.looks_like_tar(buffer.bytes(xr));
+                    }
+                    buffer.drop(heap, data);
+                    data = expanded;
+                    if is_tar {
+                        format = 7;
+                    } else {
+                        format = 8;
                         buffer.drop(heap, label);
                         label = gz_label(heap, "", path.shown(rp));
                     }
@@ -537,7 +596,7 @@ fn list_entries[&h, &i, &x, &s](heap: &!h Heap, io: &!i Io, entries: &x tar.Entr
     while k < tar.count(entries) && !count.broken {
         if select.note(sel, tar.name(entries, k)) {
             var mode = tar.mode(entries, k);
-            if format == 3 || format == 6 {
+            if format == 3 || format == 6 || format == 8 {
                 mode = 0 - 1;
             }
             let wrote = put_entry(heap, io, tar.name(entries, k), tar.kind_name(tar.kind(entries, k)), tar.size(entries, k), mode, tar.unsafe_at(entries, k));
@@ -744,8 +803,10 @@ fn list_file[&h, &i, &f, &p, &s](heap: &!h Heap, io: &!i Io, file: &!f File, sho
         is_zip = !zipped && zip.looks_like(buffer.bytes(cr));
     }
     var is_bz2 = false;
+    var is_xz = false;
     borrow chunk as &cr in {
         is_bz2 = bzip2.looks_like(buffer.bytes(cr));
+        is_xz = xz.looks_like(buffer.bytes(cr));
     }
     if failed != 0 {
         e = fail.io_error(heap, e, failed, false, shown);
@@ -798,6 +859,65 @@ fn list_file[&h, &i, &f, &p, &s](heap: &!h Heap, io: &!i Io, file: &!f File, sho
                             let single = tar.single(heap, buffer.bytes(lr), buffer.size(xr), 0);
                             borrow single as &sr in {
                                 count = list_entries(heap, io, sr, 6, sel, count);
+                            }
+                            tar.drop(heap, single);
+                        }
+                        buffer.drop(heap, label);
+                    }
+                }
+            }
+            buffer.drop(heap, expanded);
+        }
+        buffer.drop(heap, whole);
+    } else if is_xz {
+        format = 7;
+        // An xz stream is read whole (to --max-bytes) and expanded (to the same), then listed as the tar or the one file it holds.
+        var whole = buffer.empty(heap, 1);
+        var reason = 0;
+        var big = false;
+        borrow mut chunk as &!cm in {
+            let (got, why, over) = read_whole(heap, file, cm, ended, most_bytes);
+            buffer.drop(heap, whole);
+            whole = got;
+            reason = why;
+            big = over;
+        }
+        if reason != 0 {
+            e = fail.io_error(heap, e, reason, false, shown);
+            format = 0;
+        } else if big {
+            e = too_large(heap, e, shown, most_bytes);
+            format = 0;
+        } else {
+            var expanded = buffer.empty(heap, 1);
+            var status = 0;
+            borrow whole as &wr in {
+                let (made, why) = xz.decompress(heap, buffer.bytes(wr), most_bytes);
+                buffer.drop(heap, expanded);
+                expanded = made;
+                status = why;
+            }
+            if status != 0 {
+                e = xz_error(heap, e, status, shown, most_bytes);
+                format = 0;
+            } else {
+                borrow expanded as &xr in {
+                    if tar.looks_like_tar(buffer.bytes(xr)) {
+                        let entries = tar.parse(heap, buffer.bytes(xr), most_entries);
+                        borrow entries as &en in {
+                            if tar.failure(en) != 0 {
+                                e = tar_error(heap, e, tar.failure(en), tar.failure_at(en), "", most_entries);
+                            }
+                            count = list_entries(heap, io, en, 7, sel, count);
+                        }
+                        tar.drop(heap, entries);
+                    } else {
+                        format = 8;
+                        let label = gz_label(heap, "", shown);
+                        borrow label as &lr in {
+                            let single = tar.single(heap, buffer.bytes(lr), buffer.size(xr), 0);
+                            borrow single as &sr in {
+                                count = list_entries(heap, io, sr, 8, sel, count);
                             }
                             tar.drop(heap, single);
                         }
@@ -2044,7 +2164,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                         }
                     } else if ld.format != 0 {
                         var entries = tar.parse(heap, buffer.bytes(ld.data), most_entries);
-                        if ld.format == 3 || ld.format == 6 {
+                        if ld.format == 3 || ld.format == 6 || ld.format == 8 {
                             tar.drop(heap, entries);
                             entries = tar.single(heap, buffer.bytes(ld.label), buffer.size(ld.data), 0);
                         }

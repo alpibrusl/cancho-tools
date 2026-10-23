@@ -395,17 +395,20 @@ pub fn io_rule(errno: int, writing: bool) -> [] &static [byte] {
 pub fn io_error[&h, &p](heap: &!h Heap, e: Errors, errno: int, writing: bool, shown: &p [byte]) -> [heap] Errors {
     let rule = io_rule(errno, writing);
     var message: &static [byte] = "the operating system failed the operation";
-    var hint: &static [byte] = "";
+    // The default is set once, before the ladder, so that a branch which knows better overrides it.
+    var hint: &static [byte] = "the operating system refused the operation (detail.errno is its code); check the path and the storage, then try again";
     if errno == 2 {
         message = "no such file";
         hint = "check the path; it is relative to --root when one is given, otherwise to the working directory";
     } else if errno == 20 {
         message = "a component of the path is not a directory";
+        hint = "a name in the path that has to be a directory is a file; name a path whose directories are all directories";
     } else if errno == 21 {
         message = "the path is a directory";
         hint = "name a file inside it";
     } else if errno == 13 || errno == 1 {
         message = "permission denied";
+        hint = "the user running the tool lacks permission for this path; check the permissions of the path and of the directories above it";
     } else if errno == 40 || errno == 62 {
         message = "the path runs through a symbolic link, and the tool does not follow links";
         hint = "name the file the link points to; under --root, it must be inside the root";

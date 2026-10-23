@@ -423,6 +423,14 @@ $ peek --root . --lines 1:1 src/../src/main.rs                                  
 A repair never widens what the tool may touch: it never adds `--root`, a
 write flag or `--create`, and never removes `--dry-run`.
 
+The operating system's refusals (`io.*`, from `fail.io_error`) carry a `hint` and no `repair`, because nothing safe
+can be offered: `io.not-found`, `io.is-a-directory` and `path.symlink` say what to name instead;
+`io.not-a-directory` says that a name in the path that has to be a directory is a file; `io.permission-denied`
+says the user running the tool lacks permission for the path and to check the path and the directories above it
+(true of a read and of a write); and any other errno (`io.read-failed`, `io.write-failed`) says that the operating
+system refused the operation, that `detail.errno` is its code, and to check the path and the storage and try again.
+`tests/conformance/test_io_hints.py` pins these sentences on every tool.
+
 | Exit | Meaning |
 |---|---|
 | 0 | done (zero matches is still success) |

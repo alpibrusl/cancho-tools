@@ -495,7 +495,9 @@ In this order of value to cost, the first being the only new tool:
    * **a shorter skill.** `table skill` was 24,638 bytes after cancho-table#24 (14,648 before), because the
      summary appears twice in it; the duplicated summary and the authority block can go (measured in that PR;
      the same shape is in every tool's `skill` here, which has not been measured).
-   * hints for the shared rules (`args.*`, `path.*`, `io.*`), so a tool does not write its own.
+   * hints for the shared rules (`args.*`, `path.*`, `io.*`), so a tool does not write its own. (`io.*`: done for the
+     operating system's refusals, which `fail.io_error` writes; `io.not-a-directory`, `io.permission-denied` and the
+     default `io.read-failed` / `io.write-failed` were the three without a hint. `docs/reference.md`, "Errors you can act on".)
 5. Documents that follow from the above: amend `docs/agent-toolbox.md` D15's `cut`/`sort`/`uniq` row (§6);
    merge #35 so the references to `docs/agent-bench.md` resolve on main.
 

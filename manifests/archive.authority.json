@@ -155,6 +155,7 @@
     "field_of",
     "field_of",
     "file_mode",
+    "fill",
     "find",
     "find$int",
     "find_end",
@@ -221,6 +222,7 @@
     "leaf",
     "longest",
     "longest",
+    "looks_like",
     "looks_like",
     "looks_like_tar",
     "low_mask64",
@@ -306,6 +308,7 @@
     "summary_in",
     "table_size",
     "take",
+    "take",
     "takes_value",
     "tape_len",
     "tool",
@@ -336,7 +339,7 @@
     "width_of",
     "window_size"
   ],
-  "folded_operators": 68,
+  "folded_operators": 75,
   "folded_calls": 16,
-  "functions": 485
+  "functions": 493
 }

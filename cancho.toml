@@ -114,6 +114,11 @@ sources = ["contract", "tools/archive/flate.cho", "tools/archive/stream.cho", "t
 std = true
 
 [[test]]
+name = "select"
+sources = ["contract", "tools/archive/select.cho", "tests/select_test.cho"]
+std = true
+
+[[test]]
 name = "tar"
 sources = ["contract", "tools/archive/tar.cho", "tests/tar_test.cho"]
 std = true

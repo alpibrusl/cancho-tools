@@ -104,7 +104,9 @@
     "count",
     "count",
     "count",
+    "count",
     "count_byte",
+    "covers",
     "crc_update",
     "cstring",
     "decimal",
@@ -192,6 +194,7 @@
     "is_loop",
     "is_named",
     "is_tail",
+    "is_unmatched",
     "is_utf8",
     "is_valid",
     "is_ws",
@@ -215,6 +218,7 @@
     "low_mask64",
     "lshr64",
     "mask32",
+    "matches",
     "max_depth",
     "message_of",
     "min_of",
@@ -275,6 +279,7 @@
     "scan_for",
     "schema",
     "second_range",
+    "selector",
     "shell_builtin",
     "shown",
     "shr33",
@@ -324,5 +329,5 @@
   ],
   "folded_operators": 65,
   "folded_calls": 16,
-  "functions": 455
+  "functions": 465
 }

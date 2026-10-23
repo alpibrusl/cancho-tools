@@ -206,6 +206,8 @@
             "bz2",
             "txz",
             "xz",
+            "tzst",
+            "zst",
             "none"
           ]
         },

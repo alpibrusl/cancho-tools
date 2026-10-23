@@ -36,6 +36,11 @@ import zlib
 
 import jsonschema
 
+try:
+    import zstandard
+except ImportError:  # the zstd tests need it; the rest of the file does not
+    zstandard = None
+
 from harness import ROOT, binary, introspect, peak_rss, schema
 
 TRAPS = {132, 134, 136, 139, -4, -6, -8, -11}
@@ -1748,6 +1753,491 @@ class Archive(unittest.TestCase):
             for name, data in files:
                 self.assertEqual((into / name).read_bytes(), data)
 
+    # ---- zstd (docs/archive.md section 18) -----------------------------------------------------------------------------------------
+
+    def zstd_data(self):
+        rnd = random.Random(41)
+        words = [bytes(rnd.randrange(97, 123) for _ in range(rnd.randrange(2, 9))) for _ in range(300)]
+        prose = b" ".join(rnd.choice(words) for _ in range(40000))
+        records = b"".join(b'{"id": %d, "name": "item%d", "tags": ["a", "b", "c"]}\n' % (i, i * 7 % 13) for i in range(6000))
+        return {
+            "prose": prose,
+            "records": records,
+            "random": bytes(rnd.randrange(256) for _ in range(100000)),
+            "ones": b"\x01" * 300000,
+            "one": b"x",
+            "mixed": b"".join(bytes(rnd.randrange(256) for _ in range(rnd.randrange(1, 300))) if rnd.random() < 0.3 else bytes([rnd.randrange(4)]) * rnd.randrange(1, 2000) for _ in range(500)),
+        }
+
+    def zstd_extracted(self, name, blob, *flags):
+        self.write(name, blob)
+        shutil.rmtree(self.dir / "o", ignore_errors=True)
+        (self.dir / "o").mkdir()
+        return self.archive("--op", "extract", "--into", "o", *flags, name)
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_zstd_what_others_write_archive_reads(self):
+        for name, data in self.zstd_data().items():
+            for level in (-5, 1, 3, 9, 15, 19, 22):
+                for checksum in (False, True):
+                    blob = zstandard.ZstdCompressor(level=level, write_checksum=checksum, write_content_size=bool(level % 2)).compress(data)
+                    out = self.zstd_extracted("in.zst", blob, "--max-bytes", "100000000")
+                    check_stream(self, out)
+                    self.assertEqual(out.status, 0, (name, level, checksum, out.raw[-300:]))
+                    self.assertEqual(out.end()["format"], "zst")
+                    self.assertEqual((self.dir / "o" / "in").read_bytes(), data, (name, level, checksum))
+        # Several blocks, a streamed frame (no content size), a long window, and an empty frame.
+        data = self.zstd_data()["prose"] * 6
+        P = zstandard.ZstdCompressionParameters.from_level
+        for params in (
+            dict(level=3), dict(compression_params=P(19, window_log=27, write_checksum=1)), dict(level=5, threads=-1),
+            dict(compression_params=P(3, window_log=10, write_checksum=1)), dict(compression_params=P(22, window_log=24, enable_ldm=True, write_checksum=1)),
+        ):
+            blob = zstandard.ZstdCompressor(**({} if "compression_params" in params else {"write_checksum": True}), **params).compress(data)
+            out = self.zstd_extracted("w.zst", blob, "--max-bytes", "100000000")
+            self.assertEqual(out.status, 0, (params, out.raw[-300:]))
+            self.assertEqual((self.dir / "o" / "w").read_bytes(), data, params)
+        cobj = zstandard.ZstdCompressor(level=3).compressobj()
+        streamed = cobj.compress(data) + cobj.flush()
+        self.assertEqual(self.zstd_extracted("s.zst", streamed, "--max-bytes", "100000000").status, 0)
+        self.assertEqual((self.dir / "o" / "s").read_bytes(), data)
+        out = self.zstd_extracted("empty.zst", zstandard.ZstdCompressor().compress(b""), "--max-bytes", "1000")
+        out = self.archive("--op", "list", "empty.zst")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual([(r["path"], r["size"]) for r in out.records if r.get("type") == "entry"], [("empty", 0)])
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_a_tar_zst_lists_extracts_and_selects(self):
+        self.umask(0o022)
+        files = self.corpus(self.dir)
+        subprocess.run(["tar", "-cf", "mine.tar", "src", "empty"], cwd=self.dir, check=True)
+        self.write("mine.tar.zst", zstandard.ZstdCompressor(level=3, write_checksum=True).compress((self.dir / "mine.tar").read_bytes()))
+        out = self.archive("--op", "list", "mine.tar.zst")
+        check_stream(self, out)
+        self.assertEqual(out.end()["format"], "tzst")
+        listed = [r["path"] for r in out.records if r.get("type") == "entry"]
+        for name in files:
+            if name.startswith("src/"):
+                self.assertIn(name, listed)
+        (self.dir / "o").mkdir()
+        out = self.archive("--op", "extract", "--into", "o", "mine.tar.zst")
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        for name, data in files.items():
+            if name.startswith("src/"):
+                self.assertEqual((self.dir / "o" / name).read_bytes(), data, name)
+        self.assertTrue(os.access(self.dir / "o/src/run.sh", os.X_OK))
+        out = self.archive("--op", "list", "mine.tar.zst", "src/sub")
+        self.assertTrue(all(r["path"].startswith("src/sub") for r in out.records if r.get("type") == "entry"))
+        (self.dir / "o3").mkdir()
+        out = self.archive("--op", "extract", "--into", "o3", "mine.tar.zst", "src/run.sh")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual(sorted(str(p.relative_to(self.dir / "o3")) for p in (self.dir / "o3").rglob("*")), ["src", "src/run.sh"])
+
+    @staticmethod
+    def zstd_frame(blocks, content_size=None, descriptor=None, window=b"\x58"):
+        """A frame of hand-made blocks (type, body, last), with no checksum and the window byte given."""
+        single = content_size is not None and window is None
+        d = 0x20 if single else 0
+        head = b""
+        if content_size is not None:
+            d |= 0x80  # four bytes of content size
+            head = struct.pack("<I", content_size)
+        if descriptor is not None:
+            d = descriptor
+        out = b"\x28\xb5\x2f\xfd" + bytes([d]) + (b"" if single else window) + head
+        for kind, body, last, size in blocks:
+            out += struct.pack("<I", int(last) | kind << 1 | size << 3)[:3] + body
+        return out
+
+    def test_zstd_hand_made_frames_and_the_refusals_of_what_they_get_wrong(self):
+        raw = lambda body, last=True: (0, body, last, len(body))
+        rle = lambda byte, n, last=True: (1, byte, last, n)
+        ok = lambda name, blob, expect: (self.assertEqual(self.zstd_extracted(name, blob).status, 0, name), self.assertEqual((self.dir / "o" / name[:-4]).read_bytes(), expect, name))
+        ok("raw.zst", self.zstd_frame([raw(b"hello")]), b"hello")
+        ok("rle.zst", self.zstd_frame([rle(b"z", 3000)]), b"z" * 3000)
+        ok("two.zst", self.zstd_frame([raw(b"ab", False), rle(b"c", 5, False), raw(b"de")]), b"abcccccde")
+        ok("size.zst", self.zstd_frame([raw(b"abc")], content_size=3), b"abc")
+
+        def refused(name, blob, rules, *flags):
+            out = self.zstd_extracted(name, blob, *flags)
+            check_stream(self, out)
+            self.assertEqual(out.rules(), rules, name)
+
+        refused("lie.zst", self.zstd_frame([raw(b"abc")], content_size=4), ["archive.bad-zstd"])
+        refused("short.zst", self.zstd_frame([raw(b"abc")], content_size=2), ["archive.bad-zstd"])
+        refused("reserved.zst", self.zstd_frame([(3, b"", True, 0)]), ["archive.bad-zstd"])
+        refused("reservedbit.zst", self.zstd_frame([raw(b"a")], descriptor=0x08), ["archive.bad-zstd"])
+        refused("noend.zst", self.zstd_frame([raw(b"abc", False)]), ["archive.truncated"])
+        refused("cutraw.zst", self.zstd_frame([(0, b"ab", True, 5)]), ["archive.truncated"])
+        refused("cutrle.zst", self.zstd_frame([(1, b"", True, 5)]), ["archive.truncated"])
+        refused("noheader.zst", b"\x28\xb5\x2f\xfd", ["archive.truncated"])
+        refused("bigblock.zst", self.zstd_frame([(0, bytes(131073), True, 131073)]), ["archive.bad-zstd"])
+        refused("bigrle.zst", self.zstd_frame([rle(b"a", 131073)]), ["archive.bad-zstd"])
+        # A window of 1 KiB makes a block of more than that too large.
+        refused("window.zst", self.zstd_frame([raw(bytes(2000))], window=b"\x00"), ["archive.bad-zstd"])
+        # What follows the frame: another frame, a skippable frame, junk.
+        good = self.zstd_frame([raw(b"abc")])
+        refused("two-frames.zst", good + good, ["archive.bad-zstd"])
+        refused("skippable.zst", good + b"\x50\x2a\x4d\x18\x00\x00\x00\x00", ["archive.bad-zstd"])
+        refused("junk.zst", good + b"x", ["archive.bad-zstd"])
+        # A dictionary id other than 0 needs a dictionary this tool does not have; id 0 means none.
+        refused("dict.zst", b"\x28\xb5\x2f\xfd\x01\x58\x07" + good[6:], ["archive.unsupported"])
+        ok("dict0.zst", b"\x28\xb5\x2f\xfd\x01\x58\x00" + good[6:], b"abc")
+        # The content size is checked against the cap before anything is made.
+        refused("capsize.zst", self.zstd_frame([raw(b"abc")], content_size=1 << 30), ["limit.archive-too-large"], "--max-bytes", "1000")
+        refused("capraw.zst", self.zstd_frame([raw(bytes(2000))]), ["limit.archive-too-large"], "--max-bytes", "1000")
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_a_compressed_block_cut_anywhere_at_the_end_of_the_input_is_a_tag(self):
+        # The bounds a block's parts are held to are the block's, not the file's: the block is made to end where the input ends, at every length,
+        # so a part that read past the block would read past the input.
+        rnd = random.Random(77)
+        words = [bytes(rnd.randrange(97, 123) for _ in range(rnd.randrange(2, 9))) for _ in range(120)]
+        samples = {
+            "huffman": b" ".join(rnd.choice(words) for _ in range(900)),
+            "records": b"".join(b'{"id": %d, "n": "item%d"}\n' % (i, i * 7 % 13) for i in range(400)),
+            "runs": b"".join(bytes([rnd.randrange(4)]) * rnd.randrange(1, 300) for _ in range(40)),
+            "short": b"hello hello hello hello",
+        }
+        tried = 0
+        for label, data in samples.items():
+            for level in (1, 3, 19):
+                blob = zstandard.ZstdCompressor(level=level, write_checksum=False, write_content_size=False).compress(data)
+                descriptor = blob[4]
+                at = 5 if descriptor & 0x20 else 6
+                head = blob[at] | blob[at + 1] << 8 | blob[at + 2] << 16
+                if head >> 1 & 3 != 2 or not head & 1:
+                    continue
+                body = blob[at + 3:]
+                self.assertEqual(len(body), head >> 3)
+                for keep in range(len(body)):
+                    cut = struct.pack("<I", 1 | 2 << 1 | keep << 3)[:3] + body[:keep]
+                    out = self.zstd_extracted("cut.zst", blob[:at] + cut)
+                    check_stream(self, out)
+                    self.assertTrue(out.rules(), (label, level, keep))
+                    tried += 1
+        self.assertGreater(tried, 300)
+
+    def test_zstd_literals_that_need_a_tree_that_is_not_there_are_refused(self):
+        # A treeless literals section (kind 3) in the first block has no tree to reuse; one stream of one byte, one literal.
+        lits = struct.pack("<I", 3 | 1 << 4 | 1 << 14)[:3] + b"\x01"
+        body = lits + b"\x00"
+        frame = self.zstd_frame([(2, body, True, len(body))])
+        out = self.zstd_extracted("treeless.zst", frame)
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-zstd"])
+        # Sequences that reuse a table (mode 3 for all three) in the first block have none to reuse.
+        body = b"\x00" + b"\x01" + b"\xfc" + b"\x01"
+        frame = self.zstd_frame([(2, body, True, len(body))])
+        out = self.zstd_extracted("reuse.zst", frame)
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-zstd"])
+
+    @staticmethod
+    def zstd_lits(kind, fmt, regen, csize=0):
+        """A literals section header."""
+        if kind < 2:
+            if fmt in (0, 2):
+                return bytes([kind | fmt << 2 | regen << 3])
+            if fmt == 1:
+                return struct.pack("<H", kind | fmt << 2 | regen << 4)
+            return struct.pack("<I", kind | fmt << 2 | regen << 4)[:3]
+        rbits, size = {0: (10, 3), 1: (10, 3), 2: (14, 4), 3: (18, 5)}[fmt]
+        return (kind | fmt << 2 | regen << 4 | csize << (4 + rbits)).to_bytes(size, "little")
+
+    @staticmethod
+    def zstd_sequence_block(lits, ll_sym, of_sym, ml_sym, stream=None, modes=0x54, count=1):
+        """A compressed block of raw literals and `count` sequences whose three tables are one repeated symbol each, so the
+        bitstream is the offset's extra bits and the end marker."""
+        if stream is None:
+            stream = b"\x01"
+        body = Archive.zstd_lits(0, 0, len(lits)) if len(lits) < 32 else Archive.zstd_lits(0, 1, len(lits))
+        body += lits + (bytes([count]) if count < 128 else bytes([128 + (count >> 8), count & 255]))
+        body += bytes([modes, ll_sym, of_sym, ml_sym]) + stream
+        return (2, body, False, len(body))
+
+    @staticmethod
+    def zstd_run(ops):
+        """What a frame of one-sequence blocks makes, or None when it must be refused: ops are (literals, offset value, match length)."""
+        out = bytearray()
+        reps = [1, 4, 8]
+        for lits, value, ml in ops:
+            ll = len(lits)
+            if value > 3:
+                offset = value - 3
+                reps = [offset, reps[0], reps[1]]
+            else:
+                pick = value + (1 if ll == 0 else 0)
+                if pick == 1:
+                    offset = reps[0]
+                elif pick == 2:
+                    offset = reps[1]
+                    reps = [offset, reps[0], reps[2]]
+                elif pick == 3:
+                    offset = reps[2]
+                    reps = [offset, reps[0], reps[1]]
+                else:
+                    offset = reps[0] - 1
+                    if offset == 0:
+                        return None
+                    reps = [offset, reps[0], reps[1]]
+            out += lits
+            if offset > len(out):
+                return None
+            for _ in range(ml):
+                out.append(out[-offset])
+        return bytes(out)
+
+    def zstd_ops_frame(self, ops):
+        blocks = []
+        for lits, value, ml in ops:
+            of = value.bit_length() - 1
+            stream = (value - (1 << of) | 1 << of).to_bytes(of // 8 + 1, "little")
+            kind, body, last, size = self.zstd_sequence_block(lits, len(lits), of, ml - 3, stream)
+            blocks.append((kind, body, False, size))
+        blocks[-1] = (blocks[-1][0], blocks[-1][1], True, blocks[-1][3])
+        return self.zstd_frame(blocks)
+
+    def test_zstd_sequences_with_repeat_offsets_are_what_the_format_says(self):
+        rnd = random.Random(12)
+        accepted = refused = 0
+        for round in range(160):
+            ops = []
+            for k in range(rnd.randrange(1, 7)):
+                lits = bytes(rnd.randrange(97, 123) for _ in range(rnd.choice([0, 0, 1, 3, 8, 12])))
+                if k == 0 and not lits:
+                    lits = b"abcdefgh"
+                ops.append((lits, rnd.choice([1, 2, 3, 3, 4, 5, 6, 7, 9, 12]), rnd.randrange(3, 30)))
+            expected = self.zstd_run(ops)
+            out = self.zstd_extracted("ops.zst", self.zstd_ops_frame(ops))
+            check_stream(self, out)
+            if expected is None:
+                self.assertEqual(out.rules(), ["archive.bad-zstd"], ops)
+                refused += 1
+            else:
+                self.assertEqual(out.status, 0, (ops, out.raw[-200:]))
+                self.assertEqual((self.dir / "o" / "ops").read_bytes(), expected, ops)
+                accepted += 1
+        self.assertGreater(accepted, 30)
+        self.assertGreater(refused, 10)
+
+    def test_zstd_sequence_sections_that_are_wrong_in_one_way_are_refused(self):
+        def only(name, block, *flags, rules=("archive.bad-zstd",)):
+            kind, body, last, size = block
+            out = self.zstd_extracted(name, self.zstd_frame([(kind, body, True, size)]), *flags)
+            check_stream(self, out)
+            self.assertEqual(tuple(out.rules()), rules, name)
+
+        good = self.zstd_sequence_block(b"abcde", 5, 0, 0)
+        only("good-lits.zst", good, rules=())
+        only("reserved.zst", self.zstd_sequence_block(b"abcde", 5, 0, 0, modes=0x55))
+        only("more-lits.zst", self.zstd_sequence_block(b"ab", 5, 0, 0))
+        only("zero-offset.zst", self.zstd_sequence_block(b"", 0, 1, 0, b"\x03"))
+        only("padded.zst", self.zstd_sequence_block(b"abcde", 5, 0, 0, b"\x00\x01"))
+        # Tables reused that were never sent, even where the match could be made.
+        raw = (0, b"0123456789", False, 10)
+        reuse = (2, self.zstd_lits(0, 0, 0) + b"\x01\xfc\x01", True, 4)
+        out = self.zstd_extracted("reuse.zst", self.zstd_frame([raw, reuse]))
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-zstd"])
+        # Cut off in the sequences header, where the input ends.
+        lits = self.zstd_lits(0, 0, 0)
+        for name, tail in (("nocount", b""), ("count2", b"\x80"), ("count3", b"\xff\x00"), ("nomodes", b"\x01"), ("nosymbols", b"\x01\x54\x00")):
+            only(name + ".zst", (2, lits + tail, True, len(lits + tail)), rules=("archive.truncated",))
+        # A stream with too few bits for the states, and a count that would run far past a short stream.
+        only("shortstates.zst", self.zstd_sequence_block(b"abcde", 5, 0, 0, b"\x01", modes=0x00))
+        only("longcount.zst", (2, lits + b"\xff\xff\xff\x00\xff\xff\x01", True, len(lits) + 7))
+        # Output caps that only the decoder can apply: the sequences' own sizes.
+        ops = self.zstd_ops_frame([(b"abcde", 1, 30)] + [(b"", 1, 30)] * 50)
+        self.assertEqual(self.zstd_extracted("cap-ok.zst", ops, "--max-bytes", "1535").status, 0)
+        self.assertEqual(self.zstd_extracted("cap.zst", ops, "--max-bytes", "1534").rules(), ["limit.archive-too-large"])
+
+    def test_zstd_literals_headers_cut_short_or_too_big_are_refused(self):
+        def only(name, body, rules):
+            out = self.zstd_extracted(name + ".zst", self.zstd_frame([(2, body, True, len(body))]))
+            check_stream(self, out)
+            self.assertEqual(out.rules(), rules, name)
+
+        cut, bad = ["archive.truncated"], ["archive.bad-zstd"]
+        only("raw-fmt1-cut", b"\x04", cut)
+        only("raw-fmt3-cut", b"\x0c\x00", cut)
+        only("raw-body-cut", self.zstd_lits(0, 0, 5) + b"ab", cut)
+        only("raw-too-big", self.zstd_lits(0, 3, 131073), bad)
+        only("rle-no-byte", self.zstd_lits(1, 0, 5), cut)
+        only("rle-fmt1-cut", b"\x05", cut)
+        only("rle-too-big", self.zstd_lits(1, 3, 131073) + b"x", bad)
+        only("huffman-fmt3-cut", b"\x0e\x00\x00\x00", cut)
+        only("huffman-regen-too-big", self.zstd_lits(2, 3, 131073, 2) + b"\x00\x00", bad)
+        only("huffman-body-cut", self.zstd_lits(2, 2, 100, 50) + b"\x00" * 10, cut)
+
+    def test_zstd_huffman_literals_built_by_hand_and_wrong_in_one_way(self):
+        # Two symbols of weight one each: a one-bit code. A stream is the bits of its symbols and then a one bit.
+        tree = b"\x80\x10"
+
+        def block(regen, streams, tree=tree, fmt=1, sizes=None):
+            sizes = sizes or [len(x) for x in streams[:3]]
+            payload = tree + b"".join(struct.pack("<H", v) for v in sizes) + b"".join(streams)
+            body = self.zstd_lits(2, fmt, regen, len(payload)) + payload + b"\x00"
+            return self.zstd_frame([(2, body, True, len(body))])
+
+        def stream(bits, n):
+            """`n` zero symbols and the end marker, as bytes (the first symbol in the lowest bit)."""
+            value = 1 << n
+            return value.to_bytes(n // 8 + 1, "little")
+
+        out = self.zstd_extracted("hand.zst", block(4, [stream(0, 1)] * 4))
+        self.assertEqual(out.status, 0, out.raw[-200:])
+        self.assertEqual(len((self.dir / "o" / "hand").read_bytes()), 4)
+        # A regenerated size the four streams cannot share (the last would be negative).
+        for regen in (1, 2):
+            out = self.zstd_extracted("seg.zst", block(regen, [stream(0, 1)] * 3 + [stream(0, 0)]))
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-zstd"], regen)
+        # A tree that is not a tree (a code of 15 bits), where empty streams would otherwise be read with no code at all.
+        out = self.zstd_extracted("badtree.zst", block(4, [stream(0, 0)] * 4, tree=b"\x80\xf0"))
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-zstd"])
+        # More literals than a block may hold, with streams that really carry them.
+        regen = 131073
+        seg = (regen + 3) // 4
+        streams = [stream(0, seg)] * 3 + [stream(0, regen - 3 * seg)]
+        out = self.zstd_extracted("huge.zst", block(regen, streams, fmt=3))
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-zstd"])
+        # ... and the most a block may hold is read.
+        regen = 131072
+        seg = regen // 4
+        streams = [stream(0, seg)] * 4
+        out = self.zstd_extracted("most.zst", block(regen, streams, fmt=3))
+        # (All zero bytes, which read as an empty tar: nothing is written, and nothing is wrong.)
+        self.assertEqual(out.status, 0, out.raw[-200:])
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_zstd_literals_sections_that_lie_about_their_sizes_are_refused(self):
+        rnd = random.Random(55)
+        words = [bytes(rnd.randrange(97, 123) for _ in range(rnd.randrange(2, 9))) for _ in range(120)]
+        datas = [b" ".join(rnd.choice(words) for _ in range(3000)), bytes(rnd.choice(b"abcd") for _ in range(20000))]
+        tried = 0
+        for data in datas:
+            blob = zstandard.ZstdCompressor(level=3, write_checksum=False, write_content_size=False).compress(data)
+            at = 5 if blob[4] & 0x20 else 6
+            head = blob[at] | blob[at + 1] << 8 | blob[at + 2] << 16
+            self.assertEqual(head >> 1 & 3, 2)
+            body = blob[at + 3:at + 3 + (head >> 3)]
+            fmt = body[0] >> 2 & 3
+            self.assertEqual(body[0] & 3, 2)
+            rbits, hlen = {0: (10, 3), 1: (10, 3), 2: (14, 4), 3: (18, 5)}[fmt]
+            value = int.from_bytes(body[:hlen], "little")
+            regen = value >> 4 & (1 << rbits) - 1
+            csize = value >> 4 + rbits & (1 << rbits) - 1
+            payload = body[hlen:hlen + csize]
+            rest = body[hlen + csize:]
+            tree = 1 + payload[0] if payload[0] < 128 else 1 + (payload[0] - 127 + 1) // 2
+
+            def refused(label, new_body, last_block=True):
+                nonlocal tried
+                frame = blob[:at] + struct.pack("<I", int(last_block) | 2 << 1 | len(new_body) << 3)[:3] + new_body
+                out = self.zstd_extracted("lie.zst", frame)
+                check_stream(self, out)
+                self.assertTrue(out.rules(), (fmt, label))
+                tried += 1
+
+            # The section ends where the input does, at every length from nothing to past the tree and the jump table.
+            for keep in range(0, min(csize, tree + 14)):
+                refused(("short", keep), self.zstd_lits(2, fmt, regen, keep) + payload[:keep], True)
+            # The regenerated size, all around the real one and at the cap.
+            for lie in list(range(0, 14)) + [regen - 1, regen + 1, 131072, 131073, 1 << rbits - 1]:
+                if 0 <= lie < 1 << rbits and lie != regen:
+                    refused(("regen", lie), self.zstd_lits(2, fmt, lie, csize) + payload + rest)
+            # Every other first byte of the tree description: the weights' header.
+            for v in range(256):
+                if v != payload[0]:
+                    refused(("tree", v), body[:hlen] + bytes([v]) + payload[1:] + rest)
+            if fmt >= 1:
+                # The jump table of four streams: sizes that do not add up, are zero, or are the whole section.
+                for sizes in ((0, 0, 0), (1, 1, 1), (65535, 0, 0), (0, 65535, 0), (0, 0, 65535), (csize, csize, csize), (1, 0, 0), (0, 1, 0), (0, 0, 1)):
+                    table = b"".join(struct.pack("<H", v) for v in sizes)
+                    refused(("jump", sizes), body[:hlen] + payload[:tree] + table + payload[tree + 6:] + rest)
+        self.assertGreater(tried, 60)
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_zstd_output_that_is_literals_only_or_ends_in_literals_is_capped(self):
+        rnd = random.Random(66)
+        letters = bytes(rnd.choice(b"abcd") for _ in range(100000))
+        for label, data in (("literals only", letters), ("repeat then literals", b"abcdefgh" * 50 + letters), ("literals then repeat", letters + b"abcdefgh" * 50 + b"xyz" * 90)):
+            blob = zstandard.ZstdCompressor(level=1, write_content_size=False).compress(data)
+            out = self.zstd_extracted("lit.zst", blob, "--max-bytes", str(len(data) - 1))
+            self.assertEqual(out.rules(), ["limit.archive-too-large"], label)
+            out = self.zstd_extracted("lit.zst", blob, "--max-bytes", str(len(data)))
+            self.assertEqual(out.status, 0, (label, out.raw[-200:]))
+            self.assertEqual((self.dir / "o" / "lit").read_bytes(), data, label)
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_zstd_damage_and_unsupported_forms_are_tags(self):
+        data = self.zstd_data()["records"][:20000]
+        good = zstandard.ZstdCompressor(level=3, write_checksum=True).compress(data)
+        # The checksum is held to: a changed one, and changed content that still decodes.
+        bad = bytearray(good)
+        bad[-1] ^= 1
+        self.write("sum.zst", bytes(bad))
+        self.assertEqual(self.archive("--op", "extract", "--into", ".", "sum.zst").rules(), ["archive.crc-mismatch"])
+        self.write("cut.zst", good[:-2])
+        self.assertEqual(self.archive("--op", "extract", "--into", ".", "cut.zst").rules(), ["archive.truncated"])
+        self.write("more.zst", good + good)
+        self.assertEqual(self.archive("--op", "extract", "--into", ".", "more.zst").rules(), ["archive.bad-zstd"])
+        # A literal byte changed inside a raw block: the checksum catches it.
+        raw_blob = zstandard.ZstdCompressor(level=1, write_checksum=True).compress(bytes(random.Random(5).randrange(256) for _ in range(3000)))
+        bad = bytearray(raw_blob)
+        bad[len(bad) // 2] ^= 0x40
+        self.write("lit.zst", bytes(bad))
+        self.assertEqual(self.archive("--op", "extract", "--into", ".", "lit.zst").rules(), ["archive.crc-mismatch"])
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_no_single_bit_of_a_small_zstd_can_change_the_content_unnoticed(self):
+        data = b"hello, hello, hello zstd " * 20 + bytes(range(200))
+        blob = zstandard.ZstdCompressor(level=3, write_checksum=True).compress(data)
+        for at in range(len(blob)):
+            for bit in range(8):
+                mutated = bytearray(blob)
+                mutated[at] ^= 1 << bit
+                out = self.zstd_extracted("bit.zst", bytes(mutated))
+                check_stream(self, out)
+                if not out.rules():
+                    # Only a bit that does not matter (the unused descriptor bit, a bigger window) may pass, and then the content is the same.
+                    self.assertEqual((self.dir / "o" / "bit").read_bytes(), data, (at, bit))
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_zstd_output_is_capped_to_the_byte_and_a_bomb_is_refused_in_small_memory(self):
+        for label, data in [("coded", b"a" * 1000), ("coded, longer", b"abcdefgh" * 40000), ("several blocks", (b"0123456789" * 31337))]:
+            blob = zstandard.ZstdCompressor(level=3, write_content_size=False).compress(data)
+            out = self.zstd_extracted("cap.zst", blob, "--max-bytes", str(len(data) - 1))
+            self.assertEqual(out.rules(), ["limit.archive-too-large"], label)
+            out = self.zstd_extracted("cap.zst", blob, "--max-bytes", str(len(data)))
+            self.assertEqual(out.status, 0, (label, out.raw))
+            self.assertEqual((self.dir / "o" / "cap").read_bytes(), data, label)
+        self.write("bomb.zst", zstandard.ZstdCompressor(level=1, write_content_size=False).compress(b"\x01" * (96 * 1024 * 1024)))
+        status, peak_kib = peak_rss([binary("archive"), "--op", "extract", "--max-bytes", "1048576", "bomb.zst"], cwd=self.dir)
+        self.assertEqual(status, 8)
+        self.assertLess(peak_kib, 24 * 1024, "the expansion was held, not refused at the cap")
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_every_cut_and_changed_byte_of_a_zstd_is_a_tag_never_a_trap(self):
+        blob = zstandard.ZstdCompressor(level=3, write_checksum=True).compress(b"hello world, hello zstd " * 30 + bytes(range(256)))
+        for cut in range(0, len(blob)):
+            self.write("cut.zst", blob[:cut])
+            check_stream(self, self.archive("--op", "list", "cut.zst"))
+        rnd = random.Random(9)
+        for at in range(0, len(blob)):
+            mutated = bytearray(blob)
+            mutated[at] ^= rnd.choice([1, 0x80, 0xff, 0x55, 0x10])
+            self.write("flip.zst", bytes(mutated))
+            for op in ["list", "extract"]:
+                out = self.archive("--op", op, "flip.zst", "--into", ".") if op == "extract" else self.archive("--op", op, "flip.zst")
+                check_stream(self, out)
+                for f in out.files():
+                    name = f["path"] if isinstance(f["path"], str) else os.fsdecode(base64.b64decode(f["path"]["b64"]))
+                    pathlib.Path(self.dir / name).unlink(missing_ok=True)
+
     # ---- the contract ------------------------------------------------------------------------------------------------------------------
 
     def test_every_rule_of_the_tool_is_reached_by_a_fixture_in_this_file(self):
@@ -1756,7 +2246,7 @@ class Archive(unittest.TestCase):
             "archive.not-an-archive", "archive.bad-gzip", "archive.crc-mismatch", "archive.bad-deflate",
             "archive.bad-checksum", "archive.bad-header", "archive.truncated", "archive.unsafe-name",
             "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.special-mode",
-            "archive.no-match", "archive.unsupported", "archive.bad-bzip2", "archive.bad-xz", "archive.name-too-long",
+            "archive.no-match", "archive.unsupported", "archive.bad-bzip2", "archive.bad-xz", "archive.bad-zstd", "archive.name-too-long",
             "limit.archive-too-large", "limit.too-many-entries",
         }
         self.assertEqual(declared, seen)
@@ -1803,6 +2293,8 @@ class Archive(unittest.TestCase):
         self.write("bad.xz", b"\xfd7zXZ\x00\x00" + bytes(40))
         self.write("bad.xz", lzma.compress(b"x", format=lzma.FORMAT_XZ) + b"extra")
         reached |= set(self.archive("--op", "list", "bad.xz").rules())
+        self.write("bad.zst", b"\x28\xb5\x2f\xfd\x20\x01\x06\x00\x00")
+        reached |= set(self.archive("--op", "list", "bad.zst").rules())
         self.write("bad.bz2", b"BZh9" + bytes(40))
         reached |= set(self.archive("--op", "list", "bad.bz2").rules())
         self.make_zip("enc.zip", [("a", b"x", 0o644)])

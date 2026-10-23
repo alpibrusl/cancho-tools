@@ -19,6 +19,7 @@ import gzip
 import hashlib
 import io
 import json
+import lzma
 import os
 import pathlib
 import random
@@ -962,6 +963,149 @@ class Archive(unittest.TestCase):
                     name = f["path"] if isinstance(f["path"], str) else os.fsdecode(base64.b64decode(f["path"]["b64"]))
                     pathlib.Path(self.dir / name).unlink(missing_ok=True)
 
+    # ---- xz (docs/archive.md section 17) -----------------------------------------------------------------------------------------
+
+    def xz_data(self):
+        rnd = random.Random(31)
+        return {
+            "text": b"the quick brown fox jumps over the lazy dog\n" * 6000,
+            "random": bytes(rnd.randrange(256) for _ in range(100000)),
+            "ones": b"\x01" * 200000,
+            "one": b"x",
+            "mixed": (b"abc" * 1000 + bytes(rnd.randrange(256) for _ in range(5000))) * 5,
+        }
+
+    def test_xz_what_others_write_archive_reads(self):
+        for name, data in self.xz_data().items():
+            for check in (lzma.CHECK_NONE, lzma.CHECK_CRC32, lzma.CHECK_CRC64, lzma.CHECK_SHA256):
+                for preset in (0, 6, 9):
+                    self.write("in.xz", lzma.compress(data, format=lzma.FORMAT_XZ, check=check, preset=preset))
+                    shutil.rmtree(self.dir / "o", ignore_errors=True)
+                    (self.dir / "o").mkdir()
+                    out = self.archive("--op", "extract", "--into", "o", "in.xz")
+                    check_stream(self, out)
+                    self.assertEqual(out.status, 0, (name, check, preset, out.raw[-300:]))
+                    self.assertEqual(out.end()["format"], "xz")
+                    self.assertEqual((self.dir / "o" / "in").read_bytes(), data, (name, check, preset))
+        # The properties xz can be told: literal bits, position bits, several blocks (also in parallel), a big dictionary; an empty stream.
+        rnd = random.Random(32)
+        big = b"lorem ipsum dolor sit amet " * 20000 + bytes(rnd.randrange(256) for _ in range(150000))
+        (self.dir / "big.bin").write_bytes(big)
+        for opts in (["--lzma2=lc=0,lp=2,pb=0"], ["--lzma2=lc=4,lp=0,pb=4"], ["--lzma2=preset=1,lc=1,lp=3,pb=2"], ["--block-size=100000"], ["-T2", "--block-size=65536"], ["--check=crc64", "--lzma2=preset=9e,dict=64MiB"], ["--check=sha256", "--block-size=300000"]):
+            with open(self.dir / "big.xz", "wb") as f:
+                subprocess.run(["xz", "-kf", "-c"] + opts + [str(self.dir / "big.bin")], stdout=f, check=True)
+            shutil.rmtree(self.dir / "o", ignore_errors=True)
+            (self.dir / "o").mkdir()
+            out = self.archive("--op", "extract", "--into", "o", "big.xz")
+            self.assertEqual(out.status, 0, (opts, out.raw[-300:]))
+            self.assertEqual((self.dir / "o" / "big").read_bytes(), big, opts)
+        self.write("empty.xz", lzma.compress(b"", format=lzma.FORMAT_XZ))
+        out = self.archive("--op", "list", "empty.xz")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual([(r["path"], r["size"]) for r in out.records if r.get("type") == "entry"], [("empty", 0)])
+
+    def test_a_tar_xz_lists_extracts_and_selects(self):
+        self.umask(0o022)
+        files = self.corpus(self.dir)
+        subprocess.run(["tar", "-cJf", "mine.tar.xz", "src", "empty"], cwd=self.dir, check=True)
+        out = self.archive("--op", "list", "mine.tar.xz")
+        check_stream(self, out)
+        self.assertEqual(out.end()["format"], "txz")
+        listed = [r["path"] for r in out.records if r.get("type") == "entry"]
+        for name in files:
+            if name.startswith("src/"):
+                self.assertIn(name, listed)
+        (self.dir / "o").mkdir()
+        out = self.archive("--op", "extract", "--into", "o", "mine.tar.xz")
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        for name, data in files.items():
+            if name.startswith("src/"):
+                self.assertEqual((self.dir / "o" / name).read_bytes(), data, name)
+        self.assertTrue(os.access(self.dir / "o/src/run.sh", os.X_OK))
+        out = self.archive("--op", "list", "mine.tar.xz", "src/sub")
+        self.assertTrue(all(r["path"].startswith("src/sub") for r in out.records if r.get("type") == "entry"))
+        (self.dir / "o3").mkdir()
+        out = self.archive("--op", "extract", "--into", "o3", "mine.tar.xz", "src/run.sh")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual(sorted(str(p.relative_to(self.dir / "o3")) for p in (self.dir / "o3").rglob("*")), ["src", "src/run.sh"])
+
+    def test_xz_damage_extra_bytes_and_unsupported_forms_are_tags(self):
+        data = b"hello hello hello world\n" * 400
+        good = lzma.compress(data, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32)
+        for label, blob in [("trailing", good + b"xyz"), ("concatenated", good + good)]:
+            self.write("x.xz", blob)
+            out = self.archive("--op", "extract", "x.xz")
+            self.assertEqual(out.rules(), ["archive.bad-xz"], label)
+            self.assertFalse((self.dir / "x").exists(), label)
+        self.write("cut.xz", good[:-14])
+        self.assertIn(self.archive("--op", "extract", "cut.xz").rules(), (["archive.truncated"], ["archive.bad-xz"], ["archive.crc-mismatch"]))
+        # Each check, flipped: the stream header, a block header, the check, the index, the footer.
+        header_crc = 8
+        raw = bytearray(good)
+        raw[header_crc] ^= 1
+        self.write("hcrc.xz", bytes(raw))
+        self.assertEqual(self.archive("--op", "extract", "hcrc.xz").rules(), ["archive.crc-mismatch"])
+        raw = bytearray(good)
+        raw[12 + 2] ^= 1  # inside the block header
+        self.write("bcrc.xz", bytes(raw))
+        self.assertEqual(self.archive("--op", "extract", "bcrc.xz").rules(), ["archive.crc-mismatch"])
+        for label, at in [("check", len(good) - 12 - 12 - 4), ("index", len(good) - 12 - 4), ("footer", len(good) - 6), ("magic", len(good) - 1)]:
+            raw = bytearray(good)
+            raw[at] ^= 0x55
+            self.write("flip.xz", bytes(raw))
+            out = self.archive("--op", "extract", "flip.xz")
+            self.assertEqual(len(out.rules()), 1, (label, out.raw))
+            self.assertIn(out.rules()[0], ("archive.crc-mismatch", "archive.bad-xz"), label)
+            self.assertFalse((self.dir / "flip").exists(), label)
+        # Filters in front of LZMA2 (BCJ, delta) are not read; a check type this tool does not know is not either.
+        for flag in ("--x86", "--delta=dist=2"):
+            with open(self.dir / "f.xz", "wb") as f:
+                subprocess.run(["xz", "-c", flag, "--lzma2=preset=1", str(self.dir / "x.xz")], stdout=f, check=False)
+            with open(self.dir / "f.xz", "wb") as f:
+                subprocess.run(["xz", "-c", flag, "--lzma2=preset=1"], input=data, stdout=f, check=True)
+            self.assertEqual(self.archive("--op", "extract", "f.xz").rules(), ["archive.unsupported"], flag)
+        raw = bytearray(good)
+        raw[7] = 0x05
+        raw[8:12] = struct.pack("<I", zlib.crc32(bytes(raw[6:8])))
+        self.write("check5.xz", bytes(raw))
+        self.assertEqual(self.archive("--op", "extract", "check5.xz").rules(), ["archive.unsupported"])
+        self.write("junk.xz", b"\xfd7zXZ\x00" + bytes(40))
+        self.assertIn(self.archive("--op", "extract", "junk.xz").rules()[0], ("archive.crc-mismatch", "archive.bad-xz", "archive.truncated"))
+
+    def test_xz_output_is_capped_to_the_byte_and_a_bomb_is_refused_in_small_memory(self):
+        # Exactly the cap is allowed and one byte more is not. (A raw chunk cannot be told apart this way: the file that holds it is
+        # larger than its content, and the cap refuses that file first.)
+        for label, data in [("coded", b"a" * 1000), ("coded, longer", b"abcdefgh" * 4000)]:
+            self.write("cap.xz", lzma.compress(data, format=lzma.FORMAT_XZ, check=lzma.CHECK_NONE))
+            shutil.rmtree(self.dir / "o", ignore_errors=True)
+            (self.dir / "o").mkdir()
+            out = self.archive("--op", "extract", "--into", "o", "--max-bytes", str(len(data) - 1), "cap.xz")
+            self.assertEqual(out.rules(), ["limit.archive-too-large"], label)
+            out = self.archive("--op", "extract", "--into", "o", "--max-bytes", str(len(data)), "cap.xz")
+            self.assertEqual(out.status, 0, (label, out.raw))
+            self.assertEqual((self.dir / "o" / "cap").read_bytes(), data, label)
+        self.write("bomb.xz", lzma.compress(b"\x01" * (96 * 1024 * 1024), format=lzma.FORMAT_XZ, preset=1))
+        status, peak_kib = peak_rss([binary("archive"), "--op", "extract", "--max-bytes", "1048576", "bomb.xz"], cwd=self.dir)
+        self.assertEqual(status, 8)
+        self.assertLess(peak_kib, 24 * 1024, "the expansion was held, not refused at the cap")
+
+    def test_every_cut_and_changed_byte_of_an_xz_is_a_tag_never_a_trap(self):
+        blob = lzma.compress(b"hello world, hello xz " * 30 + bytes(range(256)), format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC32, preset=1)
+        for cut in range(0, len(blob)):
+            self.write("cut.xz", blob[:cut])
+            check_stream(self, self.archive("--op", "list", "cut.xz"))
+        rnd = random.Random(8)
+        for at in range(0, len(blob)):
+            mutated = bytearray(blob)
+            mutated[at] ^= rnd.choice([1, 0x80, 0xff, 0x55, 0x10])
+            self.write("flip.xz", bytes(mutated))
+            for op in ["list", "extract"]:
+                out = self.archive("--op", op, "flip.xz", "--into", ".") if op == "extract" else self.archive("--op", op, "flip.xz")
+                check_stream(self, out)
+                for f in out.files():
+                    name = f["path"] if isinstance(f["path"], str) else os.fsdecode(base64.b64decode(f["path"]["b64"]))
+                    pathlib.Path(self.dir / name).unlink(missing_ok=True)
+
     def test_a_size_past_the_data_is_truncated(self):
         raw = bytearray(tar_bytes([("a.txt", b"hello")]))
         raw[124:135] = b"77777777777"
@@ -1500,7 +1644,7 @@ class Archive(unittest.TestCase):
             "archive.not-an-archive", "archive.bad-gzip", "archive.crc-mismatch", "archive.bad-deflate",
             "archive.bad-checksum", "archive.bad-header", "archive.truncated", "archive.unsafe-name",
             "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.special-mode",
-            "archive.no-match", "archive.unsupported", "archive.bad-bzip2", "archive.name-too-long",
+            "archive.no-match", "archive.unsupported", "archive.bad-bzip2", "archive.bad-xz", "archive.name-too-long",
             "limit.archive-too-large", "limit.too-many-entries",
         }
         self.assertEqual(declared, seen)
@@ -1544,6 +1688,9 @@ class Archive(unittest.TestCase):
         self.write("suid.tar", buf.getvalue())
         reached |= set(self.archive("--op", "extract", "suid.tar").rules())
         reached |= set(self.archive("--op", "list", "suid.tar", "nothing-like-this").rules())
+        self.write("bad.xz", b"\xfd7zXZ\x00\x00" + bytes(40))
+        self.write("bad.xz", lzma.compress(b"x", format=lzma.FORMAT_XZ) + b"extra")
+        reached |= set(self.archive("--op", "list", "bad.xz").rules())
         self.write("bad.bz2", b"BZh9" + bytes(40))
         reached |= set(self.archive("--op", "list", "bad.bz2").rules())
         self.make_zip("enc.zip", [("a", b"x", 0o644)])

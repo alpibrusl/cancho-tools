@@ -1,0 +1,834 @@
+edition 7;
+
+module archive.xz;
+
+// `archive.xz` -- one xz stream decompressed from memory (docs/archive.md section 17).
+//
+// The container is: a 12-byte stream header (magic, the check type, a CRC-32), blocks, an index of them (their sizes) and a 12-byte
+// footer. A block is a header (its size, the filters, a CRC-32), LZMA2 data, padding to a multiple of four and the check (none, CRC-32,
+// CRC-64 or SHA-256 of the block's content). Only one filter is read, LZMA2, which is what `xz` writes without options; the BCJ
+// and delta filters are `unsupported`. LZMA2 is a sequence of chunks, each stored raw or LZMA-coded (a range coder over adaptive
+// bit probabilities), and the decoded content is its own dictionary, since all of it is held.
+//
+// Nothing is trusted: sizes, positions, distances and lengths are checked, a match may not reach before the start of the dictionary or
+// past its size or past its chunk, the expansion is bounded by `limit`, every check is verified, the index must say what the blocks
+// were, and bytes after the stream (a second stream) are refused as they are for gzip.
+//
+// Statuses (the numbers `flate.gunzip` uses): 0 whole, 1 invalid, 2 truncated, 3 past `limit`, 10 not xz, 11 unsupported, 13 a
+// check or CRC-32 does not match, 15 bytes after the stream.
+
+import std.buffer;
+import std.crypto;
+import std.vec;
+import archive.flate;
+
+pub fn looks_like[&s](src: &s [byte]) -> [] bool {
+    return len(src) >= 6 && int_of(src[0]) == 0xfd && int_of(src[1]) == '7' && int_of(src[2]) == 'z' && int_of(src[3]) == 'X' && int_of(src[4]) == 'Z' && int_of(src[5]) == 0;
+}
+
+fn le32[&s](src: &s [byte], at: int) -> [] int {
+    return flate.le32(src, at);
+}
+
+fn crc32_of[&h, &s](heap: &!h Heap, src: &s [byte]) -> [heap] int {
+    return flate.crc32(heap, src);
+}
+
+// A variable-length integer of at most nine bytes (seven bits each, low first) at `at`: (value, bytes used), or (-1, 0).
+fn varint[&s](src: &s [byte], at: int, end: int) -> [] (int, int) {
+    var value = 0;
+    var k = 0;
+    while k < 9 && at + k < end {
+        let b = int_of(src[at + k]);
+        value = value | (b & 0x7f) << 7 * k;
+        if b & 0x80 == 0 {
+            if k > 0 && b == 0 {
+                return (0 - 1, 0);
+            }
+            return (value, k + 1);
+        }
+        k = k + 1;
+    }
+    return (0 - 1, 0);
+}
+
+// ---- the CRC-64 (ECMA-182, reflected), by two 32-bit halves so no sign is ever in the way ---------------------------------
+
+fn crc64_fill[&l, &h](lo: &!l [int], hi: &!h [int]) -> [] int {
+    var i = 0;
+    while i < 256 {
+        var cl = i;
+        var ch = 0;
+        var k = 0;
+        while k < 8 {
+            let bit = cl & 1;
+            cl = cl >> 1 | (ch & 1) << 31;
+            ch = ch >> 1;
+            if bit != 0 {
+                cl = cl ^ 0xd7870f42;
+                ch = ch ^ 0xc96c5795;
+            }
+            k = k + 1;
+        }
+        lo[i] = cl;
+        hi[i] = ch;
+        i = i + 1;
+    }
+    return 0;
+}
+
+// ---- the range decoder and the LZMA symbols ------------------------------------------------------------------------------------
+//
+// `rc` holds [range, code, position in the input, end of the chunk's input, failure].
+
+fn normalise[&s, &r](src: &s [byte], rc: &!r [int]) -> [] int {
+    if rc[0] < 0x1000000 {
+        if rc[2] >= rc[3] {
+            rc[4] = 2;
+            return 0;
+        }
+        rc[0] = rc[0] << 8 & 0xffffffff;
+        rc[1] = (rc[1] << 8 | int_of(src[rc[2]])) & 0xffffffff;
+        rc[2] = rc[2] + 1;
+    }
+    return 0;
+}
+
+// One bit under the probability `probs[at]`.
+fn bit[&s, &p, &r](src: &s [byte], rc: &!r [int], probs: &!p [int], at: int) -> [] int {
+    normalise(src, rc);
+    let prob = probs[at];
+    let bound = (rc[0] >> 11) * prob;
+    if rc[1] < bound {
+        rc[0] = bound;
+        probs[at] = prob + (2048 - prob >> 5);
+        return 0;
+    }
+    rc[0] = rc[0] - bound;
+    rc[1] = rc[1] - bound;
+    probs[at] = prob - (prob >> 5);
+    return 1;
+}
+
+// `n` bits at fixed probability one half, most significant first.
+fn direct[&s, &r](src: &s [byte], rc: &!r [int], n: int) -> [] int {
+    var result = 0;
+    var i = 0;
+    while i < n {
+        normalise(src, rc);
+        rc[0] = rc[0] >> 1;
+        var b = 0;
+        if rc[1] >= rc[0] {
+            rc[1] = rc[1] - rc[0];
+            b = 1;
+        }
+        result = result << 1 | b;
+        i = i + 1;
+    }
+    return result;
+}
+
+// A bit tree of `n` bits at `base`, most significant first.
+fn tree[&s, &p, &r](src: &s [byte], rc: &!r [int], probs: &!p [int], base: int, n: int) -> [] int {
+    var m = 1;
+    var i = 0;
+    while i < n {
+        m = m << 1 | bit(src, rc, probs, base + m);
+        i = i + 1;
+    }
+    return m - (1 << n);
+}
+
+// A bit tree read least significant first.
+fn reverse_tree[&s, &p, &r](src: &s [byte], rc: &!r [int], probs: &!p [int], base: int, n: int) -> [] int {
+    var m = 1;
+    var result = 0;
+    var i = 0;
+    while i < n {
+        let b = bit(src, rc, probs, base + m);
+        m = m << 1 | b;
+        result = result | b << i;
+        i = i + 1;
+    }
+    return result;
+}
+
+fn is_match() -> [] int {
+    return 0;
+}
+
+fn is_rep() -> [] int {
+    return 192;
+}
+
+fn is_rep_g0() -> [] int {
+    return 204;
+}
+
+fn is_rep_g1() -> [] int {
+    return 216;
+}
+
+fn is_rep_g2() -> [] int {
+    return 228;
+}
+
+fn is_rep0_long() -> [] int {
+    return 240;
+}
+
+fn pos_slot_base() -> [] int {
+    return 432;
+}
+
+fn pos_special() -> [] int {
+    return 688;
+}
+
+fn align_base() -> [] int {
+    return 816;
+}
+
+fn len_match() -> [] int {
+    return 832;
+}
+
+fn len_rep() -> [] int {
+    return 1346;
+}
+
+fn literal_base() -> [] int {
+    return 1860;
+}
+
+// The probabilities of a model with `lc + lp` literal bits.
+fn probs_size(lc: int, lp: int) -> [] int {
+    return 1860 + (0x300 << lc + lp);
+}
+
+// A match length (2 and up) under the length coder at `base`.
+fn length[&s, &p, &r](src: &s [byte], rc: &!r [int], probs: &!p [int], base: int, pos_state: int) -> [] int {
+    if bit(src, rc, probs, base) == 0 {
+        return 2 + tree(src, rc, probs, base + 2 + pos_state * 8, 3);
+    }
+    if bit(src, rc, probs, base + 1) == 0 {
+        return 10 + tree(src, rc, probs, base + 130 + pos_state * 8, 3);
+    }
+    return 18 + tree(src, rc, probs, base + 258, 8);
+}
+
+// A match distance (0 is the previous byte), 0xffffffff for the end marker, for a match of `len` bytes.
+fn distance[&s, &p, &r](src: &s [byte], rc: &!r [int], probs: &!p [int], len: int) -> [] int {
+    var len_state = len - 2;
+    if len_state > 3 {
+        len_state = 3;
+    }
+    let slot = tree(src, rc, probs, pos_slot_base() + len_state * 64, 6);
+    if slot < 4 {
+        return slot;
+    }
+    let bits = (slot >> 1) - 1;
+    var dist = (2 | slot & 1) << bits;
+    if slot < 14 {
+        dist = dist + reverse_tree(src, rc, probs, pos_special() + dist - slot - 1, bits);
+    } else {
+        dist = dist + (direct(src, rc, bits - 4) << 4);
+        dist = dist + reverse_tree(src, rc, probs, align_base(), 4);
+    }
+    return dist & 0xffffffff;
+}
+
+// The model's state between chunks, in `model`: [0] the LZMA state (0..11), [1..4] the four last distances (0 is the previous byte),
+// [5] lc, [6] lp, [7] pb, [8] the bytes since the dictionary was reset, [9] 1 while a dictionary reset is owed, [10] 1 while the
+// properties are owed.
+fn reset_model[&p, &m](probs: &!p [int], model: &!m [int]) -> [] int {
+    var i = 0;
+    while i < len(probs) {
+        probs[i] = 1024;
+        i = i + 1;
+    }
+    model[0] = 0;
+    model[1] = 0;
+    model[2] = 0;
+    model[3] = 0;
+    model[4] = 0;
+    return 0;
+}
+
+// Decode one LZMA chunk: `unpacked` bytes into `dict` after `made`, from `src[start..end]`. Answers a status (0 whole, 1 invalid,
+// 2 truncated).
+fn lzma_chunk[&s, &p, &m, &d, &c](src: &s [byte], start: int, end: int, probs: &!p [int], model: &!m [int], dict: &!d [byte], made: int, unpacked: int, dict_size: int, rc: &!c [int]) -> [] int {
+    if end - start < 5 || int_of(src[start]) != 0 {
+        return 1;
+    }
+    rc[0] = 0xffffffff;
+    rc[1] = int_of(src[start + 1]) << 24 | int_of(src[start + 2]) << 16 | int_of(src[start + 3]) << 8 | int_of(src[start + 4]);
+    rc[2] = start + 5;
+    rc[3] = end;
+    rc[4] = 0;
+    let lc = model[5];
+    let lp = model[6];
+    let pb_mask = (1 << model[7]) - 1;
+    let lp_mask = (1 << lp) - 1;
+    var state = model[0];
+    var rep0 = model[1];
+    var rep1 = model[2];
+    var rep2 = model[3];
+    var rep3 = model[4];
+    var since = model[8];
+    var done = 0;
+    var status = 0;
+    while done < unpacked && status == 0 && rc[4] == 0 {
+        let pos_state = since & pb_mask;
+        if bit(src, rc, probs, is_match() + (state << 4) + pos_state) == 0 {
+            // A literal.
+            var prev = 0;
+            if since > 0 {
+                prev = int_of(dict[made + done - 1]);
+            }
+            let base = literal_base() + 0x300 * ((since & lp_mask) << lc) + 0x300 * (prev >> 8 - lc);
+            var symbol = 1;
+            if state >= 7 {
+                var match_byte = int_of(dict[made + done - rep0 - 1]);
+                var offs = 0x100;
+                while symbol < 0x100 {
+                    match_byte = match_byte << 1;
+                    let match_bit = match_byte & offs;
+                    let b = bit(src, rc, probs, base + offs + match_bit + symbol);
+                    symbol = symbol << 1 | b;
+                    if b == 0 {
+                        offs = offs & (0xffff ^ match_bit);
+                    } else {
+                        offs = offs & match_bit;
+                    }
+                }
+            } else {
+                while symbol < 0x100 {
+                    symbol = symbol << 1 | bit(src, rc, probs, base + symbol);
+                }
+            }
+            dict[made + done] = byte_of(symbol & 0xff);
+            done = done + 1;
+            since = since + 1;
+            if state < 4 {
+                state = 0;
+            } else if state < 10 {
+                state = state - 3;
+            } else {
+                state = state - 6;
+            }
+        } else {
+            var run = 0;
+            if bit(src, rc, probs, is_rep() + state) == 0 {
+                // A match with a new distance.
+                rep3 = rep2;
+                rep2 = rep1;
+                rep1 = rep0;
+                run = length(src, rc, probs, len_match(), pos_state);
+                if state < 7 {
+                    state = 7;
+                } else {
+                    state = 10;
+                }
+                rep0 = distance(src, rc, probs, run);
+                if rep0 == 0xffffffff {
+                    // The end marker: LZMA2 has its own, so this is not valid here.
+                    status = 1;
+                }
+            } else {
+                if since == 0 {
+                    status = 1;
+                } else if bit(src, rc, probs, is_rep_g0() + state) == 0 {
+                    if bit(src, rc, probs, is_rep0_long() + (state << 4) + pos_state) == 0 {
+                        // A short repeat: one byte at the last distance.
+                        if rep0 >= since || rep0 >= dict_size {
+                            status = 1;
+                        } else {
+                            dict[made + done] = dict[made + done - rep0 - 1];
+                            done = done + 1;
+                            since = since + 1;
+                            if state < 7 {
+                                state = 9;
+                            } else {
+                                state = 11;
+                            }
+                            run = 0 - 1;
+                        }
+                    }
+                } else {
+                    var dist = rep1;
+                    if bit(src, rc, probs, is_rep_g1() + state) != 0 {
+                        if bit(src, rc, probs, is_rep_g2() + state) == 0 {
+                            dist = rep2;
+                        } else {
+                            dist = rep3;
+                            rep3 = rep2;
+                        }
+                        rep2 = rep1;
+                    }
+                    rep1 = rep0;
+                    rep0 = dist;
+                }
+                if status == 0 && run == 0 {
+                    run = length(src, rc, probs, len_rep(), pos_state);
+                    if state < 7 {
+                        state = 8;
+                    } else {
+                        state = 11;
+                    }
+                }
+            }
+            if status == 0 && run > 0 {
+                if rep0 >= since || rep0 >= dict_size || done + run > unpacked {
+                    status = 1;
+                } else {
+                    var k = 0;
+                    while k < run {
+                        dict[made + done + k] = dict[made + done + k - rep0 - 1];
+                        k = k + 1;
+                    }
+                    done = done + run;
+                    since = since + run;
+                }
+            }
+        }
+    }
+    if rc[4] != 0 {
+        status = 2;
+    }
+    // The chunk ends with the range coder's last byte read (the normalisation a next bit would do is owed) and nothing left in its code.
+    normalise(src, rc);
+    if status == 0 && (done != unpacked || rc[2] != end || rc[1] != 0) {
+        status = 1;
+    }
+    model[0] = state;
+    model[1] = rep0;
+    model[2] = rep1;
+    model[3] = rep2;
+    model[4] = rep3;
+    model[8] = since;
+    return status;
+}
+
+// ---- LZMA2 -----------------------------------------------------------------------------------------------------------------------
+
+// A dictionary with room for `need` bytes, holding the `used` it had.
+fn grown[&h](heap: &!h Heap, old: Box[[byte]], used: int, need: int) -> [heap] Box[[byte]] {
+    var capacity = 0;
+    borrow old as &ow in {
+        capacity = len(contents(ow));
+    }
+    if capacity >= need {
+        return old;
+    }
+    var bigger = capacity * 2;
+    if bigger < need {
+        bigger = need;
+    }
+    var fresh = box_slice(heap, bigger, byte_of(0));
+    borrow mut fresh as &!fw in {
+        borrow old as &ow in {
+            copy_into(contents(fw)[0..used], contents(ow)[0..used]);
+        }
+    }
+    unbox_slice(heap, old);
+    return fresh;
+}
+
+// Decode the LZMA2 data of one block at `src[at..end]` whose dictionary is at most `dict_size`, producing at most `room` bytes.
+// Answers the content, a status, and the offset just after the data (past the end marker).
+fn lzma2[&h, &s](heap: &!h Heap, src: &s [byte], at: int, end: int, dict_size: int, room: int) -> [heap] (buffer.Buffer, int, int) {
+    var made = 0;
+    var p = at;
+    var status = 0;
+    var dict = box_slice(heap, 65536, byte_of(0));
+    var out = buffer.empty(heap, 1);
+    let probs_box = box_slice(heap, probs_size(4, 0) + 2 * 0x300, 0);
+    let model_box = box_slice(heap, 16, 0);
+    let rc_box = box_slice(heap, 8, 0);
+    borrow mut probs_box as &!pw in {
+        borrow mut model_box as &!mw in {
+            borrow mut rc_box as &!rw in {
+                let model = contents(mw);
+                let rc = contents(rw);
+                model[9] = 1;
+                model[10] = 1;
+                var going = true;
+                while going && status == 0 {
+                    if p >= end {
+                        status = 2;
+                    } else {
+                        let control = int_of(src[p]);
+                        p = p + 1;
+                        if control == 0 {
+                            going = false;
+                        } else if control == 1 || control == 2 {
+                            if p + 2 > end {
+                                status = 2;
+                            } else {
+                                let size = (int_of(src[p]) << 8 | int_of(src[p + 1])) + 1;
+                                p = p + 2;
+                                if control == 1 {
+                                    model[8] = 0;
+                                    model[9] = 0;
+                                    model[10] = 1;
+                                } else if model[9] != 0 {
+                                    status = 1;
+                                }
+                                if status == 0 && p + size > end {
+                                    status = 2;
+                                } else if status == 0 && made + size > room {
+                                    status = 3;
+                                }
+                                if status == 0 {
+                                    dict = grown(heap, dict, made, made + size);
+                                    borrow mut dict as &!dw in {
+                                        copy_into(contents(dw)[made..made + size], src[p..p + size]);
+                                    }
+                                    made = made + size;
+                                    model[8] = model[8] + size;
+                                    p = p + size;
+                                }
+                            }
+                        } else if control >= 0x80 {
+                            if p + 4 > end {
+                                status = 2;
+                            } else {
+                                let unpacked = ((control & 0x1f) << 16 | int_of(src[p]) << 8 | int_of(src[p + 1])) + 1;
+                                let packed = (int_of(src[p + 2]) << 8 | int_of(src[p + 3])) + 1;
+                                p = p + 4;
+                                let reset = control >> 5 & 3;
+                                if reset == 3 {
+                                    model[8] = 0;
+                                    model[9] = 0;
+                                } else if model[9] != 0 {
+                                    status = 1;
+                                }
+                                if status == 0 && reset >= 2 {
+                                    if p >= end {
+                                        status = 2;
+                                    } else {
+                                        var props = int_of(src[p]);
+                                        p = p + 1;
+                                        let lc = props % 9;
+                                        props = props / 9;
+                                        let lp = props % 5;
+                                        let pb = props / 5;
+                                        if pb > 4 || lc + lp > 4 {
+                                            status = 1;
+                                        } else {
+                                            model[5] = lc;
+                                            model[6] = lp;
+                                            model[7] = pb;
+                                            model[10] = 0;
+                                        }
+                                    }
+                                } else if status == 0 && model[10] != 0 {
+                                    status = 1;
+                                }
+                                if status == 0 {
+                                    if reset >= 1 {
+                                        reset_model(contents(pw)[0..probs_size(model[5], model[6])], model);
+                                    }
+                                    if p + packed > end {
+                                        status = 2;
+                                    } else if made + unpacked > room {
+                                        status = 3;
+                                    }
+                                }
+                                if status == 0 {
+                                    dict = grown(heap, dict, made, made + unpacked);
+                                    borrow mut dict as &!dw in {
+                                        status = lzma_chunk(src, p, p + packed, contents(pw)[0..probs_size(model[5], model[6])], model, contents(dw), made, unpacked, dict_size, rc);
+                                    }
+                                    if status == 0 {
+                                        made = made + unpacked;
+                                        p = p + packed;
+                                    }
+                                }
+                            }
+                        } else {
+                            status = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, probs_box);
+    unbox_slice(heap, model_box);
+    unbox_slice(heap, rc_box);
+    borrow dict as &dr in {
+        out = buffer.append(heap, out, contents(dr)[0..made]);
+    }
+    unbox_slice(heap, dict);
+    return (out, status, p);
+}
+
+// ---- the container -----------------------------------------------------------------------------------------------------------------
+
+// The size in bytes of the check of type `kind`, or -1 for a type this reader does not know.
+fn check_size(kind: int) -> [] int {
+    if kind == 0 {
+        return 0;
+    }
+    if kind == 1 {
+        return 4;
+    }
+    if kind == 4 {
+        return 8;
+    }
+    if kind == 10 {
+        return 32;
+    }
+    return 0 - 1;
+}
+
+// Whether the check stored at `src[at..]` is the one of the content `data`, for the check type `kind`.
+fn check_holds[&h, &s, &d](heap: &!h Heap, src: &s [byte], at: int, kind: int, data: &d [byte]) -> [heap] bool {
+    if kind == 0 {
+        return true;
+    }
+    if kind == 1 {
+        return flate.crc32(heap, data) == le32(src, at);
+    }
+    if kind == 4 {
+        var same = false;
+        region r {
+            let lo = alloc_slice[r](256, 0);
+            let hi = alloc_slice[r](256, 0);
+            crc64_fill(lo, hi);
+            var cl = 0xffffffff;
+            var ch = 0xffffffff;
+            var i = 0;
+            while i < len(data) {
+                let index = (cl ^ int_of(data[i])) & 0xff;
+                cl = (cl >> 8 | (ch & 0xff) << 24) ^ lo[index];
+                ch = ch >> 8 ^ hi[index];
+                i = i + 1;
+            }
+            cl = cl ^ 0xffffffff;
+            ch = ch ^ 0xffffffff;
+            same = cl == le32(src, at) && ch == le32(src, at + 4);
+        }
+        return same;
+    }
+    var same = true;
+    region r {
+        let digest = alloc_slice[r](32, byte_of(0));
+        crypto.sha256(data, digest);
+        var i = 0;
+        while i < 32 {
+            if digest[i] != src[at + i] {
+                same = false;
+            }
+            i = i + 1;
+        }
+    }
+    return same;
+}
+
+// Decompress the xz stream that is all of `src`, producing at most `limit` bytes. Answers the output and a status.
+pub fn decompress[&h, &s](heap: &!h Heap, src: &s [byte], limit: int) -> [heap] (buffer.Buffer, int) {
+    var out = buffer.empty(heap, 4096);
+    if !looks_like(src) {
+        return (out, 10);
+    }
+    let n = len(src);
+    if n < 24 {
+        return (out, 2);
+    }
+    if int_of(src[6]) != 0 {
+        return (out, 1);
+    }
+    let kind = int_of(src[7]);
+    if flate.crc32(heap, src[6..8]) != le32(src, 8) {
+        return (out, 13);
+    }
+    let check_len = check_size(kind);
+    if check_len < 0 {
+        return (out, 11);
+    }
+    var status = 0;
+    var pos = 12;
+    // What each block was, for the index to be held to: (unpadded size, content size) pairs.
+    var sizes = vec.empty(heap, 8, 0);
+    var going = true;
+    while going && status == 0 {
+        if pos >= n {
+            status = 2;
+        } else if int_of(src[pos]) == 0 {
+            going = false;
+        } else {
+            let header_size = (int_of(src[pos]) + 1) * 4;
+            if pos + header_size > n {
+                status = 2;
+            } else if flate.crc32(heap, src[pos..pos + header_size - 4]) != le32(src, pos + header_size - 4) {
+                status = 13;
+            } else {
+                let flags = int_of(src[pos + 1]);
+                let header_end = pos + header_size - 4;
+                var p = pos + 2;
+                var packed_claim = 0 - 1;
+                var content_claim = 0 - 1;
+                var bad = flags & 0x3c != 0 || flags & 3 != 0;
+                if flags & 3 != 0 {
+                    // More than one filter: a BCJ or delta filter in front of LZMA2.
+                    status = 11;
+                }
+                if flags & 0x40 != 0 && !bad {
+                    let (v, used) = varint(src, p, header_end);
+                    bad = used == 0;
+                    packed_claim = v;
+                    p = p + used;
+                }
+                if flags & 0x80 != 0 && !bad {
+                    let (v, used) = varint(src, p, header_end);
+                    bad = used == 0;
+                    content_claim = v;
+                    p = p + used;
+                }
+                var dict_size = 0;
+                if status == 0 && !bad {
+                    let (id, used) = varint(src, p, header_end);
+                    p = p + used;
+                    let (props_size, used2) = varint(src, p, header_end);
+                    p = p + used2;
+                    if used == 0 || used2 == 0 {
+                        bad = true;
+                    } else if id != 0x21 {
+                        status = 11;
+                    } else if props_size != 1 || p >= header_end {
+                        bad = true;
+                    } else {
+                        let d = int_of(src[p]);
+                        p = p + 1;
+                        if d > 40 {
+                            bad = true;
+                        } else if d == 40 {
+                            dict_size = 0xffffffff;
+                        } else {
+                            dict_size = (2 | d & 1) << d / 2 + 11;
+                        }
+                    }
+                }
+                while status == 0 && !bad && p < header_end {
+                    if int_of(src[p]) != 0 {
+                        bad = true;
+                    }
+                    p = p + 1;
+                }
+                if status == 0 && bad {
+                    status = 1;
+                }
+                if status == 0 {
+                    var room = limit;
+                    borrow out as &or in {
+                        room = limit - buffer.size(or);
+                    }
+                    let data_at = pos + header_size;
+                    let (content, why, data_end) = lzma2(heap, src, data_at, n, dict_size, room);
+                    status = why;
+                    if status == 0 {
+                        let packed = data_end - data_at;
+                        let pad = (4 - packed % 4) % 4;
+                        var check_at = data_end + pad;
+                        if check_at + check_len > n {
+                            status = 2;
+                        } else {
+                            var k = 0;
+                            while k < pad {
+                                if int_of(src[data_end + k]) != 0 {
+                                    status = 1;
+                                }
+                                k = k + 1;
+                            }
+                        }
+                        var size = 0;
+                        borrow content as &cr in {
+                            size = buffer.size(cr);
+                            if status == 0 && (packed_claim >= 0 && packed_claim != packed || content_claim >= 0 && content_claim != size) {
+                                status = 1;
+                            }
+                            if status == 0 && !check_holds(heap, src, check_at, kind, buffer.bytes(cr)) {
+                                status = 13;
+                            }
+                        }
+                        if status == 0 {
+                            sizes = vec.push(heap, sizes, header_size + packed + check_len);
+                            sizes = vec.push(heap, sizes, size);
+                            borrow content as &cr in {
+                                out = buffer.append(heap, out, buffer.bytes(cr));
+                            }
+                            pos = check_at + check_len;
+                        }
+                    }
+                    buffer.drop(heap, content);
+                }
+            }
+        }
+    }
+    // The index: what the blocks were, then its padding and CRC-32.
+    if status == 0 {
+        let index_at = pos;
+        var p = pos + 1;
+        let (count, used) = varint(src, p, n);
+        p = p + used;
+        var blocks = 0;
+        borrow sizes as &sr in {
+            blocks = vec.size(sr) / 2;
+        }
+        if used == 0 || count != blocks {
+            status = 1;
+            if used == 0 && p >= n {
+                status = 2;
+            }
+        }
+        var k = 0;
+        while status == 0 && k < blocks {
+            let (unpadded, u1) = varint(src, p, n);
+            p = p + u1;
+            let (content, u2) = varint(src, p, n);
+            p = p + u2;
+            if u1 == 0 || u2 == 0 {
+                status = 2;
+            } else {
+                borrow sizes as &sr in {
+                    if unpadded != vec.get(sr, 2 * k) || content != vec.get(sr, 2 * k + 1) {
+                        status = 1;
+                    }
+                }
+            }
+            k = k + 1;
+        }
+        if status == 0 {
+            while p % 4 != (index_at % 4 + 0) % 4 && p < n && status == 0 {
+                if int_of(src[p]) != 0 {
+                    status = 1;
+                }
+                p = p + 1;
+            }
+        }
+        if status == 0 {
+            if p + 4 > n {
+                status = 2;
+            } else if flate.crc32(heap, src[index_at..p]) != le32(src, p) {
+                status = 13;
+            } else {
+                let index_size = p + 4 - index_at;
+                let footer = p + 4;
+                if footer + 12 > n {
+                    status = 2;
+                } else if flate.crc32(heap, src[footer + 4..footer + 10]) != le32(src, footer) {
+                    status = 13;
+                } else if (le32(src, footer + 4) + 1) * 4 != index_size || int_of(src[footer + 8]) != 0 || int_of(src[footer + 9]) != kind || int_of(src[footer + 10]) != 'Y' || int_of(src[footer + 11]) != 'Z' {
+                    status = 1;
+                } else if footer + 12 != n {
+                    status = 15;
+                }
+            }
+        }
+    }
+    vec.drop(heap, sizes);
+    return (out, status);
+}

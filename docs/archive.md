@@ -187,6 +187,7 @@ shared catalogue and its 39 fixtures are untouched; `test_archive.py` holds a fi
 | `archive.directory-missing` | 8 | `--into`, or a directory above it, does not exist (§13: extract makes the directories an entry needs beneath `--into`, never `--into`); the detail names the shallowest missing one |
 | `archive.no-match` | 8 | (list, extract) a selected path matches no entry of the archive (§14); an extract writes nothing |
 | `archive.bad-bzip2` | 8 | a bzip2 stream that is not valid, or bytes after it (§16) |
+| `archive.bad-xz` | 8 | an xz stream that is not valid, or bytes after it (§17) |
 | `archive.special-mode` | 8 | (extract) an entry's mode has a setuid, setgid or sticky bit (§13); nothing was extracted |
 | `archive.name-too-long` | 8 | (create) a name does not fit a ustar header |
 | `limit.archive-too-large` | 8 | expanded size would pass `--max-bytes` (or the file grew while it was read) |
@@ -629,3 +630,44 @@ the next reader knows they are decisions and not omissions.
 original. Checked against Python's `bz2` and the command-line `bzip2` at levels 1 and 9 on text, random bytes, long runs, two symbols, one byte, a
 byte repeated 300,000 times, an empty stream and `tar -cjf` trees; every cut and every changed byte of a small stream gives a tag and never a trap
 (`test_archive.py`); 15 mutants of the decoder (`scripts/archive_mutants.py`).
+
+## 17. xz
+
+> **Status: built (0.6.0), reading only.** `list` and `extract` read `.tar.xz` (format `txz`) and a single `.xz` file (format `xz`), recognised by the
+> six-byte magic `FD 37 7A 58 5A 00`. Everything in §13 and §14 applies. `create` does not write xz (§17.3).
+
+### 17.1 What is read
+
+One xz stream: the 12-byte header (the check type, a CRC-32), blocks (a header with its filters and a CRC-32, LZMA2 data, padding to four bytes, and
+the check), the index of the blocks (their sizes, padding, a CRC-32), and the 12-byte footer. **Several blocks** are read (`xz -T` and `--block-size`
+write them). The filter is **LZMA2**, which is what `xz` writes without options: every chunk kind (stored with or without a dictionary reset,
+and coded with any of the four resets), every `lc`/`lp`/`pb` with `lc + lp <= 4`, any dictionary size. The checks are **none, CRC-32, CRC-64 and
+SHA-256**, each verified against the block's content. The decompressed content is a tar or one file named as the archive without `.xz` (§4.1).
+
+### 17.2 What is refused, and bounds
+
+* **A filter in front of LZMA2** (the BCJ filters for x86, ARM and the rest; delta), and **a check type this tool does not know**, are
+  `archive.unsupported`: reading the stream without undoing the filter would give wrong bytes with a valid CRC.
+* **Bytes after the stream, and a second stream,** are `archive.bad-xz`, as for gzip and bzip2.
+* **A CRC-32 or check that is not the data's** (the stream header, a block header, a block's check, the index, the footer) is
+  `archive.crc-mismatch`; a stream that stops early is `archive.truncated`; anything else that is not an xz stream (an index that
+  does not say what the blocks were, a size in a block header that is not the block's, a match that reaches before the start of the
+  dictionary or past its size or past its chunk, a chunk whose range coder does not end exactly where its size says) is `archive.bad-xz`.
+* **The expansion is bounded** by `--max-bytes`, checked before each chunk is decoded, so a 96 MiB run of one byte compressed to a few KiB
+  (measured: the test) is refused at the cap in the memory of the cap, not of the expansion. The content of a block is its own dictionary and is
+  copied once into the output, so peak memory is the output and one block's content.
+* **`list` of an xz reads and expands the whole file**, as bzip2's does (§16.2); there is no streaming of xz here.
+
+### 17.3 What is not done
+
+Writing xz: an LZMA2 encoder is a match finder and a range coder, a large piece to be checked against nothing but the decoders; the formats here that
+can be written are tar, tgz, gz and zip. The BCJ and delta filters, and several streams, are refused above and listed so the next reader knows they are
+decisions and not omissions.
+
+### 17.4 Measured
+
+32 MiB of text-like data at `xz -6` expands in 1.9 s here (Python's C `lzma` module: 0.65 s) and is byte for byte the original. Checked against Python's
+`lzma` (all four checks, presets 0, 6, 9) and `xz(1)` (several `lc`/`lp`/`pb`, `-T2` with a block size, a 64 MiB dictionary, SHA-256, empty input) and
+`tar -cJf` trees; every cut and every changed byte of a small stream gives a tag and never a trap; 17 mutants of the reader (`scripts/archive_mutants.py`).
+**Found by testing:** the range coder owes one normalisation after a chunk's last symbol (a chunk whose final range was small ended one byte "early"); it
+showed with `--block-size=100000` and not with the default block size.

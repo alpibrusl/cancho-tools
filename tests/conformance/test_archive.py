@@ -922,6 +922,19 @@ class Archive(unittest.TestCase):
             check_stream(self, out)
             self.assertEqual(out.rules(), ["archive.bad-bzip2"], label)
 
+    def test_bzip2_output_is_capped_to_the_byte(self):
+        # Exactly the cap is allowed and one byte more is not, whether the last bytes come from a repeat count or are plain.
+        for label, data in [("repeat", b"a" * 1000), ("plain", b"abcde" * 300)]:
+            self.write("cap.bz2", bz2.compress(data))
+            (self.dir / "o").mkdir(exist_ok=True)
+            shutil.rmtree(self.dir / "o")
+            (self.dir / "o").mkdir()
+            out = self.archive("--op", "extract", "--into", "o", "--max-bytes", str(len(data) - 1), "cap.bz2")
+            self.assertEqual(out.rules(), ["limit.archive-too-large"], label)
+            out = self.archive("--op", "extract", "--into", "o", "--max-bytes", str(len(data)), "cap.bz2")
+            self.assertEqual(out.status, 0, (label, out.raw))
+            self.assertEqual((self.dir / "o" / "cap").read_bytes(), data, label)
+
     def test_a_bzip2_bomb_is_refused_in_the_memory_of_a_block_not_of_the_expansion(self):
         self.write("bomb.bz2", bz2.compress(b"a" * (96 * 1024 * 1024), 9))
         status, peak_kib = peak_rss([binary("archive"), "--op", "extract", "--max-bytes", "1048576", "bomb.bz2"], cwd=self.dir)

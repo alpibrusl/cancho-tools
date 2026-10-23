@@ -338,6 +338,31 @@ fn add[&h, &c](heap: &!h Heap, e: Entries, clean: &c [byte], held: int, class: i
     return Entries { names: buffer.append(heap, names, clean), name_at: vec.push(heap, name_at, held), name_len: vec.push(heap, name_len, len(clean)), kind: vec.push(heap, kind, class), size: vec.push(heap, size, length), body: vec.push(heap, body, at), mode: vec.push(heap, mode, permissions), unsafe: vec.push(heap, unsafe, flag_value), failure: failure, failure_at: failure_at };
 }
 
+// `e` with one more entry made by another reader (`archive.zip`): its name is normalised and flagged as a tar's are.
+pub fn push[&h, &n](heap: &!h Heap, e: Entries, name: &n [byte], class: int, length: int, at: int, permissions: int) -> [heap] Entries {
+    let clean = normalised(heap, name);
+    var out = e;
+    borrow clean as &cr in {
+        var held = 0;
+        borrow out as &er in {
+            held = buffer.size(er.names);
+        }
+        out = add(heap, out, buffer.bytes(cr), held, class, length, at, permissions, unsafe_name(name));
+    }
+    buffer.drop(heap, clean);
+    return out;
+}
+
+// `e`, having failed for the reason `why` at offset `at` (the numbers `tar_error` in archive.cho knows).
+pub fn failed(e: Entries, why: int, at: int) -> [] Entries {
+    return fail(e, why, at);
+}
+
+// Where entry `i`'s content is, in the data the caller extracts from.
+pub fn set_body[&e](entries: &!e Entries, i: int, at: int) -> [] int {
+    return vec.set(entries.body, i, at);
+}
+
 // The entries of a single file named `name` of `length` bytes at `at` in the data: what
 // `archive` lists and extracts for a gzip that is not a tar.
 pub fn single[&h, &n](heap: &!h Heap, name: &n [byte], length: int, at: int) -> [heap] Entries {

@@ -23,7 +23,9 @@ import std.bytes;
 import std.dirs;
 import std.json;
 import std.map;
+import std.vec;
 import archive.flate;
+import archive.select;
 import archive.stream;
 import archive.tar;
 import toolbox.atomic;
@@ -37,7 +39,7 @@ import toolbox.place;
 import toolbox.text;
 
 fn extra() -> [] &static [byte] {
-    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
+    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.no-match|8|never|a selected path matches no entry of the archive;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
 }
 
 fn flag_table() -> [] &static [byte] {
@@ -45,7 +47,7 @@ fn flag_table() -> [] &static [byte] {
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "archive", version: "0.2.0", summary: "List, extract and create tar archives, gzip-compressed or not, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted)", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
+    return describe.Tool { name: "archive", version: "0.3.0", summary: "List, extract and create tar archives, gzip-compressed or not, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -451,16 +453,18 @@ fn sync[&h, &i, &e](heap: &!h Heap, io: &!i Io, errs: &e fail.Errors, c: Count) 
 
 // ---- list ---------------------------------------------------------------------------------------------------------
 
-fn list_entries[&h, &i, &x](heap: &!h Heap, io: &!i Io, entries: &x tar.Entries, format: int, c: Count) -> [heap, io_write] Count {
+fn list_entries[&h, &i, &x, &s](heap: &!h Heap, io: &!i Io, entries: &x tar.Entries, format: int, sel: &!s select.Sel, c: Count) -> [heap, io_write] Count {
     var count = c;
     var k = 0;
     while k < tar.count(entries) && !count.broken {
-        var mode = tar.mode(entries, k);
-        if format == 3 {
-            mode = 0 - 1;
+        if select.note(sel, tar.name(entries, k)) {
+            var mode = tar.mode(entries, k);
+            if format == 3 {
+                mode = 0 - 1;
+            }
+            let wrote = put_entry(heap, io, tar.name(entries, k), tar.kind_name(tar.kind(entries, k)), tar.size(entries, k), mode, tar.unsafe_at(entries, k));
+            count = Count { entries: count.entries + 1, bytes: count.bytes + tar.size(entries, k), emitted: count.emitted, broken: !wrote };
         }
-        let wrote = put_entry(heap, io, tar.name(entries, k), tar.kind_name(tar.kind(entries, k)), tar.size(entries, k), mode, tar.unsafe_at(entries, k));
-        count = Count { entries: count.entries + 1, bytes: count.bytes + tar.size(entries, k), emitted: count.emitted, broken: !wrote };
         k = k + 1;
     }
     return count;
@@ -487,18 +491,18 @@ fn lister_open[&h](heap: &!h Heap, most_entries: int) -> [heap] Lister {
 }
 
 // Feed the scanner `data` and print the entries it completes.
-fn scan_piece[&h, &i, &d](heap: &!h Heap, io: &!i Io, sc: tar.Scan, data: &d [byte], format: int, c: Count) -> [heap, io_write] (tar.Scan, Count) {
+fn scan_piece[&h, &i, &d, &s](heap: &!h Heap, io: &!i Io, sc: tar.Scan, data: &d [byte], format: int, sel: &!s select.Sel, c: Count) -> [heap, io_write] (tar.Scan, Count) {
     let (next, found) = tar.scan_feed(heap, sc, data, tar.entries_empty(heap));
     var count = c;
     borrow found as &fr in {
-        count = list_entries(heap, io, fr, format, count);
+        count = list_entries(heap, io, fr, format, sel, count);
     }
     tar.drop(heap, found);
     return (next, count);
 }
 
 // The next piece of the archive's content.
-fn consume[&h, &i, &d](heap: &!h Heap, io: &!i Io, l: Lister, data: &d [byte], format: int, c: Count) -> [heap, io_write] (Lister, Count) {
+fn consume[&h, &i, &d, &s](heap: &!h Heap, io: &!i Io, l: Lister, data: &d [byte], format: int, sel: &!s select.Sel, c: Count) -> [heap, io_write] (Lister, Count) {
     let Lister { sc, prefix, mode, total } = l;
     var scan = sc;
     var pre = prefix;
@@ -526,14 +530,14 @@ fn consume[&h, &i, &d](heap: &!h Heap, io: &!i Io, l: Lister, data: &d [byte], f
         }
         if m == 1 {
             borrow pre as &pr in {
-                let (next, c2) = scan_piece(heap, io, scan, buffer.bytes(pr), format, count);
+                let (next, c2) = scan_piece(heap, io, scan, buffer.bytes(pr), format, sel, count);
                 scan = next;
                 count = c2;
             }
         }
     }
     if m == 1 && from < len(data) {
-        let (next, c2) = scan_piece(heap, io, scan, data[from..len(data)], format, count);
+        let (next, c2) = scan_piece(heap, io, scan, data[from..len(data)], format, sel, count);
         scan = next;
         count = c2;
     }
@@ -541,7 +545,7 @@ fn consume[&h, &i, &d](heap: &!h Heap, io: &!i Io, l: Lister, data: &d [byte], f
 }
 
 // The content has ended. Answers the lister's end: errors found, and what the content was (0 it could not be told, 1 a tar).
-fn lister_end[&h, &i](heap: &!h Heap, io: &!i Io, l: Lister, format: int, most_entries: int, e: fail.Errors, c: Count) -> [heap, io_write] (fail.Errors, Count, int, int) {
+fn lister_end[&h, &i, &s](heap: &!h Heap, io: &!i Io, l: Lister, format: int, sel: &!s select.Sel, most_entries: int, e: fail.Errors, c: Count) -> [heap, io_write] (fail.Errors, Count, int, int) {
     let Lister { sc, prefix, mode, total } = l;
     var scan = sc;
     var errors = e;
@@ -552,7 +556,7 @@ fn lister_end[&h, &i](heap: &!h Heap, io: &!i Io, l: Lister, format: int, most_e
         borrow prefix as &pr in {
             if tar.looks_like_tar(buffer.bytes(pr)) {
                 m = 1;
-                let (next, c2) = scan_piece(heap, io, scan, buffer.bytes(pr), format, count);
+                let (next, c2) = scan_piece(heap, io, scan, buffer.bytes(pr), format, sel, count);
                 scan = next;
                 count = c2;
             } else {
@@ -580,7 +584,7 @@ fn lister_end[&h, &i](heap: &!h Heap, io: &!i Io, l: Lister, format: int, most_e
 }
 
 // List the archive in `file`, named `shown`.
-fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: &p [byte], most_bytes: int, most_entries: int, errs: fail.Errors, c: Count) -> [heap, file_read, io_write] (fail.Errors, Count, int) {
+fn list_file[&h, &i, &f, &p, &s](heap: &!h Heap, io: &!i Io, file: &!f File, shown: &p [byte], most_bytes: int, most_entries: int, sel: &!s select.Sel, errs: fail.Errors, c: Count) -> [heap, file_read, io_write] (fail.Errors, Count, int) {
     var e = errs;
     var count = c;
     var format = 0;
@@ -639,7 +643,7 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
             }
             if result == stream.output() {
                 borrow inf as &ir in {
-                    let (next, c2) = consume(heap, io, lister, stream.piece(ir), format, count);
+                    let (next, c2) = consume(heap, io, lister, stream.piece(ir), format, sel, count);
                     lister = next;
                     count = c2;
                 }
@@ -678,7 +682,7 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
                 buffer.drop(heap, label);
                 label = gz_label(heap, stream.header_name(ir), shown);
             }
-            let (e2, c2, content, total) = lister_end(heap, io, lister, format, most_entries, e, count);
+            let (e2, c2, content, total) = lister_end(heap, io, lister, format, sel, most_entries, e, count);
             e = e2;
             count = c2;
             if content == 0 {
@@ -687,7 +691,7 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
                 borrow label as &lr in {
                     let single = tar.single(heap, buffer.bytes(lr), total, 0);
                     borrow single as &sr in {
-                        count = list_entries(heap, io, sr, 3, count);
+                        count = list_entries(heap, io, sr, 3, sel, count);
                     }
                     tar.drop(heap, single);
                 }
@@ -695,11 +699,11 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
         } else if stream.is_error(result) {
             e = gzip_error(heap, e, stream.status(result), shown, most_bytes);
             format = 0;
-            let (e2, c2, content, total) = lister_end(heap, io, lister, format, most_entries, fail.empty_in(heap, extra()), count);
+            let (e2, c2, content, total) = lister_end(heap, io, lister, format, sel, most_entries, fail.empty_in(heap, extra()), count);
             fail.drop(heap, e2);
             count = c2;
         } else {
-            let (e2, c2, content, total) = lister_end(heap, io, lister, format, most_entries, fail.empty_in(heap, extra()), count);
+            let (e2, c2, content, total) = lister_end(heap, io, lister, format, sel, most_entries, fail.empty_in(heap, extra()), count);
             fail.drop(heap, e2);
             count = c2;
         }
@@ -713,7 +717,7 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
         var going = !ended;
         var data_seen = 0;
         borrow chunk as &cr in {
-            let (next, c2) = consume(heap, io, lister, buffer.bytes(cr), format, count);
+            let (next, c2) = consume(heap, io, lister, buffer.bytes(cr), format, sel, count);
             lister = next;
             count = c2;
             data_seen = buffer.size(cr);
@@ -747,7 +751,7 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
                 if size > most_bytes {
                     big = true;
                 } else if buffer.size(cr) > 0 {
-                    let (next, c2) = consume(heap, io, lister, buffer.bytes(cr), format, count);
+                    let (next, c2) = consume(heap, io, lister, buffer.bytes(cr), format, sel, count);
                     lister = next;
                     count = c2;
                 }
@@ -761,11 +765,11 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
                 e = too_large(heap, e, shown, most_bytes);
             }
             format = 0;
-            let (e2, c2, content, total) = lister_end(heap, io, lister, format, most_entries, fail.empty_in(heap, extra()), count);
+            let (e2, c2, content, total) = lister_end(heap, io, lister, format, sel, most_entries, fail.empty_in(heap, extra()), count);
             fail.drop(heap, e2);
             count = c2;
         } else {
-            let (e2, c2, content, total) = lister_end(heap, io, lister, format, most_entries, e, count);
+            let (e2, c2, content, total) = lister_end(heap, io, lister, format, sel, most_entries, e, count);
             e = e2;
             count = c2;
             if content == 0 {
@@ -779,7 +783,7 @@ fn list_file[&h, &i, &f, &p](heap: &!h Heap, io: &!i Io, file: &!f File, shown: 
 }
 
 // `list`: open ARCHIVE (operand `at`) and list it.
-fn list_stream[&h, &g, &f, &r, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io, root: &r [byte], at: int, most_bytes: int, most_entries: int, errs: fail.Errors, c: Count) -> [heap, args, fs_read(""), dir_read, file_read, io_write] (fail.Errors, Count, int) {
+fn list_stream[&h, &g, &f, &r, &i, &s](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io, root: &r [byte], at: int, most_bytes: int, most_entries: int, sel: &!s select.Sel, errs: fail.Errors, c: Count) -> [heap, args, fs_read(""), dir_read, file_read, io_write] (fail.Errors, Count, int) {
     var e = errs;
     var count = c;
     var format = 0;
@@ -798,7 +802,7 @@ fn list_stream[&h, &g, &f, &r, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""),
                 Opened::Ok(opened) => {
                     var file = opened;
                     borrow mut file as &!fh in {
-                        let (e2, c2, f2) = list_file(heap, io, fh, path.shown(rp), most_bytes, most_entries, e, count);
+                        let (e2, c2, f2) = list_file(heap, io, fh, path.shown(rp), most_bytes, most_entries, sel, e, count);
                         e = e2;
                         count = c2;
                         format = f2;
@@ -1044,7 +1048,7 @@ fn ensure_directories[&h, &i, &f, &r, &w](heap: &!h Heap, io: &!i Io, fs: &f Fs(
 }
 
 // Extract (or, with --dry-run, plan) the entries of `entries`, whose bodies are in `data`, beneath `into`.
-fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], into: &n [byte], entries: &x tar.Entries, data: &d [byte], dry: bool, errs: fail.Errors, c: Count) -> [heap, io_write, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, Count) {
+fn extract_entries[&h, &i, &f, &r, &n, &x, &d, &s](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], into: &n [byte], entries: &x tar.Entries, data: &d [byte], sel: &s select.Sel, dry: bool, errs: fail.Errors, c: Count) -> [heap, io_write, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, Count) {
     var e = errs;
     var count = c;
     let below = into_length(into);
@@ -1075,6 +1079,8 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
         if tar.unsafe_at(entries, k) {
             e = refuse(heap, e, "archive.unsafe-name", "an entry's name is absolute, has `..` or holds a NUL; nothing was extracted", "the archive is not safe to extract anywhere", name, "", 0);
             clean = false;
+        } else if !select.matches(sel, name) {
+            // Not asked for: it is neither checked nor written (an unsafe name above is refused whether or not it is asked for).
         } else if kind != tar.kind_file() && kind != tar.kind_directory() {
             e = refuse(heap, e, "archive.entry-kind", "an entry is not a regular file or a directory; archive extracts nothing else", "list the archive to see its entries", name, "", 0);
             clean = false;
@@ -1110,7 +1116,7 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
     while k < tar.count(entries) {
         let name = tar.name(entries, k);
         let kind = tar.kind(entries, k);
-        if !tar.unsafe_at(entries, k) && (kind == tar.kind_file() || kind == tar.kind_directory()) {
+        if !tar.unsafe_at(entries, k) && select.matches(sel, name) && (kind == tar.kind_file() || kind == tar.kind_directory()) {
             var cut = 0;
             while cut <= len(name) {
                 if cut > 0 && (cut < len(name) && int_of(name[cut]) == '/' || cut == len(name) && kind == tar.kind_directory()) {
@@ -1142,60 +1148,62 @@ fn extract_entries[&h, &i, &f, &r, &n, &x, &d](heap: &!h Heap, io: &!i Io, fs: &
     k = 0;
     while clean && k < tar.count(entries) && !count.broken {
         let name = tar.name(entries, k);
-        let target = destination(heap, into, name);
-        borrow target as &t in {
-            let directory = tar.kind(entries, k) == tar.kind_directory();
-            if !bytes.equal(buffer.bytes(t), ".") {
-                let (after, moved, after_known, ok) = ensure_directories(heap, io, fs, root, needed_directory(buffer.bytes(t), directory), below, dry, announced, e, count);
-                e = after;
-                count = moved;
-                announced = after_known;
-                if !ok {
-                    clean = false;
-                }
-            }
-            if clean && directory {
+        if select.matches(sel, name) {
+            let target = destination(heap, into, name);
+            borrow target as &t in {
+                let directory = tar.kind(entries, k) == tar.kind_directory();
                 if !bytes.equal(buffer.bytes(t), ".") {
-                    // A directory the entry names that already existed is reported once, as it always was.
-                    let (after_known, told) = was_seen(announced, buffer.bytes(t));
+                    let (after, moved, after_known, ok) = ensure_directories(heap, io, fs, root, needed_directory(buffer.bytes(t), directory), below, dry, announced, e, count);
+                    e = after;
+                    count = moved;
                     announced = after_known;
-                    var existed = false;
-                    borrow announced as &ar in {
-                        existed = map.get(ar, buffer.bytes(t), 0) == 2;
-                    }
-                    if !told || existed {
-                        let wrote = put_dir(heap, io, buffer.bytes(t));
-                        count = Count { entries: count.entries + 1, bytes: count.bytes, emitted: count.emitted, broken: !wrote };
-                        announced = map.put(heap, announced, buffer.bytes(t), 1);
+                    if !ok {
+                        clean = false;
                     }
                 }
-            } else if clean {
-                let at = tar.body(entries, k);
-                let size = tar.size(entries, k);
-                let content = data[at..at + size];
-                if dry {
-                    let digest = atomic.sha256_hex(heap, content);
-                    borrow digest as &hx in {
-                        let wrote = put_file(heap, io, buffer.bytes(t), size, buffer.bytes(hx));
-                        count = Count { entries: count.entries + 1, bytes: count.bytes + size, emitted: count.emitted, broken: !wrote };
+                if clean && directory {
+                    if !bytes.equal(buffer.bytes(t), ".") {
+                        // A directory the entry names that already existed is reported once, as it always was.
+                        let (after_known, told) = was_seen(announced, buffer.bytes(t));
+                        announced = after_known;
+                        var existed = false;
+                        borrow announced as &ar in {
+                            existed = map.get(ar, buffer.bytes(t), 0) == 2;
+                        }
+                        if !told || existed {
+                            let wrote = put_dir(heap, io, buffer.bytes(t));
+                            count = Count { entries: count.entries + 1, bytes: count.bytes, emitted: count.emitted, broken: !wrote };
+                            announced = map.put(heap, announced, buffer.bytes(t), 1);
+                        }
                     }
-                    buffer.drop(heap, digest);
-                } else {
-                    let (after, ok, digest) = put_new(heap, fs, root, buffer.bytes(t), content, file_mode(tar.mode(entries, k)), e);
-                    e = after;
-                    if ok {
+                } else if clean {
+                    let at = tar.body(entries, k);
+                    let size = tar.size(entries, k);
+                    let content = data[at..at + size];
+                    if dry {
+                        let digest = atomic.sha256_hex(heap, content);
                         borrow digest as &hx in {
                             let wrote = put_file(heap, io, buffer.bytes(t), size, buffer.bytes(hx));
                             count = Count { entries: count.entries + 1, bytes: count.bytes + size, emitted: count.emitted, broken: !wrote };
                         }
+                        buffer.drop(heap, digest);
                     } else {
-                        clean = false;
+                        let (after, ok, digest) = put_new(heap, fs, root, buffer.bytes(t), content, file_mode(tar.mode(entries, k)), e);
+                        e = after;
+                        if ok {
+                            borrow digest as &hx in {
+                                let wrote = put_file(heap, io, buffer.bytes(t), size, buffer.bytes(hx));
+                                count = Count { entries: count.entries + 1, bytes: count.bytes + size, emitted: count.emitted, broken: !wrote };
+                            }
+                        } else {
+                            clean = false;
+                        }
+                        buffer.drop(heap, digest);
                     }
-                    buffer.drop(heap, digest);
                 }
             }
+            buffer.drop(heap, target);
         }
-        buffer.drop(heap, target);
         k = k + 1;
     }
     map.drop(heap, announced);
@@ -1527,6 +1535,53 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
 
 // ---- the command ----------------------------------------------------------------------------------------------------------------
 
+// The selectors named after the ARCHIVE of a `list` or an `extract` (docs/archive.md section 14): each normalised as entry names are, and
+// refused when empty or when `extract` would refuse an entry of that name.
+fn selectors[&h, &g, &p](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, errs: fail.Errors) -> [heap, args] (select.Sel, fail.Errors) {
+    var e = errs;
+    var text = buffer.empty(heap, 64);
+    var starts = vec.empty(heap, 4, 0);
+    var ends = vec.empty(heap, 4, 0);
+    var j = 1;
+    while j < cli.operand_count(parsed) {
+        let given = arg(args, cli.operand_index(parsed, j));
+        if len(given) == 0 {
+            e = flag_problem(heap, e, "path.empty", "a selected path is empty", "name the file or directory to select, or leave the selection out for every entry", "PATH");
+        } else if tar.unsafe_name(given) {
+            e = refuse(heap, e, "archive.unsafe-name", "a selected path is absolute, has `..` or holds a NUL; it names an entry of the archive, never a place outside it", "name the entry as `list` shows it", given, "", 0);
+        } else {
+            let clean = tar.normalised(heap, given);
+            var before = 0;
+            borrow text as &tr in {
+                before = buffer.size(tr);
+            }
+            borrow clean as &cr in {
+                text = buffer.append(heap, text, buffer.bytes(cr));
+            }
+            starts = vec.push(heap, starts, before);
+            borrow text as &tr in {
+                ends = vec.push(heap, ends, buffer.size(tr));
+            }
+            buffer.drop(heap, clean);
+        }
+        j = j + 1;
+    }
+    return (select.make(heap, text, starts, ends), e);
+}
+
+// One `archive.no-match` for each selector that selected no entry.
+fn unmatched[&h, &s](heap: &!h Heap, sel: &s select.Sel, errs: fail.Errors) -> [heap] fail.Errors {
+    var e = errs;
+    var k = 0;
+    while k < select.count(sel) {
+        if select.is_unmatched(sel, k) {
+            e = refuse(heap, e, "archive.no-match", "a selected path matches no entry of the archive (an extract wrote nothing)", "list the archive to see its entries; a directory selects everything beneath it", select.selector(sel, k), "", 0);
+        }
+        k = k + 1;
+    }
+    return e;
+}
+
 fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, dir_write, file_read, file_write, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
@@ -1554,10 +1609,15 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     }
     if cli.operand_count(parsed) == 0 {
         e = flag_problem(heap, e, "args.missing-operand", "archive takes the ARCHIVE to work on", "archive --op list ARCHIVE", "ARCHIVE");
-    } else if !creating && cli.operand_count(parsed) > 1 {
-        e = flag_problem(heap, e, "args.too-many-operands", "only --op create takes PATHs after the ARCHIVE", "archive --op list|extract ARCHIVE", "PATH");
     } else if creating && cli.operand_count(parsed) == 1 {
         e = flag_problem(heap, e, "args.missing-operand", "--op create takes the PATHs to add after the ARCHIVE", "archive --op create ARCHIVE PATH...", "PATH");
+    }
+    var picked = select.make(heap, buffer.empty(heap, 1), vec.empty(heap, 1, 0), vec.empty(heap, 1, 0));
+    if !creating {
+        let (made, after_picks) = selectors(heap, args, parsed, e);
+        select.drop(heap, picked);
+        picked = made;
+        e = after_picks;
     }
     let (given, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
     e = after_root;
@@ -1598,10 +1658,17 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 buffer.drop(heap, archive_hash);
                 archive_hash = digest;
             } else if listing {
-                let (e2, c2, f2) = list_stream(heap, args, fs, io, r, cli.operand_index(parsed, 0), most_bytes, most_entries, e, count);
-                e = e2;
-                count = c2;
-                format = f2;
+                borrow mut picked as &!pm in {
+                    let (e2, c2, f2) = list_stream(heap, args, fs, io, r, cli.operand_index(parsed, 0), most_bytes, most_entries, pm, e, count);
+                    e = e2;
+                    count = c2;
+                    format = f2;
+                }
+                if format != 0 {
+                    borrow picked as &pr in {
+                        e = unmatched(heap, pr, e);
+                    }
+                }
             } else {
                 let (e2, loaded) = load(heap, args, fs, r, cli.operand_index(parsed, 0), most_bytes, e);
                 e = e2;
@@ -1620,9 +1687,17 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                             if tar.failure(en) != 0 {
                                 e = tar_error(heap, e, tar.failure(en), tar.failure_at(en), "", most_entries);
                             }
-                            if listing {
-                                count = list_entries(heap, io, en, ld.format, count);
-                            } else if tar.failure(en) == 0 {
+                            if tar.failure(en) == 0 {
+                                var at = 0;
+                                borrow mut picked as &!pm in {
+                                    while at < tar.count(en) {
+                                        select.note(pm, tar.name(en, at));
+                                        at = at + 1;
+                                    }
+                                }
+                                borrow picked as &pr in {
+                                    e = unmatched(heap, pr, e);
+                                }
                                 var into: &static [byte] = ".";
                                 var target = buffer.empty(heap, 2);
                                 if cli.has(parsed, table, "into") {
@@ -1645,9 +1720,11 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                                         usable = false;
                                     }
                                     if usable {
-                                        let (e3, c3) = extract_entries(heap, io, fs, r, buffer.bytes(tb), en, buffer.bytes(ld.data), dry, e, count);
-                                        e = e3;
-                                        count = c3;
+                                        borrow picked as &pq in {
+                                            let (e3, c3) = extract_entries(heap, io, fs, r, buffer.bytes(tb), en, buffer.bytes(ld.data), pq, dry, e, count);
+                                            e = e3;
+                                            count = c3;
+                                        }
                                     }
                                 }
                                 buffer.drop(heap, target);
@@ -1661,6 +1738,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         }
     }
     buffer.drop(heap, root);
+    select.drop(heap, picked);
     borrow e as &er in {
         count = sync(heap, io, er, count);
     }

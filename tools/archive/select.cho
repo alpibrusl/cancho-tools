@@ -1,0 +1,118 @@
+edition 7;
+
+module archive.select;
+
+// `archive.select` -- which entries of an archive a `list` or an `extract` was asked for (docs/archive.md section 14).
+//
+// A selector is a name as an archive spells it, normalised as the entry names are (`./a//b/` is `a/b`). It selects the entry of that
+// name and, when that is a directory, everything beneath it; `.` selects every entry. With no selector at all every entry is
+// selected. A selector that selects no entry is an error the caller reports (`is_unmatched`), so a typo cannot succeed quietly.
+
+import std.buffer;
+import std.bytes;
+import std.vec;
+
+pub res struct Sel {
+    // The selectors, one after another, each `text[at[k]..to[k]]`.
+    text: buffer.Buffer,
+    at: Box[[int]],
+    to: Box[[int]],
+    // How many entries each selector selected.
+    hits: Box[[int]],
+    n: int,
+}
+
+// The selectors in `text`, whose k-th is `text[starts[k]..ends[k]]`.
+pub fn make[&h](heap: &!h Heap, text: buffer.Buffer, starts: vec.Vec[int], ends: vec.Vec[int]) -> [heap] Sel {
+    var n = 0;
+    borrow starts as &sr in {
+        n = vec.size(sr);
+    }
+    var at = box_slice(heap, n + 1, 0);
+    var to = box_slice(heap, n + 1, 0);
+    var k = 0;
+    while k < n {
+        borrow mut at as &!aw in {
+            borrow starts as &sr in {
+                contents(aw)[k] = vec.get(sr, k);
+            }
+        }
+        borrow mut to as &!tw in {
+            borrow ends as &er in {
+                contents(tw)[k] = vec.get(er, k);
+            }
+        }
+        k = k + 1;
+    }
+    vec.drop(heap, starts);
+    vec.drop(heap, ends);
+    return Sel { text: text, at: at, to: to, hits: box_slice(heap, n + 1, 0), n: n };
+}
+
+pub fn drop[&h](heap: &!h Heap, s: Sel) -> [heap] int {
+    let Sel { text, at, to, hits, n } = s;
+    buffer.drop(heap, text);
+    unbox_slice(heap, at);
+    unbox_slice(heap, to);
+    unbox_slice(heap, hits);
+    return n;
+}
+
+// How many selectors there are.
+pub fn count[&x](s: &x Sel) -> [] int {
+    return s.n;
+}
+
+// Whether the selector `sel` selects the entry `name`.
+fn covers[&a, &b](sel: &a [byte], name: &b [byte]) -> [] bool {
+    if bytes.equal(sel, ".") {
+        return true;
+    }
+    if len(name) < len(sel) || !bytes.equal(name[0..len(sel)], sel) {
+        return false;
+    }
+    return len(name) == len(sel) || int_of(name[len(sel)]) == '/';
+}
+
+// Whether the entry `name` is selected: always when there are no selectors.
+pub fn matches[&x, &n](s: &x Sel, name: &n [byte]) -> [] bool {
+    if s.n == 0 {
+        return true;
+    }
+    var k = 0;
+    while k < s.n {
+        if covers(buffer.bytes(s.text)[contents(s.at)[k]..contents(s.to)[k]], name) {
+            return true;
+        }
+        k = k + 1;
+    }
+    return false;
+}
+
+// `matches`, and each selector that selects `name` counts it, so that a selector that selects nothing is found at the end.
+pub fn note[&x, &n](s: &!x Sel, name: &n [byte]) -> [] bool {
+    if s.n == 0 {
+        return true;
+    }
+    var found = false;
+    var k = 0;
+    while k < s.n {
+        if covers(buffer.bytes(s.text)[contents(s.at)[k]..contents(s.to)[k]], name) {
+            let h = contents(s.hits);
+            h[k] = h[k] + 1;
+            found = true;
+        }
+        k = k + 1;
+    }
+    return found;
+}
+
+// Whether the k-th selector selected no entry.
+pub fn is_unmatched[&x](s: &x Sel, k: int) -> [] bool {
+    return contents(s.hits)[k] == 0;
+}
+
+// The k-th selector.
+pub fn selector[&x](s: &x Sel, k: int) -> [] &x [byte] {
+    return buffer.bytes(s.text)[contents(s.at)[k]..contents(s.to)[k]];
+}

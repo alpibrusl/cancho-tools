@@ -780,6 +780,115 @@ class Archive(unittest.TestCase):
         self.assertEqual(out.rules(), ["conflict.exists"])
         self.assertEqual(self.tree(), before)
 
+    SELECTED = [("src", None), ("src/a.txt", b"a"), ("src/sub", None), ("src/sub/c.txt", b"c"), ("src2", None), ("src2/d.txt", b"d"), ("top.txt", b"t")]
+
+    def selection_archive(self, gz=None):
+        self.write("sel.tgz" if gz else "sel.tar", tar_bytes(self.SELECTED, gz=gz))
+        return "sel.tgz" if gz else "sel.tar"
+
+    def test_list_takes_the_entries_it_is_asked_for(self):
+        for gz in (None, True):
+            name = self.selection_archive(gz)
+            everything = self.archive("--op", "list", name)
+            self.assertEqual([r["path"] for r in everything.records if r.get("type") == "entry"], [n for n, _ in self.SELECTED])
+            for selectors, expected in [
+                (["src"], ["src", "src/a.txt", "src/sub", "src/sub/c.txt"]),
+                (["src/"], ["src", "src/a.txt", "src/sub", "src/sub/c.txt"]),
+                (["./src//sub/"], ["src/sub", "src/sub/c.txt"]),
+                (["src/a.txt", "top.txt"], ["src/a.txt", "top.txt"]),
+                (["src/a.txt", "src"], ["src", "src/a.txt", "src/sub", "src/sub/c.txt"]),
+                (["."], [n for n, _ in self.SELECTED]),
+                (["src2"], ["src2", "src2/d.txt"]),
+            ]:
+                out = self.archive("--op", "list", name, *selectors)
+                check_stream(self, out)
+                self.assertEqual(out.status, 0, (selectors, out.raw))
+                self.assertEqual([r["path"] for r in out.records if r.get("type") == "entry"], expected, selectors)
+                self.assertEqual(out.end()["entries"], len(expected), selectors)
+
+    def test_a_selector_is_a_whole_name_not_a_prefix_of_one(self):
+        name = self.selection_archive()
+        out = self.archive("--op", "list", name, "sr")
+        self.assertEqual(out.rules(), ["archive.no-match"])
+        out = self.archive("--op", "list", name, "src/a")
+        self.assertEqual(out.rules(), ["archive.no-match"])
+
+    def test_extract_writes_only_the_selected_entries_at_their_own_paths(self):
+        for gz in (None, True):
+            name = self.selection_archive(gz)
+            into = "into-gz" if gz else "into"
+            (self.dir / into).mkdir()
+            out = self.archive("--op", "extract", "--into", into, name, "src/sub/c.txt", "top.txt")
+            check_stream(self, out)
+            self.assertEqual(out.status, 0, out.raw)
+            files = sorted(str(p.relative_to(self.dir / into)) for p in (self.dir / into).rglob("*"))
+            self.assertEqual(files, ["src", "src/sub", "src/sub/c.txt", "top.txt"])
+            self.assertEqual((self.dir / into / "src/sub/c.txt").read_bytes(), b"c")
+            dirs = [r["path"] for r in out.records if r.get("type") == "dir"]
+            self.assertEqual(dirs, [into + "/src", into + "/src/sub"])
+            # A directory selects what is beneath it, and a second extract of the same names is a conflict, not a partial write.
+            out = self.archive("--op", "extract", "--into", into, name, "src2")
+            self.assertEqual(out.status, 0, out.raw)
+            self.assertEqual((self.dir / into / "src2/d.txt").read_bytes(), b"d")
+            before = self.tree()
+            out = self.archive("--op", "extract", "--into", into, name, "top.txt", "src")
+            self.assertEqual(out.rules(), ["conflict.exists"] * 2)
+            self.assertEqual(self.tree(), before)
+
+    def test_what_is_not_selected_is_not_checked_but_an_unsafe_name_always_is(self):
+        link = tarfile.TarInfo("evil-link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "/etc"
+        suid = tarfile.TarInfo("suid")
+        suid.size = 1
+        suid.mode = 0o4755
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            ok = tarfile.TarInfo("fine.txt")
+            ok.size = 2
+            t.addfile(ok, io.BytesIO(b"ok"))
+            t.addfile(link)
+            t.addfile(suid, io.BytesIO(b"x"))
+        self.write("mixed.tar", buf.getvalue())
+        out = self.archive("--op", "extract", "mixed.tar")
+        self.assertEqual(sorted(out.rules()), ["archive.entry-kind", "archive.special-mode"])
+        self.assertFalse((self.dir / "fine.txt").exists())
+        out = self.archive("--op", "extract", "mixed.tar", "fine.txt")
+        check_stream(self, out)
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual((self.dir / "fine.txt").read_bytes(), b"ok")
+        self.assertFalse((self.dir / "suid").exists())
+        # An unsafe name stops the extract of a file that is fine.
+        bad = tar_bytes([("fine2.txt", b"ok"), ("../escape", b"x")])
+        self.write("bad.tar", bad)
+        out = self.archive("--op", "extract", "bad.tar", "fine2.txt")
+        self.assertEqual(out.rules(), ["archive.unsafe-name"])
+        self.assertFalse((self.dir / "fine2.txt").exists())
+
+    def test_a_selector_that_selects_nothing_or_is_unsafe_is_refused_and_nothing_is_written(self):
+        name = self.selection_archive()
+        (self.dir / "into").mkdir()
+        before = self.tree()
+        out = self.archive("--op", "extract", "--into", "into", name, "top.txt", "nope", "also-nope")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.no-match", "archive.no-match"])
+        self.assertEqual([r["error"]["detail"]["path"] for r in out.records if r.get("type") == "error"], ["nope", "also-nope"])
+        self.assertEqual(out.end()["entries"], 0)
+        self.assertEqual(self.tree(), before)
+        for selector, rule in [("../x", "archive.unsafe-name"), ("/etc", "archive.unsafe-name"), ("src/../../x", "archive.unsafe-name")]:
+            out = self.archive("--op", "extract", "--into", "into", name, selector)
+            self.assertEqual(out.rules()[0], rule, selector)
+            self.assertEqual(self.tree(), before, selector)
+
+    def test_a_dry_run_of_a_selection_writes_nothing(self):
+        name = self.selection_archive()
+        (self.dir / "into").mkdir()
+        before = self.tree()
+        out = self.archive("--op", "extract", "--dry-run", "--into", "into", name, "src/sub")
+        self.assertEqual(out.status, 9, out.raw)
+        self.assertEqual([r["path"] for r in out.records if r.get("type") in ("dir", "file")], ["into/src", "into/src/sub", "into/src/sub/c.txt"])
+        self.assertEqual(self.tree(), before)
+
     def test_a_name_that_is_a_file_and_a_directory_in_one_archive_is_a_duplicate(self):
         self.write("both.tar", tar_bytes([("x", b"file"), ("x/y.txt", b"under it")]))
         out = self.archive("--op", "extract", "both.tar")
@@ -916,7 +1025,7 @@ class Archive(unittest.TestCase):
             "archive.not-an-archive", "archive.bad-gzip", "archive.crc-mismatch", "archive.bad-deflate",
             "archive.bad-checksum", "archive.bad-header", "archive.truncated", "archive.unsafe-name",
             "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.special-mode",
-            "archive.name-too-long",
+            "archive.no-match", "archive.name-too-long",
             "limit.archive-too-large", "limit.too-many-entries",
         }
         self.assertEqual(declared, seen)
@@ -959,6 +1068,7 @@ class Archive(unittest.TestCase):
             t.addfile(suid, io.BytesIO(b"x"))
         self.write("suid.tar", buf.getvalue())
         reached |= set(self.archive("--op", "extract", "suid.tar").rules())
+        reached |= set(self.archive("--op", "list", "suid.tar", "nothing-like-this").rules())
         self.write("t/" + "n" * 101, b"1")
         reached |= set(self.archive("--op", "create", "n.tar", "t/" + "n" * 101 if False else "t").rules())
         reached |= set(self.archive("--op", "list", "dir.tar", "--max-entries", "1", "--max-bytes", "10").rules())
@@ -990,7 +1100,7 @@ class Archive(unittest.TestCase):
         for argv, rule in [
             ([], "args.missing-operand"),
             (["--op", "create", "x.tgz"], "args.missing-operand"),
-            (["--op", "list", "a", "b"], "args.too-many-operands"),
+            (["--op", "list", "a", ""], "path.empty"),
             (["--op", "list", "--dry-run", "a"], "args.conflict"),
             (["--op", "list", "--into", "x", "a"], "args.conflict"),
             (["--op", "extract", "--as", "tar", "a"], "args.conflict"),

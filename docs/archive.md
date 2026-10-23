@@ -185,6 +185,7 @@ shared catalogue and its 39 fixtures are untouched; `test_archive.py` holds a fi
 | `archive.entry-kind` | 8 | an entry is a link, device, FIFO, sparse or unknown type |
 | `archive.duplicate-entry` | 8 | two entries name the same file |
 | `archive.directory-missing` | 8 | `--into`, or a directory above it, does not exist (§13: extract makes the directories an entry needs beneath `--into`, never `--into`); the detail names the shallowest missing one |
+| `archive.no-match` | 8 | (list, extract) a selected path matches no entry of the archive (§14); an extract writes nothing |
 | `archive.special-mode` | 8 | (extract) an entry's mode has a setuid, setgid or sticky bit (§13); nothing was extracted |
 | `archive.name-too-long` | 8 | (create) a name does not fit a ustar header |
 | `limit.archive-too-large` | 8 | expanded size would pass `--max-bytes` (or the file grew while it was read) |
@@ -538,3 +539,23 @@ be unpacked into a tree that already existed, and it dropped the execute bit. Bo
 * **A race** between the plan and the write (another process made a directory in the meantime) is fine when what exists is a
   directory, as `mkdir -p` treats it, and `conflict.exists` when it is not.
 * **Version.** `0.1.0` to `0.2.0`: `archive.directory-missing` no longer fires for what extract can make, and a new rule exists.
+
+## 14. Selecting entries
+
+> **Status: built (0.3.0).** `list` and `extract` take the entries they are asked for after the ARCHIVE:
+> `archive --op list|extract ARCHIVE [PATH...]`. (`create` always took PATHs, which name files on disk; here they name entries.)
+
+* **A selector is an entry name** as `list` shows it, normalised as entry names are (`./a//b/` is `a/b`). It selects the entry of that name
+  and, when that is a directory, everything beneath it (`src` selects `src`, `src/a.txt` and `src/sub/c.txt`, not `src2`). `.` selects every
+  entry. With no selector, every entry is selected, as before. Several selectors select the union.
+* **`list`** prints only the selected entries, and `end.entries` counts those. It still reads the whole archive (a gzip cannot be entered in
+  the middle), in the same bounded memory as §12.
+* **`extract`** writes only the selected entries, each beneath `--into` at its own path (`src/a.txt` becomes `into/src/a.txt`; the directories
+  above it are made and reported as §13 says, even though no entry named them). The plan checks only the selected entries: a name clash, a
+  link or a setuid file elsewhere in the archive does not stop the extract of a file that is fine.
+* **What selecting does not excuse.** An entry whose name is unsafe (absolute, `..`, NUL) is `archive.unsafe-name` whether or not it was
+  selected: an archive that holds one is not one to extract from quietly. A selector that is itself unsafe is `archive.unsafe-name`; an
+  empty one is `path.empty`.
+* **A selector that selects nothing** is `archive.no-match` (exit 8), one error for each, so a typo cannot succeed. An `extract` that has one
+  writes nothing.
+* **Version.** 0.2.0 to 0.3.0: an additive change to the operands; `archive.no-match` is a new rule.

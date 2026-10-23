@@ -1,0 +1,86 @@
+edition 7;
+
+import std.buffer;
+import std.test;
+import std.vec;
+import archive.select;
+
+// A selection of the given names, each as it is given.
+fn picked[&h](heap: &!h Heap, first: &static [byte], second: &static [byte]) -> [heap] select.Sel {
+    var text = buffer.empty(heap, 32);
+    var starts = vec.empty(heap, 4, 0);
+    var ends = vec.empty(heap, 4, 0);
+    starts = vec.push(heap, starts, 0);
+    text = buffer.append(heap, text, first);
+    ends = vec.push(heap, ends, len(first));
+    if len(second) > 0 {
+        starts = vec.push(heap, starts, len(first));
+        text = buffer.append(heap, text, second);
+        ends = vec.push(heap, ends, len(first) + len(second));
+    }
+    return select.make(heap, text, starts, ends);
+}
+
+pub fn test_no_selector_selects_every_entry[&h](heap: &!h Heap) -> [heap] int {
+    let none = select.make(heap, buffer.empty(heap, 1), vec.empty(heap, 1, 0), vec.empty(heap, 1, 0));
+    borrow none as &n in {
+        test.assert(select.matches(n, "anything/at/all"));
+        test.assert_eq(select.count(n), 0);
+    }
+    select.drop(heap, none);
+    return 0;
+}
+
+pub fn test_a_selector_is_a_whole_name_or_a_directory_prefix[&h](heap: &!h Heap) -> [heap] int {
+    let sel = picked(heap, "src", "");
+    borrow sel as &s in {
+        test.assert(select.matches(s, "src"));
+        test.assert(select.matches(s, "src/a.txt"));
+        test.assert(select.matches(s, "src/sub/deep/c.txt"));
+        test.assert(!select.matches(s, "src2"));
+        test.assert(!select.matches(s, "src2/a.txt"));
+        test.assert(!select.matches(s, "sr"));
+        test.assert(!select.matches(s, "other/src"));
+        test.assert(!select.matches(s, ""));
+    }
+    select.drop(heap, sel);
+    return 0;
+}
+
+pub fn test_dot_selects_everything[&h](heap: &!h Heap) -> [heap] int {
+    let sel = picked(heap, ".", "");
+    borrow sel as &s in {
+        test.assert(select.matches(s, "a"));
+        test.assert(select.matches(s, "a/b/c"));
+    }
+    select.drop(heap, sel);
+    return 0;
+}
+
+pub fn test_selectors_are_a_union_and_the_unmatched_are_found[&h](heap: &!h Heap) -> [heap] int {
+    var sel = picked(heap, "a.txt", "b");
+    borrow sel as &s in {
+        test.assert(select.matches(s, "a.txt"));
+        test.assert(select.matches(s, "b/x"));
+        test.assert(!select.matches(s, "a.txt.bak"));
+        test.assert(select.is_unmatched(s, 0));
+        test.assert(select.is_unmatched(s, 1));
+        test.assert_eq(select.count(s), 2);
+    }
+    borrow mut sel as &!m in {
+        test.assert(select.note(m, "b/x"));
+        test.assert(!select.note(m, "c"));
+    }
+    borrow sel as &s in {
+        test.assert(select.is_unmatched(s, 0));
+        test.assert(!select.is_unmatched(s, 1));
+    }
+    borrow mut sel as &!m in {
+        test.assert(select.note(m, "a.txt"));
+    }
+    borrow sel as &s in {
+        test.assert(!select.is_unmatched(s, 0));
+    }
+    select.drop(heap, sel);
+    return 0;
+}

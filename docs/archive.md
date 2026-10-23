@@ -238,7 +238,7 @@ Also: a dry run makes no mutating call (`strace`); every flag error is a tag wit
 
 ## 8. Non-goals
 
-writing `bzip2`, `xz` and `zstd` (§16.3, §17.3, §18.3); multi-member gzip and concatenated gzip; random access into a `.tar.gz`; archiving links
+writing `bzip2` and `xz` (§16.3, §17.3), and a zstd writer with Huffman literals or levels (§18.3); multi-member gzip and concatenated gzip; random access into a `.tar.gz`; archiving links
 or devices; restoring owner, mtime or special modes; extracting into a `--into` that does not exist (§13);
 streaming from standard input (a path only; `--stdin` can be added if an asker appears); encryption.
 
@@ -430,8 +430,8 @@ test was written for each and the runner now also runs the cancho unit tests. On
 (a stored block cannot out-grow the file that holds it) and is killed by a unit test that passes the limit directly. A
 mutant that looked like it survived once was a stale binary left by the previous mutant; the runner now rebuilds the real one at the end.
 
-**Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); writing `bzip2`, `xz` and
-`zstd`; restoring times; a second asker (§1).
+**Not done, and said so:** a streaming inflater (§2); `mkdir` (cancho's); writing `bzip2` and `xz`;
+restoring times; a second asker (§1).
 
 ## 12. Reading a piece at a time
 
@@ -675,8 +675,8 @@ showed with `--block-size=100000` and not with the default block size.
 
 ## 18. zstd
 
-> **Status: built (0.7.0), reading only.** `list` and `extract` read `.tar.zst` (format `tzst`) and a single `.zst` file (format `zst`), recognised by
-> the four-byte magic `28 B5 2F FD`. Everything in §13 and §14 applies. `create` does not write zstd (§18.3).
+> **Status: built (0.7.0 reads, 0.8.0 writes).** `list` and `extract` read `.tar.zst` (format `tzst`) and a single `.zst` file (format `zst`), recognised by
+> the four-byte magic `28 B5 2F FD`. Everything in §13 and §14 applies. `create --as tzst` and `--as zst` write them (§18.5).
 
 ### 18.1 What is read
 
@@ -701,9 +701,8 @@ block. The decompressed content is a tar or one file named as the archive withou
 
 ### 18.3 What is not done
 
-Writing zstd: an encoder is a match finder, a Huffman builder and an FSE builder, and the first of the three is where the compression is. Raw and RLE
-blocks alone would be a valid zstd that compresses nothing, which is a worse promise than none; a real writer is its own piece of work, after this
-reader has been used. Dictionaries, several frames, and streaming are refused above and listed so that the next reader knows they are decisions.
+Reading: dictionaries, several frames, and streaming are refused above and listed so that the next reader knows they are decisions. Writing: Huffman-coded
+literals, tables sent in the block, repeat offsets, lazy matching, and levels (§18.5): the writer is a small one, and what it writes is what any zstd reads.
 
 ### 18.4 Measured
 
@@ -715,6 +714,22 @@ frame gives a tag and never a trap, as do some 25,000 random mutations of real f
 sections build blocks by hand (a table that is one repeated symbol makes the bitstream the offset's extra bits and an end marker; a Huffman tree of two
 symbols makes a one-bit code), and one of them is a property test of the three repeat offsets against a ten-line model. Tests that need `zstandard` are skipped
 when it is not installed.
+**Writing (0.8.0):** prose, records, a source tree and a tar with 3 MiB of zeros are read back byte for byte by the `zstandard` package and by this tool, including matches across blocks and a
+repeat at 4 MiB (within the window) and at 9 MiB (not used); text-like data comes out at about half its size, zeros at a few bytes, random bytes at 17 bytes more than they were.
 **Found by testing:** the predefined match-length distribution has seven `-1` entries at its end, not five (a block decoded wrongly, found by the first real
 frame); and a table description that ran past its end asked for a negative number of bits, a trap that only a block placed last in the input could reach
 (found by cutting a real block at every length and ending the input there).
+
+### 18.5 Writing zstd
+
+`create --as tzst` writes a tar as one zstd frame; `--as zst` writes one file as one frame (named, like `--as gz`, by the archive's own name). The frame says its
+content size and a window of 8 MiB, and carries the XXH64 checksum. The input is cut into blocks of 128 KiB. A block of one byte repeated is an RLE block. Any other is
+searched by a greedy matcher (a table of 65,536 positions keyed by four bytes, the last position wins, a match of four bytes or more within 8 MiB, across blocks) and written as a
+compressed block when that is smaller than the block, else raw. A compressed block has **raw literals** and the sequences coded with the **predefined tables**,
+every offset a new one; nothing is sent but the sequences' bits, which is why it is small to write and why it does not compress as `zstd -3` does (§18.4). The same
+files give the same bytes; the matcher has no state outside the call.
+
+The bitstream is built backward from the last sequence: each state is picked so that reading the bits of the one before leads to it (the table's own `base` and
+`nbits`, the same table that decodes), the extra bits are written in the reverse of the order they are read, and the three initial states and the end marker last.
+At most 32,511 sequences go in a block, so the count is one byte or two: a block would need nearly all of its 128 KiB in matches of four to have more.
+

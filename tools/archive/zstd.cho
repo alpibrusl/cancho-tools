@@ -1217,3 +1217,315 @@ pub fn decompress[&h, &s](heap: &!h Heap, src: &s [byte], limit: int) -> [heap] 
     unbox_slice(heap, dict);
     return (out, result);
 }
+
+// ---- the writer -------------------------------------------------------------------------------------------------------------------
+//
+// One frame, written by a greedy matcher: the input in blocks of 128 KiB, each a run of one byte (RLE), or raw, or compressed when that is
+// smaller. A compressed block has raw literals and sequences coded with the predefined tables, every offset a new one (no repeat offsets),
+// and the frame says its window is 8 MiB, its content size, and has the XXH64 checksum. The same bytes come out for the same input.
+
+// Add `n` (at most 32) bits of `value` to the stream being built: `st[0]` holds the bits that are not yet a byte, `st[1]` how many.
+fn wbits[&h, &s](heap: &!h Heap, out: buffer.Buffer, st: &!s [int], value: int, n: int) -> [heap] buffer.Buffer {
+    var o = out;
+    st[0] = st[0] | (value & low_mask(n)) << st[1];
+    st[1] = st[1] + n;
+    while st[1] >= 8 {
+        o = buffer.push(heap, o, byte_of(st[0] & 255));
+        st[0] = st[0] >> 8;
+        st[1] = st[1] - 8;
+    }
+    return o;
+}
+
+// The state of the table at `off` (accuracy `al`) that has `symbol` and from which reading its bits can lead to `target` (any state of
+// that symbol when `target` is negative), or -1.
+fn find_state[&y, &c, &a](sym: &y [int], nbits: &c [int], base: &a [int], off: int, al: int, symbol: int, target: int) -> [] int {
+    var y = 0;
+    while y < 1 << al {
+        if sym[off + y] == symbol {
+            if target < 0 || base[off + y] <= target && target < base[off + y] + (1 << nbits[off + y]) {
+                return y;
+            }
+        }
+        y = y + 1;
+    }
+    return 0 - 1;
+}
+
+// The code whose range holds `value`, among `count` codes with these baselines.
+fn code_of[&b](bases: &b [int], count: int, value: int) -> [] int {
+    var c = count - 1;
+    while c > 0 && bases[c] > value {
+        c = c - 1;
+    }
+    return c;
+}
+
+// The bitstream for `n` sequences: `seqs` holds their literal lengths, match lengths and offset values (each in a run of 32776), `states`
+// is room for their three states each, and `codes` the baselines and extra bits (64 each: literal length, its bits, match length, its
+// bits). Answers the bytes and 0, or 1 when a state cannot be found.
+fn seq_stream[&h, &q, &z, &y, &c, &a, &k, &s](heap: &!h Heap, n: int, seqs: &q [int], states: &!z [int], sym: &y [int], nbits: &c [int], base: &a [int], codes: &k [int], st: &!s [int]) -> [heap] (buffer.Buffer, int) {
+    var out = buffer.empty(heap, 64);
+    st[0] = 0;
+    st[1] = 0;
+    var i = n - 1;
+    while i >= 0 {
+        let lc = code_of(codes[0..64], 36, seqs[i]);
+        let mc = code_of(codes[128..192], 53, seqs[32776 + i]);
+        let oc = high_bit(seqs[65552 + i]);
+        var tl = 0 - 1;
+        var tm = 0 - 1;
+        var to = 0 - 1;
+        if i + 1 < n {
+            tl = states[i + 1];
+            to = states[32776 + i + 1];
+            tm = states[65552 + i + 1];
+        }
+        states[i] = find_state(sym, nbits, base, 0, 6, lc, tl);
+        states[32776 + i] = find_state(sym, nbits, base, 512, 5, oc, to);
+        states[65552 + i] = find_state(sym, nbits, base, 1024, 6, mc, tm);
+        if states[i] < 0 || states[32776 + i] < 0 || states[65552 + i] < 0 {
+            return (out, 1);
+        }
+        i = i - 1;
+    }
+    i = n - 1;
+    while i >= 0 {
+        let lc = code_of(codes[0..64], 36, seqs[i]);
+        let mc = code_of(codes[128..192], 53, seqs[32776 + i]);
+        let oc = high_bit(seqs[65552 + i]);
+        out = wbits(heap, out, st, seqs[i] - codes[lc], codes[64 + lc]);
+        out = wbits(heap, out, st, seqs[32776 + i] - codes[128 + mc], codes[192 + mc]);
+        out = wbits(heap, out, st, seqs[65552 + i] - (1 << oc), oc);
+        if i > 0 {
+            let po = 512 + states[32776 + i - 1];
+            out = wbits(heap, out, st, states[32776 + i] - base[po], nbits[po]);
+            let pm = 1024 + states[65552 + i - 1];
+            out = wbits(heap, out, st, states[65552 + i] - base[pm], nbits[pm]);
+            let pl = states[i - 1];
+            out = wbits(heap, out, st, states[i] - base[pl], nbits[pl]);
+        }
+        i = i - 1;
+    }
+    out = wbits(heap, out, st, states[65552], 6);
+    out = wbits(heap, out, st, states[32776], 5);
+    out = wbits(heap, out, st, states[0], 6);
+    out = wbits(heap, out, st, 1, 1);
+    if st[1] > 0 {
+        out = buffer.push(heap, out, byte_of(st[0] & 255));
+    }
+    return (out, 0);
+}
+
+// `data[start..end]` as the body of a compressed block, or an empty buffer when it has no match worth coding (or cannot be coded).
+fn encode_block[&h, &d, &t, &q, &z, &y, &c, &a, &k, &s](heap: &!h Heap, data: &d [byte], start: int, end: int, hash: &!t [int], seqs: &!q [int], states: &!z [int], sym: &y [int], nbits: &c [int], base: &a [int], codes: &k [int], st: &!s [int]) -> [heap] buffer.Buffer {
+    var body = buffer.empty(heap, 256);
+    var n = 0;
+    var anchor = start;
+    var p = start;
+    var matched = 0;
+    // At most 32511 sequences, so that the count is one byte or two (a block would need nearly all of it in matches of four to have more).
+    while p + 4 <= end && n < 32511 {
+        let v = le_n(data, p, 4);
+        let slot = wrapping_mul(v, 2654435761) >> 32 & 0xffff;
+        let cand = hash[slot] - 1;
+        hash[slot] = p + 1;
+        var length = 0;
+        if cand >= 0 && p - cand <= 8388608 && le_n(data, cand, 4) == v {
+            length = 4;
+            while p + length < end && data[cand + length] == data[p + length] {
+                length = length + 1;
+            }
+        }
+        if length >= 4 {
+            seqs[n] = p - anchor;
+            seqs[32776 + n] = length;
+            seqs[65552 + n] = p - cand + 3;
+            n = n + 1;
+            matched = matched + length;
+            p = p + length;
+            anchor = p;
+        } else {
+            p = p + 1;
+        }
+    }
+    if n == 0 {
+        return body;
+    }
+    let lits = end - start - matched;
+    if lits < 32 {
+        body = buffer.push(heap, body, byte_of(lits << 3));
+    } else if lits < 4096 {
+        body = buffer.push(heap, body, byte_of(4 | lits << 4 & 255));
+        body = buffer.push(heap, body, byte_of(lits >> 4));
+    } else {
+        let head = 12 | lits << 4;
+        body = buffer.push(heap, body, byte_of(head & 255));
+        body = buffer.push(heap, body, byte_of(head >> 8 & 255));
+        body = buffer.push(heap, body, byte_of(head >> 16));
+    }
+    var at = start;
+    var i = 0;
+    while i < n {
+        body = buffer.append(heap, body, data[at..at + seqs[i]]);
+        at = at + seqs[i] + seqs[32776 + i];
+        i = i + 1;
+    }
+    body = buffer.append(heap, body, data[at..end]);
+    if n < 128 {
+        body = buffer.push(heap, body, byte_of(n));
+    } else {
+        body = buffer.push(heap, body, byte_of(128 + (n >> 8)));
+        body = buffer.push(heap, body, byte_of(n & 255));
+    }
+    body = buffer.push(heap, body, byte_of(0));
+    let (stream, why) = seq_stream(heap, n, seqs, states, sym, nbits, base, codes, st);
+    if why != 0 {
+        buffer.drop(heap, stream);
+        buffer.drop(heap, body);
+        return buffer.empty(heap, 1);
+    }
+    borrow stream as &sr in {
+        body = buffer.append(heap, body, buffer.bytes(sr));
+    }
+    buffer.drop(heap, stream);
+    return body;
+}
+
+fn block_header[&h](heap: &!h Heap, out: buffer.Buffer, last: bool, kind: int, size: int) -> [heap] buffer.Buffer {
+    var o = out;
+    var head = kind << 1 | size << 3;
+    if last {
+        head = head | 1;
+    }
+    o = buffer.push(heap, o, byte_of(head & 255));
+    o = buffer.push(heap, o, byte_of(head >> 8 & 255));
+    o = buffer.push(heap, o, byte_of(head >> 16));
+    return o;
+}
+
+fn all_same[&d](data: &d [byte], start: int, end: int) -> [] bool {
+    var i = start + 1;
+    while i < end && data[i] == data[start] {
+        i = i + 1;
+    }
+    return i >= end;
+}
+
+// `data` as one zstd frame: deterministic, with its content size and XXH64 checksum.
+pub fn compress[&h, &d](heap: &!h Heap, data: &d [byte]) -> [heap] buffer.Buffer {
+    var out = buffer.empty(heap, 256);
+    let n = len(data);
+    out = buffer.push(heap, out, byte_of(0x28));
+    out = buffer.push(heap, out, byte_of(0xb5));
+    out = buffer.push(heap, out, byte_of(0x2f));
+    out = buffer.push(heap, out, byte_of(0xfd));
+    // The checksum, a four-byte content size, and a window of 8 MiB.
+    out = buffer.push(heap, out, byte_of(0x84));
+    out = buffer.push(heap, out, byte_of(0x68));
+    var i = 0;
+    while i < 4 {
+        out = buffer.push(heap, out, byte_of(n >> 8 * i & 255));
+        i = i + 1;
+    }
+    let hash_box = box_slice(heap, 65536, 0);
+    let seqs_box = box_slice(heap, 3 * 32776, 0);
+    let states_box = box_slice(heap, 3 * 32776, 0);
+    let sym_box = box_slice(heap, 2048, 0);
+    let nbits_box = box_slice(heap, 2048, 0);
+    let base_box = box_slice(heap, 2048, 0);
+    let norm_box = box_slice(heap, 64, 0);
+    let next_box = box_slice(heap, 64, 0);
+    let codes_box = box_slice(heap, 256, 0);
+    let st_box = box_slice(heap, 2, 0);
+    borrow mut hash_box as &!hw in {
+        borrow mut seqs_box as &!qw in {
+            borrow mut states_box as &!zw in {
+                borrow mut sym_box as &!yw in {
+                    borrow mut nbits_box as &!cw in {
+                        borrow mut base_box as &!aw in {
+                            borrow mut norm_box as &!nw in {
+                                borrow mut next_box as &!xw in {
+                                    borrow mut codes_box as &!kw in {
+                                        borrow mut st_box as &!sw in {
+                                            let hash = contents(hw);
+                                            let seqs = contents(qw);
+                                            let states = contents(zw);
+                                            let sym = contents(yw);
+                                            let nbits = contents(cw);
+                                            let base = contents(aw);
+                                            let norm = contents(nw);
+                                            let next = contents(xw);
+                                            let codes = contents(kw);
+                                            let st = contents(sw);
+                                            fill_codes(codes[0..64], codes[64..128], codes[128..192], codes[192..256]);
+                                            var which = 0;
+                                            while which < 3 {
+                                                let text = default_norm(which);
+                                                var k = 0;
+                                                while k < len(text) {
+                                                    norm[k] = int_of(text[k]) - '0' - 1;
+                                                    k = k + 1;
+                                                }
+                                                build_table(norm, len(text), default_accuracy(which), which * 512, sym, nbits, base, next);
+                                                which = which + 1;
+                                            }
+                                            var start = 0;
+                                            var done = false;
+                                            while !done {
+                                                var end = start + 131072;
+                                                if end >= n {
+                                                    end = n;
+                                                    done = true;
+                                                }
+                                                let last = done;
+                                                if end - start > 1 && all_same(data, start, end) {
+                                                    out = block_header(heap, out, last, 1, end - start);
+                                                    out = buffer.push(heap, out, data[start]);
+                                                } else {
+                                                    let body = encode_block(heap, data, start, end, hash, seqs, states, sym, nbits, base, codes, st);
+                                                    var body_size = 0;
+                                                    borrow body as &sz in {
+                                                        body_size = buffer.size(sz);
+                                                    }
+                                                    if body_size > 0 && body_size < end - start {
+                                                        out = block_header(heap, out, last, 2, body_size);
+                                                        borrow body as &br in {
+                                                            out = buffer.append(heap, out, buffer.bytes(br));
+                                                        }
+                                                    } else {
+                                                        out = block_header(heap, out, last, 0, end - start);
+                                                        out = buffer.append(heap, out, data[start..end]);
+                                                    }
+                                                    buffer.drop(heap, body);
+                                                }
+                                                start = end;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    unbox_slice(heap, hash_box);
+    unbox_slice(heap, seqs_box);
+    unbox_slice(heap, states_box);
+    unbox_slice(heap, sym_box);
+    unbox_slice(heap, nbits_box);
+    unbox_slice(heap, base_box);
+    unbox_slice(heap, norm_box);
+    unbox_slice(heap, next_box);
+    unbox_slice(heap, codes_box);
+    unbox_slice(heap, st_box);
+    let sum = xxh64(data);
+    i = 0;
+    while i < 4 {
+        out = buffer.push(heap, out, byte_of(sum >> 8 * i & 255));
+        i = i + 1;
+    }
+    return out;
+}

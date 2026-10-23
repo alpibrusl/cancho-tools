@@ -82,7 +82,7 @@ MUTANTS = [
     ("a bzip2 repeat may pass the output cap", "bzip2.cho", "                                        if made + more <= limit {", "                                        if true {"),
     ("a bzip2 byte may pass the output cap", "bzip2.cho", "                                        if made + 1 <= limit {", "                                        if true {"),
     ("the bzip2 combined CRC does not fold blocks in", "bzip2.cho", "combined = (combined << 1 | combined >> 31) & 0xffffffff ^ crc;", "combined = crc;"),
-    ('an xz CRC-32 check is not verified', "xz.cho", '        return flate.crc32(heap, data) == le32(src, at);', '        return true;'),
+    ('an xz CRC-32 check is not verified', "xz.cho", '        return flate.crc32(heap, data) == le32(src, at);', '        return flate.crc32(heap, data) == le32(src, at) || true;'),
     ('an xz CRC-64 check is not verified', "xz.cho", '            same = cl == le32(src, at) && ch == le32(src, at + 4);', '            same = true;'),
     ('an xz SHA-256 check is not verified', "xz.cho", '            if digest[i] != src[at + i] {', '            if false {'),
     ("an xz stream header's CRC-32 is not verified", "xz.cho", '    if flate.crc32(heap, src[6..8]) != le32(src, 8) {', '    if false {'),

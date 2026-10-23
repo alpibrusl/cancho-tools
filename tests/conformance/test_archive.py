@@ -1072,6 +1072,118 @@ class Archive(unittest.TestCase):
         self.write("junk.xz", b"\xfd7zXZ\x00" + bytes(40))
         self.assertIn(self.archive("--op", "extract", "junk.xz").rules()[0], ("archive.crc-mismatch", "archive.bad-xz", "archive.truncated"))
 
+    def xz_blocks(self, check="crc32"):
+        """A three-block xz stream (sizes in the block headers), and where its parts are."""
+        rnd = random.Random(41)
+        words = [bytes(rnd.choice(b"abcdefgh") for _ in range(rnd.randrange(2, 7))) for _ in range(40)]
+        data = b" ".join(rnd.choice(words) for _ in range(3000))[:14000]
+        (self.dir / "b.bin").write_bytes(data)
+        with open(self.dir / "b.xz", "wb") as f:
+            subprocess.run(["xz", "-c", "-T2", "--block-size=5000", "--check=" + check, "--lzma2=preset=1", str(self.dir / "b.bin")], stdout=f, check=True)
+        blob = bytearray((self.dir / "b.xz").read_bytes())
+        footer = len(blob) - 12
+        index = footer - (struct.unpack("<I", blob[footer + 4:footer + 8])[0] + 1) * 4
+        return data, blob, index, footer
+
+    @staticmethod
+    def crc32le(data):
+        return struct.pack("<I", zlib.crc32(bytes(data)))
+
+    def test_xz_structure_that_lies_with_valid_crcs_is_refused(self):
+        data, blob, index, footer = self.xz_blocks()
+        self.write("ok.xz", bytes(blob))
+        self.assertEqual(self.archive("--op", "extract", "--into", ".", "ok.xz").status, 0)
+        os.unlink(self.dir / "ok")
+
+        def refused(name, patched, rules):
+            self.write(name, bytes(patched))
+            out = self.archive("--op", "extract", "--into", ".", name)
+            check_stream(self, out)
+            self.assertEqual(out.rules(), rules, name)
+            self.assertFalse((self.dir / name[:-3]).exists(), name)
+
+        # The index says another count, other sizes; the footer says another size: each with its own CRC-32 made right.
+        records = blob[index + 1]
+        patched = bytearray(blob)
+        patched[index + 1] = records + 1
+        patched[footer - 4:footer] = self.crc32le(patched[index:footer - 4])
+        refused("count.xz", patched, ["archive.bad-xz"])
+        patched = bytearray(blob)
+        patched[index + 2] ^= 0x01
+        patched[footer - 4:footer] = self.crc32le(patched[index:footer - 4])
+        refused("sizes.xz", patched, ["archive.bad-xz"])
+        patched = bytearray(blob)
+        patched[footer + 4] += 1
+        patched[footer:footer + 4] = self.crc32le(patched[footer + 4:footer + 10])
+        refused("backward.xz", patched, ["archive.bad-xz"])
+        # A block header whose sizes are not the block's, and whose filter is not LZMA2.
+        header_size = (blob[12] + 1) * 4
+        self.assertEqual(blob[13] & 0xc0, 0xc0, "the stream was expected to carry sizes in its block headers")
+        for label, at in [("packed", 14), ("content", 15)]:
+            patched = bytearray(blob)
+            # The varints are short in this stream; the first one ends at the first byte below 0x80.
+            end = 14
+            while patched[end] & 0x80:
+                end += 1
+            target = end if label == "packed" else None
+            if target is None:
+                end2 = end + 1
+                while patched[end2] & 0x80:
+                    end2 += 1
+                target = end2
+            patched[target] ^= 0x01
+            patched[12 + header_size - 4:12 + header_size] = self.crc32le(patched[12:12 + header_size - 4])
+            refused(label + ".xz", patched, ["archive.bad-xz"])
+        patched = bytearray(blob)
+        filter_at = patched.index(b"\x21\x01", 14)
+        patched[filter_at] = 0x03
+        patched[12 + header_size - 4:12 + header_size] = self.crc32le(patched[12:12 + header_size - 4])
+        refused("filter.xz", patched, ["archive.unsupported"])
+        # Padding after a block's data that is not zero: find a block that has some.
+        at = 12
+        unpadded = []
+        p = index + 2
+        for _ in range(records):
+            value = 0
+            shift = 0
+            while True:
+                b = blob[p]
+                p += 1
+                value |= (b & 0x7f) << shift
+                shift += 7
+                if not b & 0x80:
+                    break
+            unpadded.append(value)
+            while blob[p] & 0x80:
+                p += 1
+            p += 1
+        padded_once = False
+        for u in unpadded:
+            header = (blob[at] + 1) * 4
+            packed = u - header - 4
+            pad = -packed % 4
+            if pad and not padded_once:
+                patched = bytearray(blob)
+                patched[at + header + packed] = 1
+                refused("padding.xz", patched, ["archive.bad-xz"])
+                padded_once = True
+            at += header + packed + pad + 4
+        self.assertTrue(padded_once, "no block had padding to test with")
+
+    def test_no_single_bit_of_a_small_xz_can_change_without_being_noticed(self):
+        for check in (lzma.CHECK_CRC32, lzma.CHECK_CRC64, lzma.CHECK_SHA256):
+            blob = lzma.compress(b"hello, hello, hello xz " * 6, format=lzma.FORMAT_XZ, check=check, preset=1)
+            for at in range(len(blob)):
+                for bit in range(8):
+                    mutated = bytearray(blob)
+                    mutated[at] ^= 1 << bit
+                    self.write("bit.xz", bytes(mutated))
+                    out = self.archive("--op", "extract", "--into", ".", "bit.xz")
+                    check_stream(self, out)
+                    self.assertTrue(out.rules(), (check, at, bit, "a changed stream was accepted"))
+                    for f in out.files():
+                        pathlib.Path(self.dir / f["path"]).unlink(missing_ok=True)
+
     def test_xz_output_is_capped_to_the_byte_and_a_bomb_is_refused_in_small_memory(self):
         # Exactly the cap is allowed and one byte more is not. (A raw chunk cannot be told apart this way: the file that holds it is
         # larger than its content, and the cap refuses that file first.)

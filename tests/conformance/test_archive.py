@@ -13,6 +13,7 @@
   schemas/archive.v1.json.
 """
 
+import base64
 import gzip
 import hashlib
 import io
@@ -25,6 +26,7 @@ import stat
 import struct
 import subprocess
 import tarfile
+import zipfile
 import tempfile
 import time
 import unittest
@@ -486,6 +488,271 @@ class Archive(unittest.TestCase):
                     # Extract whatever it wrote, so the next round starts clean.
                     for f in out.files():
                         pathlib.Path(self.dir / f["path"]).unlink(missing_ok=True)
+
+    # ---- zip (docs/archive.md section 15) -------------------------------------------------------------------------------------
+
+    def make_zip(self, name, members, method=zipfile.ZIP_DEFLATED):
+        """A zip written by Python's zipfile: (name, data|None for a directory, unix mode)."""
+        with zipfile.ZipFile(self.dir / name, "w", method) as z:
+            for member, data, mode in members:
+                info = zipfile.ZipInfo(member)
+                info.create_system = 3
+                if data is None:
+                    info.external_attr = (0o040000 | mode) << 16 | 0x10
+                    z.writestr(info, b"")
+                else:
+                    info.external_attr = (0o100000 | mode) << 16
+                    z.writestr(info, data, compress_type=method)
+
+    ZIPPED = [("tree/", None, 0o755), ("tree/a.txt", b"alpha " * 400, 0o644), ("tree/run.sh", b"#!/bin/sh\necho hi\n", 0o755), ("tree/sub/", None, 0o755), ("tree/sub/b.bin", bytes(range(256)) * 8, 0o600)]
+
+    def test_what_archive_writes_unzip_and_python_read(self):
+        files = self.corpus(self.dir)
+        out = self.archive("--op", "create", "--as", "zip", "mine.zip", "src", "empty", *[n for n in files if "/" not in n])
+        check_stream(self, out)
+        self.assertEqual(out.status, 0, out.raw[-400:])
+        self.assertEqual(out.end()["format"], "zip")
+        self.assertEqual(subprocess.run(["unzip", "-tq", str(self.dir / "mine.zip")], capture_output=True).returncode, 0)
+        with zipfile.ZipFile(self.dir / "mine.zip") as z:
+            self.assertIsNone(z.testzip())
+            names = z.namelist()
+            self.assertIn("src/", names)
+            self.assertIn("empty/", names)
+            for name, data in files.items():
+                self.assertEqual(z.read(name), data, name)
+            by = {i.filename: i for i in z.infolist()}
+            self.assertEqual(by["src/run.sh"].external_attr >> 16 & 0o777, 0o755)
+            self.assertEqual(by["src/a.txt"].external_attr >> 16 & 0o777, 0o644)
+            self.assertEqual(by["src/"].external_attr >> 16 & 0o170000, 0o040000)
+            self.assertEqual({i.date_time for i in z.infolist()}, {(1980, 1, 1, 0, 0, 0)})
+        # The local headers carry the same time as the directory, byte for byte.
+        whole = (self.dir / "mine.zip").read_bytes()
+        at = whole.find(b"PK\x03\x04")
+        locals_seen = 0
+        while at >= 0:
+            self.assertEqual(whole[at + 10:at + 14], b"\x00\x00\x21\x00", at)
+            locals_seen += 1
+            at = whole.find(b"PK\x03\x04", at + 4)
+        self.assertGreaterEqual(locals_seen, 5)
+        with zipfile.ZipFile(self.dir / "mine.zip") as z:
+            self.assertTrue(any(i.compress_type == zipfile.ZIP_DEFLATED for i in z.infolist()), "nothing was deflated")
+            self.assertTrue(any(i.compress_type == zipfile.ZIP_STORED and i.file_size > 0 for i in z.infolist()), "an incompressible file was not stored")
+        # The same files give the same bytes, and a zip made here is read here.
+        out2 = self.archive("--op", "create", "--as", "zip", "again.zip", "src", "empty", *[n for n in files if "/" not in n])
+        self.assertEqual((self.dir / "mine.zip").read_bytes(), (self.dir / "again.zip").read_bytes())
+        self.assertEqual(out.end()["archive_sha256"], hashlib.sha256((self.dir / "mine.zip").read_bytes()).hexdigest())
+        dest = self.dir / "back"
+        dest.mkdir()
+        out = self.archive("--op", "extract", "--into", "back", "mine.zip")
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        for name, data in files.items():
+            self.assertEqual((dest / name).read_bytes(), data, name)
+        self.assertTrue(os.access(dest / "src" / "run.sh", os.X_OK))
+
+    def test_what_others_write_zip_archive_reads(self):
+        self.umask(0o022)
+        sources = {}
+        self.make_zip("py.zip", self.ZIPPED)
+        sources["python deflate"] = "py.zip"
+        self.make_zip("stored.zip", self.ZIPPED, zipfile.ZIP_STORED)
+        sources["python stored"] = "stored.zip"
+        tree = self.dir / "ziptree"
+        (tree / "tree" / "sub").mkdir(parents=True)
+        for name, data, mode in self.ZIPPED:
+            if data is not None:
+                (tree / name).write_bytes(data)
+                (tree / name).chmod(mode)
+        subprocess.run(["zip", "-qrX", str(self.dir / "cli.zip"), "tree"], cwd=tree, check=True)
+        sources["zip(1)"] = "cli.zip"
+        for label, name in sources.items():
+            out = self.archive("--op", "list", name)
+            check_stream(self, out)
+            listed = {r["path"]: r for r in out.records if r.get("type") == "entry"}
+            self.assertEqual(sorted(listed), ["tree", "tree/a.txt", "tree/run.sh", "tree/sub", "tree/sub/b.bin"], label)
+            self.assertEqual(listed["tree/a.txt"]["size"], 2400, label)
+            self.assertEqual(listed["tree/sub"]["kind"], "directory", label)
+            self.assertEqual(listed["tree/run.sh"]["mode"] & 0o777, 0o755, label)
+            into = "out-" + name
+            (self.dir / into).mkdir()
+            out = self.archive("--op", "extract", "--into", into, name)
+            check_stream(self, out)
+            self.assertEqual(out.status, 0, (label, out.raw[-300:]))
+            for member, data, mode in self.ZIPPED:
+                if data is not None:
+                    self.assertEqual((self.dir / into / member).read_bytes(), data, (label, member))
+            self.assertEqual(stat.S_IMODE((self.dir / into / "tree/run.sh").stat().st_mode), 0o755, label)
+            self.assertEqual(stat.S_IMODE((self.dir / into / "tree/a.txt").stat().st_mode), 0o644, label)
+        # A selection of a zip lists and extracts only that.
+        out = self.archive("--op", "list", "py.zip", "tree/sub")
+        self.assertEqual([r["path"] for r in out.records if r.get("type") == "entry"], ["tree/sub", "tree/sub/b.bin"])
+        (self.dir / "one").mkdir()
+        out = self.archive("--op", "extract", "--into", "one", "py.zip", "tree/run.sh")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual(sorted(str(p.relative_to(self.dir / "one")) for p in (self.dir / "one").rglob("*")), ["tree", "tree/run.sh"])
+
+    def test_zip_odds_and_ends_other_writers_leave(self):
+        # A comment after the directory, an extra field in the local header, a directory known only by its trailing slash.
+        with zipfile.ZipFile(self.dir / "odd.zip", "w", zipfile.ZIP_DEFLATED) as z:
+            z.comment = b"c" * 200
+            info = zipfile.ZipInfo("extra.txt")
+            info.extra = b"\x99\x99\x08\x00" + b"x" * 8
+            z.writestr(info, b"with an extra field " * 10)
+            bare = zipfile.ZipInfo("bare/")
+            bare.create_system = 0
+            bare.external_attr = 0
+            z.writestr(bare, b"")
+            z.writestr("tail.txt", b"the last member")
+        out = self.archive("--op", "list", "odd.zip")
+        check_stream(self, out)
+        self.assertEqual({r["path"]: r["kind"] for r in out.records if r.get("type") == "entry"}, {"extra.txt": "file", "bare": "directory", "tail.txt": "file"})
+        (self.dir / "into").mkdir()
+        out = self.archive("--op", "extract", "--into", "into", "odd.zip")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual((self.dir / "into/extra.txt").read_bytes(), b"with an extra field " * 10)
+        self.assertTrue((self.dir / "into/bare").is_dir())
+        # A local header that is not one is not found, not guessed.
+        raw = bytearray((self.dir / "odd.zip").read_bytes())
+        last = raw.rfind(b"PK\x03\x04")
+        raw[last + 3] = 5
+        self.write("nolocal.zip", bytes(raw))
+        before = self.tree()
+        out = self.archive("--op", "extract", "--into", ".", "nolocal.zip")
+        self.assertEqual(out.rules(), ["archive.truncated"])
+        self.assertEqual(self.tree(), before)
+
+    def test_a_zip_end_record_with_its_counts_at_the_limit_is_zip64_and_unsupported(self):
+        self.make_zip("good.zip", self.ZIPPED)
+        raw = bytearray((self.dir / "good.zip").read_bytes())
+        eocd = raw.rfind(b"PK\x05\x06")
+        for field, width in [(8, 2), (10, 2), (12, 4), (16, 4)]:
+            mutated = bytearray(raw)
+            mutated[eocd + field:eocd + field + width] = b"\xff" * width
+            self.write("z64.zip", bytes(mutated))
+            out = self.archive("--op", "list", "z64.zip")
+            self.assertEqual(out.rules(), ["archive.unsupported"], field)
+
+    def test_a_zip_holds_at_most_65534_entries(self):
+        many = self.dir / "many"
+        many.mkdir()
+        for i in range(65535):
+            (many / ("f%d" % i)).write_bytes(b"")
+        out = self.archive("--op", "create", "--as", "zip", "--max-entries", "1000000", "big.zip", "many", timeout=600)
+        self.assertEqual(out.rules(), ["limit.too-many-entries"])
+        self.assertFalse((self.dir / "big.zip").exists())
+
+    def test_only_the_members_asked_for_are_read(self):
+        self.make_zip("py.zip", self.ZIPPED, zipfile.ZIP_STORED)
+        raw = bytearray((self.dir / "py.zip").read_bytes())
+        at = raw.find(b"alpha alpha")
+        raw[at + 5] ^= 0xff
+        self.write("damaged.zip", bytes(raw))
+        (self.dir / "one").mkdir()
+        # The damaged member is not asked for, so it is not read; asked for, it is a CRC mismatch and nothing is written.
+        out = self.archive("--op", "extract", "--into", "one", "damaged.zip", "tree/run.sh")
+        self.assertEqual(out.status, 0, out.raw)
+        before = self.tree()
+        out = self.archive("--op", "extract", "--into", "one", "damaged.zip", "tree/a.txt")
+        self.assertEqual(out.rules(), ["archive.crc-mismatch"])
+        out = self.archive("--op", "extract", "--into", "one", "damaged.zip")
+        self.assertEqual(out.rules(), ["archive.crc-mismatch"])
+        self.assertEqual(self.tree(), before)
+
+    def test_zip_features_this_tool_does_not_read_are_unsupported_and_damage_is_a_tag(self):
+        self.make_zip("good.zip", self.ZIPPED)
+        good = (self.dir / "good.zip").read_bytes()
+        eocd = good.rfind(b"PK\x05\x06")
+        cd = struct.unpack("<I", good[eocd + 16:eocd + 20])[0]
+
+        def changed(name, at, value):
+            raw = bytearray(good)
+            raw[at:at + len(value)] = value
+            self.write(name, bytes(raw))
+            return self.archive("--op", "list", name)
+
+        out = changed("enc.zip", cd + 8, struct.pack("<H", 1))
+        self.assertEqual(out.rules(), ["archive.unsupported"])
+        out = changed("method.zip", cd + 10, struct.pack("<H", 12))
+        self.assertEqual(out.rules(), ["archive.unsupported"])
+        out = changed("zip64.zip", cd + 20, struct.pack("<I", 0xffffffff))
+        self.assertEqual(out.rules(), ["archive.unsupported"])
+        out = changed("disk.zip", eocd + 4, struct.pack("<H", 1))
+        self.assertEqual(out.rules(), ["archive.unsupported"])
+        out = changed("sig.zip", cd, b"XXXX")
+        self.assertEqual(out.rules(), ["archive.bad-header"])
+        out = changed("count.zip", eocd + 10, struct.pack("<H", 99))
+        self.assertIn(out.rules()[0], ["archive.unsupported", "archive.truncated", "archive.bad-header"])
+        self.write("noend.zip", good[:eocd - 3])
+        out = self.archive("--op", "list", "noend.zip")
+        self.assertEqual(out.rules(), ["archive.truncated"])
+        self.write("short.zip", b"PK\x03\x04" + bytes(10))
+        out = self.archive("--op", "list", "short.zip")
+        self.assertEqual(out.rules(), ["archive.truncated"])
+        for rule_out in [self.archive("--op", "extract", "enc.zip"), self.archive("--op", "extract", "sig.zip")]:
+            check_stream(self, rule_out)
+        # A member whose directory sizes are wrong: the length is checked, never trusted.
+        out = changed("size.zip", cd + 46 + len("tree/") + 24, struct.pack("<I", 7))
+        self.assertEqual(out.status, 0, out.raw)
+        out = self.archive("--op", "extract", "size.zip")
+        self.assertIn(out.rules()[0], ["archive.crc-mismatch", "archive.truncated", "archive.bad-deflate"])
+
+    def test_zip_names_and_kinds_are_checked_as_a_tars_are(self):
+        self.make_zip("evil.zip", [("fine.txt", b"ok", 0o644), ("../escape.txt", b"x", 0o644)])
+        out = self.archive("--op", "extract", "evil.zip")
+        self.assertEqual(out.rules(), ["archive.unsafe-name"])
+        self.assertFalse((self.dir / "fine.txt").exists())
+        with zipfile.ZipFile(self.dir / "link.zip", "w") as z:
+            info = zipfile.ZipInfo("l")
+            info.create_system = 3
+            info.external_attr = (0o120777) << 16
+            z.writestr(info, "target")
+            z.writestr("kept.txt", "k")
+        out = self.archive("--op", "list", "link.zip")
+        self.assertEqual({r["path"]: r["kind"] for r in out.records if r.get("type") == "entry"}, {"l": "symlink", "kept.txt": "file"})
+        out = self.archive("--op", "extract", "link.zip")
+        self.assertEqual(out.rules(), ["archive.entry-kind"])
+        out = self.archive("--op", "extract", "link.zip", "kept.txt")
+        self.assertEqual(out.status, 0, out.raw)
+        self.assertEqual((self.dir / "kept.txt").read_bytes(), b"k")
+        with zipfile.ZipFile(self.dir / "suid.zip", "w") as z:
+            info = zipfile.ZipInfo("s")
+            info.create_system = 3
+            info.external_attr = (0o104755) << 16
+            z.writestr(info, "x")
+        out = self.archive("--op", "extract", "suid.zip")
+        self.assertEqual(out.rules(), ["archive.special-mode"])
+
+    def test_a_zip_bomb_is_bounded_by_what_its_directory_claims(self):
+        self.make_zip("bomb.zip", [("zeros", bytes(8 * 1024 * 1024), 0o644)])
+        raw = bytearray((self.dir / "bomb.zip").read_bytes())
+        out = self.archive("--op", "extract", "--max-bytes", "1048576", "bomb.zip")
+        self.assertEqual(out.rules(), ["limit.archive-too-large"])
+        eocd = raw.rfind(b"PK\x05\x06")
+        cd = struct.unpack("<I", raw[eocd + 16:eocd + 20])[0]
+        raw[cd + 24:cd + 28] = struct.pack("<I", 1000)
+        self.write("lie.zip", bytes(raw))
+        before = self.tree()
+        out = self.archive("--op", "extract", "lie.zip")
+        self.assertEqual(out.rules(), ["archive.crc-mismatch"])
+        self.assertEqual(self.tree(), before)
+
+    def test_every_cut_and_changed_byte_of_a_zip_is_a_tag_never_a_trap(self):
+        self.make_zip("z.zip", [("a.txt", b"hello world " * 20, 0o644), ("d/", None, 0o755), ("d/b.txt", b"bee" * 100, 0o644)])
+        blob = (self.dir / "z.zip").read_bytes()
+        for cut in range(0, len(blob), 1):
+            self.write("cut.zip", blob[:cut])
+            check_stream(self, self.archive("--op", "list", "cut.zip"))
+        rnd = random.Random(7)
+        for at in range(0, len(blob)):
+            mutated = bytearray(blob)
+            mutated[at] ^= rnd.choice([1, 0x80, 0xff, 0x55])
+            self.write("flip.zip", bytes(mutated))
+            for op in ["list", "extract"]:
+                out = self.archive("--op", op, "flip.zip", "--into", ".") if op == "extract" else self.archive("--op", op, "flip.zip")
+                check_stream(self, out)
+                for f in out.files():
+                    # A name that is not UTF-8 is `{"b64": ...}` in the stream.
+                    name = f["path"] if isinstance(f["path"], str) else os.fsdecode(base64.b64decode(f["path"]["b64"]))
+                    pathlib.Path(self.dir / name).unlink(missing_ok=True)
 
     def test_a_size_past_the_data_is_truncated(self):
         raw = bytearray(tar_bytes([("a.txt", b"hello")]))
@@ -1025,7 +1292,7 @@ class Archive(unittest.TestCase):
             "archive.not-an-archive", "archive.bad-gzip", "archive.crc-mismatch", "archive.bad-deflate",
             "archive.bad-checksum", "archive.bad-header", "archive.truncated", "archive.unsafe-name",
             "archive.entry-kind", "archive.duplicate-entry", "archive.directory-missing", "archive.special-mode",
-            "archive.no-match", "archive.name-too-long",
+            "archive.no-match", "archive.unsupported", "archive.name-too-long",
             "limit.archive-too-large", "limit.too-many-entries",
         }
         self.assertEqual(declared, seen)
@@ -1069,6 +1336,12 @@ class Archive(unittest.TestCase):
         self.write("suid.tar", buf.getvalue())
         reached |= set(self.archive("--op", "extract", "suid.tar").rules())
         reached |= set(self.archive("--op", "list", "suid.tar", "nothing-like-this").rules())
+        self.make_zip("enc.zip", [("a", b"x", 0o644)])
+        raw = bytearray((self.dir / "enc.zip").read_bytes())
+        cd = struct.unpack("<I", raw[raw.rfind(b"PK\x05\x06") + 16:raw.rfind(b"PK\x05\x06") + 20])[0]
+        raw[cd + 8] = 1
+        self.write("enc2.zip", bytes(raw))
+        reached |= set(self.archive("--op", "list", "enc2.zip").rules())
         self.write("t/" + "n" * 101, b"1")
         reached |= set(self.archive("--op", "create", "n.tar", "t/" + "n" * 101 if False else "t").rules())
         reached |= set(self.archive("--op", "list", "dir.tar", "--max-entries", "1", "--max-bytes", "10").rules())

@@ -1,0 +1,366 @@
+edition 7;
+
+module archive.zip;
+
+// `archive.zip` -- zip archives, read from memory and written to a buffer (docs/archive.md section 15).
+//
+// The reader goes by the central directory at the end of the file, which is what every zip reader does, so the entries are what
+// the directory says and the local headers are only used to find the data. Nothing is trusted: every offset is checked against
+// the data, a member is inflated into at most the size the directory claims, and its CRC-32 and length are checked. Stored (0) and
+// deflated (8) members are read; encryption, zip64, several disks and every other method are `unsupported`, not guessed at.
+//
+// Failures (`tar.Entries.failure`, the numbers `tar_error` in archive.cho knows): 1 the data ends inside what the directory says is
+// there, 3 a field cannot be right, 4 more entries than allowed, 5 a feature this reader does not read, 6 a member's CRC-32 or
+// length is not what the directory says, 7 a member's DEFLATE stream is invalid.
+//
+// The writer makes the zip a tar of the same files would be: names with the type of each (a directory's ends in `/`), the mode in
+// the Unix attributes, a fixed time (1980-01-01, so the same files give the same bytes), UTF-8 names, no extra fields and no data
+// descriptors; a member is deflated when that is smaller and stored when it is not.
+
+import std.buffer;
+import std.bytes;
+import std.vec;
+import archive.flate;
+import archive.tar;
+
+// Whether `data` starts like a zip: a local header, or the end record of an empty one.
+pub fn looks_like[&d](data: &d [byte]) -> [] bool {
+    if len(data) < 4 || int_of(data[0]) != 'P' || int_of(data[1]) != 'K' {
+        return false;
+    }
+    return int_of(data[2]) == 3 && int_of(data[3]) == 4 || int_of(data[2]) == 5 && int_of(data[3]) == 6;
+}
+
+fn le16[&d](data: &d [byte], at: int) -> [] int {
+    return int_of(data[at]) | int_of(data[at + 1]) << 8;
+}
+
+fn le32[&d](data: &d [byte], at: int) -> [] int {
+    return flate.le32(data, at);
+}
+
+// Whether `n` bytes at `at` are inside `data`.
+fn have[&d](data: &d [byte], at: int, n: int) -> [] bool {
+    return at >= 0 && n >= 0 && at <= len(data) && n <= len(data) - at;
+}
+
+// What `parse` found: the entries, and for each what extraction needs of the member.
+pub res struct Members {
+    entries: tar.Entries,
+    // 0 stored, 8 deflated.
+    method: vec.Vec[int],
+    csize: vec.Vec[int],
+    crc: vec.Vec[int],
+    // The offset of the member's local header.
+    local: vec.Vec[int],
+}
+
+pub fn entries[&m](m: &m Members) -> [] &m tar.Entries {
+    return m.entries;
+}
+
+// Say where member `i`'s content is in the data the caller extracts from.
+pub fn set_body[&m](m: &!m Members, i: int, at: int) -> [] int {
+    return tar.set_body(m.entries, i, at);
+}
+
+pub fn drop[&h](heap: &!h Heap, m: Members) -> [heap] int {
+    let Members { entries, method, csize, crc, local } = m;
+    tar.drop(heap, entries);
+    vec.drop(heap, method);
+    vec.drop(heap, csize);
+    vec.drop(heap, crc);
+    vec.drop(heap, local);
+    return 0;
+}
+
+fn stop(m: Members, why: int, at: int) -> [] Members {
+    let Members { entries, method, csize, crc, local } = m;
+    return Members { entries: tar.failed(entries, why, at), method: method, csize: csize, crc: crc, local: local };
+}
+
+// The offset of the end-of-central-directory record, or -1: the last signature in the final 64 KiB + 22 bytes.
+fn find_end[&d](data: &d [byte]) -> [] int {
+    var at = len(data) - 22;
+    let floor = len(data) - 22 - 65535;
+    while at >= 0 && at >= floor {
+        if int_of(data[at]) == 'P' && int_of(data[at + 1]) == 'K' && int_of(data[at + 2]) == 5 && int_of(data[at + 3]) == 6 {
+            return at;
+        }
+        at = at - 1;
+    }
+    return 0 - 1;
+}
+
+// Read the central directory of the zip in `data`, at most `most` entries. The entries read before a failure are kept.
+pub fn parse[&h, &d](heap: &!h Heap, data: &d [byte], most: int) -> [heap] Members {
+    var m = Members { entries: tar.entries_empty(heap), method: vec.empty(heap, 16, 0), csize: vec.empty(heap, 16, 0), crc: vec.empty(heap, 16, 0), local: vec.empty(heap, 16, 0) };
+    let end = find_end(data);
+    if end < 0 {
+        return stop(m, 1, len(data));
+    }
+    let disk = le16(data, end + 4);
+    let cd_disk = le16(data, end + 6);
+    let here = le16(data, end + 8);
+    let total = le16(data, end + 10);
+    let cd_size = le32(data, end + 12);
+    let cd_at = le32(data, end + 16);
+    // A zip64 locator just before the record, or a field at its limit, means the real numbers are elsewhere.
+    if end >= 20 && le32(data, end - 20) == 0x07064b50 || total == 0xffff || cd_size == 0xffffffff || cd_at == 0xffffffff {
+        return stop(m, 5, end);
+    }
+    if disk != 0 || cd_disk != 0 || here != total {
+        return stop(m, 5, end);
+    }
+    if total > most {
+        return stop(m, 4, end);
+    }
+    if !have(data, cd_at, cd_size) || cd_at + cd_size > end {
+        return stop(m, 1, cd_at);
+    }
+    var at = cd_at;
+    var k = 0;
+    var going = true;
+    while going && k < total {
+        if !have(data, at, 46) {
+            m = stop(m, 1, at);
+            going = false;
+        } else if le32(data, at) != 0x02014b50 {
+            m = stop(m, 3, at);
+            going = false;
+        } else {
+            let made_by = le16(data, at + 4);
+            let flags = le16(data, at + 8);
+            let how = le16(data, at + 10);
+            let sum = le32(data, at + 16);
+            let packed_size = le32(data, at + 20);
+            let full_size = le32(data, at + 24);
+            let name_len = le16(data, at + 28);
+            let extra_len = le16(data, at + 30);
+            let note_len = le16(data, at + 32);
+            let start_disk = le16(data, at + 34);
+            let attributes = le32(data, at + 38);
+            let head = le32(data, at + 42);
+            let next = at + 46 + name_len + extra_len + note_len;
+            if !have(data, at + 46, name_len + extra_len + note_len) || next > cd_at + cd_size {
+                m = stop(m, 1, at);
+                going = false;
+            } else if flags & 0x41 != 0 || start_disk != 0 || packed_size == 0xffffffff || full_size == 0xffffffff || head == 0xffffffff || how != 0 && how != 8 {
+                m = stop(m, 5, at);
+                going = false;
+            } else if how == 0 && packed_size != full_size || name_len == 0 {
+                m = stop(m, 3, at);
+                going = false;
+            } else {
+                let name = data[at + 46..at + 46 + name_len];
+                // The Unix mode is in the high half of the attributes when the zip was made on Unix (host 3).
+                let unix = made_by >> 8 == 3;
+                let type_bits = attributes >> 16 & 0xf000;
+                var kind = tar.kind_file();
+                if int_of(name[name_len - 1]) == '/' || unix && type_bits == 0x4000 || attributes & 0x10 != 0 {
+                    kind = tar.kind_directory();
+                } else if unix && type_bits == 0xa000 {
+                    kind = 4;
+                } else if unix && type_bits != 0 && type_bits != 0x8000 {
+                    kind = 8;
+                }
+                var mode = 420;
+                if unix {
+                    mode = attributes >> 16 & 0xfff;
+                } else if kind == tar.kind_directory() {
+                    mode = 493;
+                }
+                var size = full_size;
+                if kind != tar.kind_file() {
+                    size = 0;
+                }
+                let Members { entries, method, csize, crc, local } = m;
+                m = Members { entries: tar.push(heap, entries, name, kind, size, 0, mode), method: vec.push(heap, method, how), csize: vec.push(heap, csize, packed_size), crc: vec.push(heap, crc, sum), local: vec.push(heap, local, head) };
+                at = next;
+            }
+        }
+        k = k + 1;
+    }
+    return m;
+}
+
+// Where the member `k` has its data, and how long that is: its local header is checked and skipped. (-1, 0) when it is not whole.
+pub fn data_range[&d, &m](data: &d [byte], members: &m Members, k: int) -> [] (int, int) {
+    let local = vec.get(members.local, k);
+    let n = vec.get(members.csize, k);
+    if !have(data, local, 30) || le32(data, local) != 0x04034b50 {
+        return (0 - 1, 0);
+    }
+    let start = local + 30 + le16(data, local + 26) + le16(data, local + 28);
+    if !have(data, start, n) {
+        return (0 - 1, 0);
+    }
+    return (start, n);
+}
+
+// The content of member `k` (a file): at most the size the directory claims, and exactly it, with the CRC-32 the directory claims.
+// Answers the content and a failure (0 none, else the numbers above).
+pub fn member[&h, &d, &m](heap: &!h Heap, data: &d [byte], members: &m Members, k: int) -> [heap] (buffer.Buffer, int) {
+    let (start, n) = data_range(data, members, k);
+    let want = tar.size(members.entries, k);
+    if start < 0 {
+        return (buffer.empty(heap, 1), 1);
+    }
+    var out = buffer.empty(heap, want + 1);
+    var failure = 0;
+    if vec.get(members.method, k) == 0 {
+        out = buffer.append(heap, out, data[start..start + n]);
+    } else {
+        let (inflated, status, after) = flate.inflate(heap, data, start, start + n, want);
+        buffer.drop(heap, out);
+        out = inflated;
+        if status == 2 {
+            failure = 1;
+        } else if status == 3 {
+            // More than the directory says the member holds.
+            failure = 6;
+        } else if status != 0 {
+            failure = 7;
+        }
+    }
+    if failure == 0 {
+        var size = 0;
+        var crc = 0;
+        borrow out as &or in {
+            size = buffer.size(or);
+            crc = flate.crc32(heap, buffer.bytes(or));
+        }
+        if size != want || crc != vec.get(members.crc, k) {
+            failure = 6;
+        }
+    }
+    return (out, failure);
+}
+
+// ---- the writer ------------------------------------------------------------------------------------------
+
+fn put16[&h](heap: &!h Heap, b: buffer.Buffer, v: int) -> [heap] buffer.Buffer {
+    var out = buffer.push(heap, b, byte_of(v & 0xff));
+    out = buffer.push(heap, out, byte_of(v >> 8 & 0xff));
+    return out;
+}
+
+fn put32[&h](heap: &!h Heap, b: buffer.Buffer, v: int) -> [heap] buffer.Buffer {
+    return put16(heap, put16(heap, b, v & 0xffff), v >> 16 & 0xffff);
+}
+
+// The zip of the entries of the tar in `data` (`entries` are its entries, files and directories only). Answers the zip and a
+// failure: 0 none, 4 more entries than a zip without zip64 holds.
+pub fn write[&h, &d, &x](heap: &!h Heap, data: &d [byte], entries: &x tar.Entries) -> [heap] (buffer.Buffer, int) {
+    let n = tar.count(entries);
+    if n > 65534 {
+        return (buffer.empty(heap, 1), 4);
+    }
+    var out = buffer.empty(heap, 4096);
+    var directory = buffer.empty(heap, 4096);
+    var k = 0;
+    while k < n {
+        let name = tar.name(entries, k);
+        let is_dir = tar.kind(entries, k) == tar.kind_directory();
+        let size = tar.size(entries, k);
+        var method = 0;
+        var crc = 0;
+        var stored = buffer.empty(heap, 1);
+        var csize = 0;
+        if !is_dir {
+            let content = data[tar.body(entries, k)..tar.body(entries, k) + size];
+            crc = flate.crc32(heap, content);
+            let packed = flate.deflate(heap, content);
+            var smaller = false;
+            borrow packed as &pr in {
+                smaller = buffer.size(pr) < size;
+                if smaller {
+                    stored = buffer.append(heap, stored, buffer.bytes(pr));
+                }
+            }
+            buffer.drop(heap, packed);
+            if smaller {
+                method = 8;
+            } else {
+                stored = buffer.append(heap, stored, content);
+            }
+            borrow stored as &sr in {
+                csize = buffer.size(sr);
+            }
+        }
+        var name_len = len(name);
+        if is_dir {
+            name_len = name_len + 1;
+        }
+        var local = 0;
+        borrow out as &or in {
+            local = buffer.size(or);
+        }
+        // The local header and the data.
+        out = put32(heap, out, 0x04034b50);
+        out = put16(heap, out, 20);
+        out = put16(heap, out, 0x0800);
+        out = put16(heap, out, method);
+        out = put16(heap, out, 0);
+        out = put16(heap, out, 0x21);
+        out = put32(heap, out, crc);
+        out = put32(heap, out, csize);
+        out = put32(heap, out, size);
+        out = put16(heap, out, name_len);
+        out = put16(heap, out, 0);
+        out = buffer.append(heap, out, name);
+        if is_dir {
+            out = buffer.push(heap, out, byte_of('/'));
+        }
+        borrow stored as &sr in {
+            out = buffer.append(heap, out, buffer.bytes(sr));
+        }
+        buffer.drop(heap, stored);
+        // Its place in the central directory.
+        var attributes = (tar.mode(entries, k) | 0x8000) << 16;
+        if is_dir {
+            attributes = (tar.mode(entries, k) | 0x4000) << 16 | 0x10;
+        }
+        directory = put32(heap, directory, 0x02014b50);
+        directory = put16(heap, directory, 0x0314);
+        directory = put16(heap, directory, 20);
+        directory = put16(heap, directory, 0x0800);
+        directory = put16(heap, directory, method);
+        directory = put16(heap, directory, 0);
+        directory = put16(heap, directory, 0x21);
+        directory = put32(heap, directory, crc);
+        directory = put32(heap, directory, csize);
+        directory = put32(heap, directory, size);
+        directory = put16(heap, directory, name_len);
+        directory = put16(heap, directory, 0);
+        directory = put16(heap, directory, 0);
+        directory = put16(heap, directory, 0);
+        directory = put16(heap, directory, 0);
+        directory = put32(heap, directory, attributes);
+        directory = put32(heap, directory, local);
+        directory = buffer.append(heap, directory, name);
+        if is_dir {
+            directory = buffer.push(heap, directory, byte_of('/'));
+        }
+        k = k + 1;
+    }
+    var at = 0;
+    var cd_size = 0;
+    borrow out as &or in {
+        at = buffer.size(or);
+    }
+    borrow directory as &dr in {
+        cd_size = buffer.size(dr);
+        out = buffer.append(heap, out, buffer.bytes(dr));
+    }
+    buffer.drop(heap, directory);
+    out = put32(heap, out, 0x06054b50);
+    out = put16(heap, out, 0);
+    out = put16(heap, out, 0);
+    out = put16(heap, out, n);
+    out = put16(heap, out, n);
+    out = put32(heap, out, cd_size);
+    out = put32(heap, out, at);
+    out = put16(heap, out, 0);
+    return (out, 0);
+}

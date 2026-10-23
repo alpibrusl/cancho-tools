@@ -28,6 +28,7 @@ import archive.flate;
 import archive.select;
 import archive.stream;
 import archive.tar;
+import archive.zip;
 import toolbox.atomic;
 import toolbox.built;
 import toolbox.cli;
@@ -39,15 +40,15 @@ import toolbox.place;
 import toolbox.text;
 
 fn extra() -> [] &static [byte] {
-    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.no-match|8|never|a selected path matches no entry of the archive;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
+    return "archive.not-an-archive|8|never|neither gzip nor a tar: no gzip magic and no tar header with a valid checksum;archive.bad-gzip|8|never|a gzip header that cannot be read, a second member, or bytes after the member;archive.crc-mismatch|8|never|the gzip trailer's CRC-32 or length is not the data's;archive.bad-deflate|8|never|the DEFLATE stream is invalid;archive.bad-checksum|8|never|a tar header's checksum is not its bytes';archive.bad-header|8|never|a tar header field that cannot be read;archive.truncated|8|never|the archive ends inside a header or body, or before its end marker;archive.unsafe-name|4|never|an entry name that is absolute, has `..` or holds a NUL;archive.entry-kind|8|never|an entry that is not a regular file or a directory;archive.duplicate-entry|8|never|two entries name the same file;archive.directory-missing|8|never|the --into directory, or one above it, does not exist;archive.special-mode|8|never|an entry has a setuid, setgid or sticky bit;archive.no-match|8|never|a selected path matches no entry of the archive;archive.unsupported|8|never|the archive uses encryption, zip64, several disks or a zip method other than stored and deflate;archive.name-too-long|8|never|a name that does not fit a tar header;limit.archive-too-large|8|never|the archive, expanded, would pass --max-bytes;limit.too-many-entries|8|never|more entries than --max-entries";
 }
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve every path relative to this directory (default: the working directory) and refuse paths outside it;op||choice:list/extract/create|none|list|list shows the entries, extract writes them beneath --into, create writes an archive of the PATHs;into||path|path-write||extract beneath this directory, which must exist (default: the root);as|a|choice:tar/tgz/gz|none|tgz|what create writes: a tar, a gzip-compressed tar, or one file gzipped;dry-run||bool|guard||check everything and report what would be written, exit 9, write nothing;max-bytes||nat|none|67108864|the largest archive read, expanded size included, and the largest archive written (ceiling 1073741824);max-entries||nat|none|10000|the most entries read or written (ceiling 1000000)";
+    return "root||path|root||resolve every path relative to this directory (default: the working directory) and refuse paths outside it;op||choice:list/extract/create|none|list|list shows the entries, extract writes them beneath --into, create writes an archive of the PATHs;into||path|path-write||extract beneath this directory, which must exist (default: the root);as|a|choice:tar/tgz/gz/zip|none|tgz|what create writes: a tar, a gzip-compressed tar, one file gzipped, or a zip;dry-run||bool|guard||check everything and report what would be written, exit 9, write nothing;max-bytes||nat|none|67108864|the largest archive read, expanded size included, and the largest archive written (ceiling 1073741824);max-entries||nat|none|10000|the most entries read or written (ceiling 1000000)";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "archive", version: "0.3.0", summary: "List, extract and create tar archives, gzip-compressed or not, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
+    return describe.Tool { name: "archive", version: "0.4.0", summary: "List, extract and create tar archives, gzip-compressed or not, and zips, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz|zip] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.unsupported;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -115,11 +116,20 @@ fn tar_error[&h, &p](heap: &!h Heap, e: fail.Errors, failure: int, at: int, show
     if failure == 1 {
         return refuse(heap, e, "archive.truncated", "the archive ends inside a header or body, or before its end marker", "", shown, "offset", at);
     }
+    if failure == 5 {
+        return refuse(heap, e, "archive.unsupported", "the archive uses something this tool does not read: encryption, zip64, several disks, or a method other than stored and deflate", "extract it with the tool that made it", shown, "offset", at);
+    }
+    if failure == 6 {
+        return refuse(heap, e, "archive.crc-mismatch", "a member's CRC-32 or length is not what the archive's directory says", "", shown, "offset", at);
+    }
+    if failure == 7 {
+        return refuse(heap, e, "archive.bad-deflate", "a member's DEFLATE stream is invalid", "", shown, "offset", at);
+    }
     if failure == 2 {
         return refuse(heap, e, "archive.bad-checksum", "a tar header's checksum is not its bytes'", "", shown, "offset", at);
     }
     if failure == 3 {
-        return refuse(heap, e, "archive.bad-header", "a tar header has a size or mode that is not octal", "", shown, "offset", at);
+        return refuse(heap, e, "archive.bad-header", "a header has a field that cannot be read: a size or mode that is not octal, or a zip directory entry that cannot be right", "", shown, "offset", at);
     }
     return refuse(heap, e, "limit.too-many-entries", "the archive has more entries than --max-entries", "raise --max-entries, up to 1000000", shown, "max_entries", most);
 }
@@ -142,6 +152,9 @@ fn format_name(format: int) -> [] &static [byte] {
     }
     if format == 3 {
         return "gz";
+    }
+    if format == 4 {
+        return "zip";
     }
     return "none";
 }
@@ -228,10 +241,16 @@ fn load[&h, &g, &f, &r](heap: &!h Heap, args: &g Args, fs: &f Fs(""), root: &r [
                     borrow data as &dr in {
                         is_tar = tar.looks_like_tar(buffer.bytes(dr));
                     }
+                    var is_zip = false;
+                    borrow data as &dr in {
+                        is_zip = zip.looks_like(buffer.bytes(dr));
+                    }
                     if is_tar {
                         format = 1;
+                    } else if is_zip {
+                        format = 4;
                     } else {
-                        e = refuse(heap, e, "archive.not-an-archive", "the file is neither gzip nor a tar", "name a .tar, .tar.gz or .gz file", path.shown(rp), "", 0);
+                        e = refuse(heap, e, "archive.not-an-archive", "the file is neither gzip, a tar nor a zip", "name a .tar, .tar.gz, .gz or .zip file", path.shown(rp), "", 0);
                     }
                 }
                 buffer.drop(heap, header_name);
@@ -593,7 +612,7 @@ fn list_file[&h, &i, &f, &p, &s](heap: &!h Heap, io: &!i Io, file: &!f File, sho
     var ended = false;
     var failed = 0;
     var held = 0;
-    while held < 2 && !ended && failed == 0 {
+    while held < 4 && !ended && failed == 0 {
         borrow mut chunk as &!cw in {
             match file_read(file, buffer.room(cw)) {
                 Read::Got(n) => {
@@ -621,8 +640,75 @@ fn list_file[&h, &i, &f, &p, &s](heap: &!h Heap, io: &!i Io, file: &!f File, sho
     borrow chunk as &cr in {
         zipped = flate.is_gzip(buffer.bytes(cr));
     }
+    var is_zip = false;
+    borrow chunk as &cr in {
+        is_zip = !zipped && zip.looks_like(buffer.bytes(cr));
+    }
     if failed != 0 {
         e = fail.io_error(heap, e, failed, false, shown);
+    } else if is_zip {
+        format = 4;
+        // A zip's directory is at the end of the file, so the file is read whole (to --max-bytes) and its directory listed.
+        var whole = buffer.empty(heap, 65536);
+        borrow chunk as &cr in {
+            whole = buffer.append(heap, whole, buffer.bytes(cr));
+        }
+        var more = !ended;
+        var big = false;
+        var reason = 0;
+        while more && !big && reason == 0 {
+            borrow mut chunk as &!cw in {
+                buffer.clear(cw);
+                match file_read(file, buffer.room(cw)) {
+                    Read::Got(n) => {
+                        buffer.filled(cw, n);
+                        if n == 0 {
+                            more = false;
+                        }
+                    }
+                    Read::End => {
+                        more = false;
+                    }
+                    Read::Failed(why) => {
+                        reason = why;
+                        if reason == 0 {
+                            reason = 5;
+                        }
+                    }
+                }
+            }
+            var held_now = 0;
+            borrow whole as &wq in {
+                held_now = buffer.size(wq);
+            }
+            borrow chunk as &cr in {
+                if held_now + buffer.size(cr) > most_bytes {
+                    big = true;
+                } else {
+                    whole = buffer.append(heap, whole, buffer.bytes(cr));
+                }
+            }
+        }
+        if reason != 0 {
+            e = fail.io_error(heap, e, reason, false, shown);
+            format = 0;
+        } else if big {
+            e = too_large(heap, e, shown, most_bytes);
+            format = 0;
+        } else {
+            borrow whole as &wr in {
+                let members = zip.parse(heap, buffer.bytes(wr), most_entries);
+                borrow members as &mr in {
+                    let found = zip.entries(mr);
+                    if tar.failure(found) != 0 {
+                        e = tar_error(heap, e, tar.failure(found), tar.failure_at(found), "", most_entries);
+                    }
+                    count = list_entries(heap, io, found, 4, sel, count);
+                }
+                zip.drop(heap, members);
+            }
+        }
+        buffer.drop(heap, whole);
     } else if zipped {
         format = 2;
         var inf = stream.open(heap, most_bytes);
@@ -1488,6 +1574,27 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
         }
         if !gathered.broken && !bytes.equal(format, "gz") {
             archive = tar.finish(heap, archive);
+            if bytes.equal(format, "zip") {
+                // A zip of the same files: the tar just made is read back for its entries, so the walk, the limits and the receipts are one.
+                var packed = buffer.empty(heap, 1);
+                var too_many = false;
+                borrow archive as &ar in {
+                    let entries = tar.parse(heap, buffer.bytes(ar), most_entries);
+                    borrow entries as &en in {
+                        let (made, problem) = zip.write(heap, buffer.bytes(ar), en);
+                        buffer.drop(heap, packed);
+                        packed = made;
+                        too_many = problem != 0;
+                    }
+                    tar.drop(heap, entries);
+                }
+                buffer.drop(heap, archive);
+                archive = packed;
+                if too_many {
+                    e = refuse(heap, e, "limit.too-many-entries", "a zip without zip64 holds at most 65534 entries", "archive them as a tgz, or in several zips", "", "max_entries", 65534);
+                    gathered = Gathered { entries: gathered.entries, bytes: gathered.bytes, held: gathered.held, broken: true };
+                }
+            }
             if bytes.equal(format, "tgz") {
                 var zipped = buffer.empty(heap, 1);
                 borrow archive as &ar in {
@@ -1534,6 +1641,122 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
 }
 
 // ---- the command ----------------------------------------------------------------------------------------------------------------
+
+// `--into` as extract writes beneath it: `.` without the flag, `?` when the path is refused (the refusal is already in `e`).
+fn into_target[&h, &g, &p, &r](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, root: &r [byte], errs: fail.Errors) -> [heap, args] (buffer.Buffer, fail.Errors) {
+    let table = flag_table();
+    var e = errs;
+    var target = buffer.empty(heap, 2);
+    if cli.has(parsed, table, "into") {
+        let (resolved, checked) = path.operand(heap, args, root, cli.value_index(parsed, table, "into"), e);
+        e = checked;
+        borrow resolved as &rp in {
+            if path.ok(rp) {
+                target = buffer.append(heap, target, path.shown(rp));
+            } else {
+                target = buffer.append(heap, target, "?");
+            }
+        }
+        path.drop(heap, resolved);
+    } else {
+        target = buffer.push(heap, target, byte_of('.'));
+    }
+    return (target, e);
+}
+
+// Extract from the zip in `data`: only the selected members are inflated (docs/archive.md section 15), and what is not asked for is
+// not read at all. Answers the errors and the count, as `extract_entries` does.
+fn extract_zip[&h, &i, &f, &r, &d, &s](heap: &!h Heap, io: &!i Io, fs: &f Fs(""), root: &r [byte], target: buffer.Buffer, data: &d [byte], sel: &!s select.Sel, most_bytes: int, most_entries: int, dry: bool, errs: fail.Errors, c: Count) -> [heap, io_write, fs_read(""), dir_read, dir_write, file_write] (fail.Errors, Count) {
+    var e = errs;
+    var count = c;
+    var members = zip.parse(heap, data, most_entries);
+    var failure = 0;
+    var total = 0;
+    borrow members as &mr in {
+        let en = zip.entries(mr);
+        failure = tar.failure(en);
+        if failure != 0 {
+            e = tar_error(heap, e, failure, tar.failure_at(en), "", most_entries);
+        } else {
+            var at = 0;
+            while at < tar.count(en) {
+                if select.note(sel, tar.name(en, at)) && tar.kind(en, at) == tar.kind_file() && !tar.unsafe_at(en, at) {
+                    total = total + tar.size(en, at);
+                }
+                at = at + 1;
+            }
+            e = unmatched(heap, sel, e);
+        }
+    }
+    var content = buffer.empty(heap, 1);
+    if failure == 0 && total > most_bytes {
+        e = too_large(heap, e, "", most_bytes);
+        failure = 1;
+    }
+    if failure == 0 {
+        var k = 0;
+        var n = 0;
+        borrow members as &mr in {
+            n = tar.count(zip.entries(mr));
+        }
+        while k < n && failure == 0 {
+            var wanted = false;
+            borrow members as &mr in {
+                let en = zip.entries(mr);
+                wanted = tar.kind(en, k) == tar.kind_file() && !tar.unsafe_at(en, k) && select.matches(sel, tar.name(en, k));
+            }
+            if wanted {
+                var before = 0;
+                borrow content as &cr in {
+                    before = buffer.size(cr);
+                }
+                var why = 0;
+                borrow members as &mr in {
+                    let (piece, problem) = zip.member(heap, data, mr, k);
+                    why = problem;
+                    if problem == 0 {
+                        borrow piece as &pc in {
+                            content = buffer.append(heap, content, buffer.bytes(pc));
+                        }
+                    } else {
+                        e = tar_error(heap, e, problem, k, tar.name(zip.entries(mr), k), most_entries);
+                    }
+                    buffer.drop(heap, piece);
+                }
+                if why != 0 {
+                    failure = why;
+                } else {
+                    borrow mut members as &!mm in {
+                        zip.set_body(mm, k, before);
+                    }
+                }
+            }
+            k = k + 1;
+        }
+    }
+    borrow e as &er in {
+        count = sync(heap, io, er, count);
+    }
+    var usable = true;
+    borrow target as &tb in {
+        usable = !bytes.equal(buffer.bytes(tb), "?");
+    }
+    if failure == 0 && usable {
+        borrow members as &mr in {
+            borrow target as &tb in {
+                borrow content as &cr in {
+                    let (e3, c3) = extract_entries(heap, io, fs, root, buffer.bytes(tb), zip.entries(mr), buffer.bytes(cr), sel, dry, e, count);
+                    e = e3;
+                    count = c3;
+                }
+            }
+        }
+    }
+    buffer.drop(heap, content);
+    buffer.drop(heap, target);
+    zip.drop(heap, members);
+    return (e, count);
+}
 
 // The selectors named after the ARCHIVE of a `list` or an `extract` (docs/archive.md section 14): each normalised as entry names are, and
 // refused when empty or when `extract` would refuse an entry of that name.
@@ -1649,6 +1872,8 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                     format = 1;
                 } else if bytes.equal(kind, "tgz") {
                     format = 2;
+                } else if bytes.equal(kind, "zip") {
+                    format = 4;
                 } else {
                     format = 3;
                 }
@@ -1677,7 +1902,15 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                 }
                 borrow loaded as &ld in {
                     format = ld.format;
-                    if ld.format != 0 {
+                    if ld.format == 4 {
+                        let (target, after_into) = into_target(heap, args, parsed, r, e);
+                        e = after_into;
+                        borrow mut picked as &!pm in {
+                            let (e3, c3) = extract_zip(heap, io, fs, r, target, buffer.bytes(ld.data), pm, most_bytes, most_entries, dry, e, count);
+                            e = e3;
+                            count = c3;
+                        }
+                    } else if ld.format != 0 {
                         var entries = tar.parse(heap, buffer.bytes(ld.data), most_entries);
                         if ld.format == 3 {
                             tar.drop(heap, entries);

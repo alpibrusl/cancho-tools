@@ -559,3 +559,34 @@ be unpacked into a tree that already existed, and it dropped the execute bit. Bo
 * **A selector that selects nothing** is `archive.no-match` (exit 8), one error for each, so a typo cannot succeed. An `extract` that has one
   writes nothing.
 * **Version.** 0.2.0 to 0.3.0: an additive change to the operands; `archive.no-match` is a new rule.
+
+## 15. Zip
+
+> **Status: built (0.4.0).** `archive` reads and writes zip files, beside tar and gzip. `--op list|extract` recognise a zip by its
+> first bytes (`PK\3\4`, or the end record of an empty one); `--op create --as zip` writes one. Everything in §13 and §14 (directories,
+> modes, selection) applies to a zip as it does to a tar.
+
+* **What is read.** The central directory at the end of the file, which is what every zip reader goes by (the local headers only
+  tell where a member's data starts). Members stored (method 0) or deflated (method 8). The Unix mode in the high half of the
+  attributes when the zip was made on Unix (host 3), else 0644 for a file and 0755 for a directory; a directory is a name ending in
+  `/` or one marked as one; a symbolic link, device or other type is listed as such and refused on extract (`archive.entry-kind`).
+  Names are normalised and flagged as a tar's are (`archive.unsafe-name`), and a backslash is an ordinary byte, not a separator.
+* **What is not read, by rule.** Encrypted members, zip64 (a count, size or offset at its limit, or a zip64 locator), a zip on several
+  disks, and every method but stored and deflate (bzip2, LZMA, zstd and the rest inside a zip) are `archive.unsupported` (exit 8),
+  never guessed at.
+* **Nothing is trusted.** Every offset and length is checked against the file. A member is inflated into at most the size the
+  directory claims and its length and CRC-32 must be exactly what the directory says (`archive.crc-mismatch`; a stream that runs past the
+  claim is the same rule), so a lying directory cannot make an expansion bomb of a small file. An unreadable directory entry is
+  `archive.bad-header`, a file that ends where the directory says there is more is `archive.truncated`.
+* **Only what is asked for is read.** `extract` inflates the selected members and no others, so one file out of a large zip costs that file;
+  a damaged member that was not asked for is not noticed, and `list` reads the directory and no member at all. Memory is the zip file (to `--max-bytes`) plus the selected members' content, not the streaming of
+  §12: a zip's directory is at its end, and `list` of a zip reads the file whole.
+* **What is written.** `create --as zip` writes the zip of the same files a tar of them would be: names in the walk's sorted order,
+  a directory as `name/`, the mode in the Unix attributes (0755 for an executable file and every directory, 0644 otherwise, as in a tar),
+  a fixed time (1980-01-01 00:00) so the same files give the same bytes, UTF-8 names, no extra fields and no data descriptors. A member is
+  deflated when that is smaller and stored when it is not. The walk, the limits and the receipts are the tar's: the zip is made from the tar
+  the walk produced, which costs memory (both are held) and keeps one source of truth. More than 65,534 entries is
+  `limit.too-many-entries`, since there is no zip64.
+* **Checked against** Python's `zipfile`, Info-ZIP's `zip` and `unzip` in both directions (`test_archive.py`), every cut and every changed
+  byte of a small zip (no trap, a tag each), and mutants of the reader and the writer.
+* **Version.** 0.3.0 to 0.4.0: `--as zip`, the `zip` format, and a new rule, `archive.unsupported`.

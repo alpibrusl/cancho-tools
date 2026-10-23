@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en" class="nojs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cancho-tools: small tools an AI agent can rely on</title>
+<meta name="description" content="Eleven unix-like tools (seek, list, peek, jsonq, tally, hash, write, replace, move, archive, run) that answer in JSON, refuse by rule name, and carry a compiler-derived list of what they may do.">
+<meta property="og:title" content="cancho-tools: small tools an AI agent can rely on">
+<meta property="og:description" content="Every answer is JSON, every refusal has a rule, and no binary can do more than its authority says.">
+<meta property="og:image" content="https://alpibrusl.github.io/cancho-tools/assets/demo.poster.jpg">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" type="image/png" href="assets/cancho-tools-icon-64.png">
+<link rel="stylesheet" href="assets/landing.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to the content</a>
+<header class="top"><div class="wrap">
+  <a class="brand" href="."><img src="assets/cancho-tools-icon-64.png" alt="" width="28" height="28">cancho-tools</a>
+  <nav>
+    <a href="#demo">Demo</a><a href="#audience-section">Humans &amp; agents</a><a class="opt" href="#tools">Tools</a><a class="opt" href="#authority">Authority</a><a class="opt" href="docs.html">Docs</a>
+    <a href="https://github.com/alpibrusl/cancho-tools">GitHub</a>
+  </nav>
+</div></header>
+
+<main id="main">
+<div class="hero"><div class="wrap">
+  <div>
+    <p class="eyebrow">An agent toolbox, written in cancho</p>
+    <h1>Small tools an AI agent can rely on.</h1>
+    <p class="sub"><code>grep</code>, <code>sed</code>, <code>jq</code>, <code>mv</code> and <code>tar</code>, rebuilt so every answer is JSON, every refusal names a rule, and no binary can do more than it says.</p>
+    <div class="cta"><a class="btn primary" href="#demo">Watch two agents race</a><a class="btn" href="#humans">For humans</a><a class="btn" href="#agents">For agents</a></div>
+    <div class="pills">{{PILLS}}</div>
+  </div>
+  <figure><img src="assets/cancho-tools-logo-256.png" alt="cancho-tools: a rock with crossed tools" width="256" height="256"></figure>
+</div></div>
+
+<section id="demo"><div class="wrap">
+  <h2>Two agents, one file</h2>
+  <p class="lead">Both read <code>notes.txt</code> and each adds a line. Everything on the left is what the built tools printed.</p>
+  <div class="segwrap"><div class="seg" id="modeseg" role="tablist" aria-label="Plain writes or guarded writes">
+    <button type="button" role="tab" data-mode="plain" aria-selected="false">Plain writes</button>
+    <button type="button" role="tab" data-mode="guarded" aria-selected="true">Guarded writes</button>
+  </div></div>
+  <div class="demo">
+    <div class="term" role="img" aria-label="A replay of the real output of the tools: with plain writes one agent's line is lost; with guarded writes the stale write is refused and retried">
+      <div class="bar"><i></i><i></i><i></i> a terminal <button id="replay" type="button">↻ replay</button></div>
+      <pre id="screen"></pre>
+    </div>
+    <div class="stage" id="demo-stage" aria-live="polite">
+      <h3>What happens to the file</h3>
+      <div class="file" id="file"><span class="fn">notes.txt</span></div>
+      <div class="lanes"><div class="lane a" id="lane-a"><b>agent A</b></div><div class="lane b" id="lane-b"><b>agent B</b></div></div>
+      <div class="verdict" id="verdict"></div>
+    </div>
+  </div>
+  <div class="vid">
+    <video controls preload="none" playsinline poster="assets/demo.poster.jpg" aria-label="A 25-second recording of this demo">
+      <source src="assets/demo.mp4" type="video/mp4">
+      <source src="assets/demo.webm" type="video/webm">
+      Your browser cannot play this video: <a href="assets/demo.mp4">download the recording</a>.
+    </video>
+    <p class="caption">The demo above as a video you can share. It is a recording of this page, not a live session. <a href="assets/demo.mp4">Download</a>.</p>
+  </div>
+</div></section>
+
+<section class="alt" id="audience-section"><div class="wrap">
+  <h2>Built for two readers</h2>
+  <p class="lead">The same binaries, told twice: what a person gets, and what an agent can parse.</p>
+  <div class="segwrap"><div class="seg" id="audience" role="tablist" aria-label="Who is reading">
+    <button type="button" role="tab" data-panel="humans" aria-selected="true">For humans</button>
+    <button type="button" role="tab" data-panel="agents" aria-selected="false">For agents</button>
+  </div></div>
+
+  <div class="panel on" id="humans">
+    <div class="cards">
+      <div class="card"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M8.5 12l2.5 2.5L15.5 10"/></svg><h3>Safe by default</h3><p>Writes are atomic and only land if the file is what you said it was. Nothing outside <code>--root</code> can be reached. <code>move</code> never overwrites; there is no delete.</p></div>
+      <div class="card"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><h3>The same every time</h3><p>No locale, no clock, no environment: the same input gives the same bytes. Memory is bounded, about 1.7 MB for a 1 MiB file or a 256 MiB one.</p></div>
+      <div class="card"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg><h3>Easy to check</h3><p>Each binary embeds what the compiler found it may do. CI fails if a tool grows past its ceiling. The table below is that data, not a promise.</p></div>
+    </div>
+    <pre class="code"><span class="d"># you need git, Rust and clang; the first build takes a few minutes</span>
+git clone https://github.com/alpibrusl/cancho
+git clone https://github.com/alpibrusl/cancho-tools &amp;&amp; cd cancho-tools
+REV=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' cancho.toml)
+(cd ../cancho &amp;&amp; git fetch -q origin &amp;&amp; git checkout "$REV" &amp;&amp; cargo build --release -p cancho)
+export PATH=$PWD/../cancho/target/release:$PWD/build:$PATH
+cancho build                                  <span class="d"># every tool into build/</span>
+seek --root . --format text 'fn main' tools/seek/seek.cho</pre>
+  </div>
+
+  <div class="panel" id="agents">
+    <div class="diagram reveal" role="img" aria-label="A call is an argument list. The tool answers JSON lines ending in an end record, and an exit code. A refusal is a rule, a hint and a repair.">
+      <svg viewBox="0 0 760 250">
+        <defs><marker id="ah" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="head"/></marker><marker id="ahr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" class="head r"/></marker></defs>
+        <rect class="box" x="10" y="30" width="170" height="70" rx="10"/><text x="95" y="60" text-anchor="middle">argv</text><text class="m" x="95" y="80" text-anchor="middle">flags from introspect</text>
+        <rect class="box k" x="250" y="20" width="190" height="90" rx="10"/><text x="345" y="52" text-anchor="middle">the tool</text><text class="m" x="345" y="72" text-anchor="middle">confined to --root</text><text class="m" x="345" y="90" text-anchor="middle">authority in the binary</text>
+        <rect class="box" x="510" y="10" width="240" height="44" rx="10"/><text x="630" y="37" text-anchor="middle">JSON lines … end record</text>
+        <rect class="box" x="510" y="72" width="240" height="44" rx="10"/><text x="630" y="99" text-anchor="middle">exit code (a table)</text>
+        <path class="arrow" d="M182 65 H246" marker-end="url(#ah)"/><path class="arrow" d="M442 50 H506" marker-end="url(#ah)"/><path class="arrow" d="M442 84 H506" marker-end="url(#ah)"/>
+        <rect class="box r" x="250" y="160" width="500" height="70" rx="10"/><text x="270" y="190">a refusal: { rule, hint, repair, detail }</text><text class="m" x="270" y="212">match on rule; repair is an argv you can run as it stands</text>
+        <path class="arrow r" d="M345 112 V156" marker-end="url(#ahr)"/>
+        <text class="m" x="360" y="140">when it will not</text>
+      </svg>
+    </div>
+    <div class="twocol">
+      <pre class="code" style="margin:0;max-width:none"><span class="d"># a real refusal (write, exit status 5), trimmed</span>
+{{REFUSAL}}
+<span class="d"># the tool describes itself, from the tables its parser runs on</span>
+<span class="a">seek introspect</span>   <span class="d"># flags, rules, exit codes, limits, schema, authority</span>
+<span class="a">seek skill</span>        <span class="d"># a guide for an agent, printed by the binary</span>
+<span class="a">build/mcp --root /work</span>   <span class="d"># the same tools over MCP, stdio</span></pre>
+      <div class="promptbox">
+        <div class="pbar"><span>prompt for your coding agent</span><button type="button" id="copyprompt">Copy</button></div>
+        <pre id="agentprompt">{{PROMPT}}</pre>
+      </div>
+    </div>
+    <p class="fine">Each tool page has its flags, every rule, the exit codes, the JSON schemas and a ready-made <code>SKILL.md</code>. Not claimed: that agents do better with these tools than with the incumbents; that needs an agent-in-the-loop evaluation.</p>
+  </div>
+</div></section>
+
+<section id="tools"><div class="wrap">
+  <h2>{{N_TOOLS}} tools</h2>
+  <p class="lead">Each one stays small, and says what it reads, what it changes, and what it cannot undo.</p>
+  <div class="tools">{{TOOLS}}</div>
+</div></section>
+
+<section class="alt" id="authority"><div class="wrap">
+  <h2>What each binary may do</h2>
+  <p class="lead">Derived from the source by the compiler and embedded in the binary. CI fails if a tool goes past its ceiling.</p>
+  <div class="matrix reveal">{{MATRIX}}</div>
+  <p class="fine">{{MATRIX_NOTE}}</p>
+</div></section>
+
+<section id="measured"><div class="wrap">
+  <h2>Measured, not promised</h2>
+  <p class="lead">What the repository can show today.</p>
+  <div class="nums">{{STATS}}</div>
+  <div class="bars reveal">{{BARS}}</div>
+  <p class="fine">A 64 MiB text file through a pipe, minimum of 7 rounds, Linux x86-64 on a shared machine. These tools are not built to win on speed; speed is reported, not gated. <code>sha256sum</code> leads on <code>hash</code> because of OpenSSL's hand-written assembly. <a href="docs.html">All the numbers</a>.</p>
+</div></section>
+</main>
+
+<footer><div class="wrap">cancho-tools · EUPL-1.2 · part of the <a href="https://github.com/alpibrusl/cancho">cancho</a> ecosystem · <a href="docs.html">Docs</a> · <a href="https://github.com/alpibrusl/cancho-tools">Source</a><br>This page is generated by <code>scripts/site.py</code> from the built tools; the outputs shown are theirs.</div></footer>
+<script>window.CFLOW = {{FLOW}};</script>
+<script src="assets/landing.js"></script>
+</body>
+</html>

@@ -145,6 +145,20 @@ MUTANTS = [
     ('bytes after a zstd frame are accepted', "zstd.cho", '    if result == 0 && end != n {', '    if false {'),
     ('a zstd repeat offset is not shifted when there are no literals', "zstd.cho", '            if ll == 0 {\n                which_rep = which_rep + 1;', '            if false {\n                which_rep = which_rep + 1;'),
     ('a zstd offset of repeat-one-minus-one is the first offset', "zstd.cho", '                offset = state[0] - 1;', '                offset = state[0];'),
+    ('zstd writer: a match may reach past the window', "zstd.cho", '        if cand >= 0 && p - cand <= 8388608 && le_n(data, cand, 4) == v {', '        if cand >= 0 && p - cand <= 99999999 && le_n(data, cand, 4) == v {'),
+    ('zstd writer: a candidate is not compared', "zstd.cho", '        if cand >= 0 && p - cand <= 8388608 && le_n(data, cand, 4) == v {', '        if cand >= 0 && p - cand <= 8388608 {'),
+    ('zstd writer: every position is a match', "zstd.cho", '        if length >= 4 {\n            seqs[n] = p - anchor;', '        if length >= 0 {\n            seqs[n] = p - anchor;'),
+    ('zstd writer: an offset value is one off', "zstd.cho", '            seqs[65552 + n] = p - cand + 3;', '            seqs[65552 + n] = p - cand + 2;'),
+    ('zstd writer: a run is not a run', "zstd.cho", '            if end - start > 1 && all_same(data, start, end) {', '            if false && all_same(data, start, end) {'),
+    ('zstd writer: a block that does not shrink is compressed', "zstd.cho", '                if body_size > 0 && body_size < end - start {', '                if body_size > 0 {'),
+    ('zstd writer: the window is smaller', "zstd.cho", '    out = buffer.push(heap, out, byte_of(0x68));', '    out = buffer.push(heap, out, byte_of(0x58));'),
+    ('zstd writer: the checksum is another', "zstd.cho", '    let sum = xxh64(data);', '    let sum = xxh64(data) + 1;'),
+    ('zstd writer: the content size is cut', "zstd.cho", '        out = buffer.push(heap, out, byte_of(n >> 8 * i & 255));', '        out = buffer.push(heap, out, byte_of(n >> 8 * i & 127));'),
+    ('zstd writer: the one-byte literals header runs a byte long', "zstd.cho", '    if lits < 32 {', '    if lits < 33 {'),
+    ('zstd writer: the two-byte literals header runs a byte long', "zstd.cho", '    } else if lits < 4096 {', '    } else if lits < 4097 {'),
+    ('zstd writer: the one-byte sequence count runs a byte long', "zstd.cho", '    if n < 128 {\n        body = buffer.push(heap, body, byte_of(n));', '    if n < 129 {\n        body = buffer.push(heap, body, byte_of(n));'),
+    ('zstd writer: the last block is not known at the size of a block', "zstd.cho", 'if end >= n {', 'if end > n {'),
+    ('zstd writer: a state is not looked for in its range', "zstd.cho", '            if target < 0 || base[off + y] <= target && target < base[off + y] + (1 << nbits[off + y]) {', '            if true {'),
     # Not mutated, on purpose (zstd): each of these guards is backed by another check that gives the same answer, and no input was found
     # that tells them apart (the zstd tests try inputs built to).
     #  * the `pos < ...` checks of the sequence bitstream (the end marker, the three states, the extra bits, the state updates): once one is

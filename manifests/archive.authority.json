@@ -68,6 +68,7 @@
   "foreign_symbols": [],
   "pure": [
     "align_base",
+    "all_same",
     "alphabet",
     "authority",
     "back_len",
@@ -100,6 +101,7 @@
     "checksum_ok",
     "code_meaning",
     "code_name",
+    "code_of",
     "collect_cap",
     "compare",
     "compiler",
@@ -167,6 +169,7 @@
     "find_end",
     "find_in",
     "find_slot$int",
+    "find_state",
     "finish",
     "flag_table",
     "format_name",
@@ -380,7 +383,7 @@
     "xround",
     "xxh64"
   ],
-  "folded_operators": 102,
+  "folded_operators": 108,
   "folded_calls": 16,
-  "functions": 572
+  "functions": 580
 }

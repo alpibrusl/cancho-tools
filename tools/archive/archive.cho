@@ -3,7 +3,7 @@ edition 9;
 // `archive` -- list, extract and create tar archives, gzip-compressed or not, and gzip or
 // gunzip one file.
 //
-//     archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz]
+//     archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz|zip|tzst|zst]
 //             [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]
 //
 // docs/archive.md is the design, the gates and the limits. In short:
@@ -47,11 +47,11 @@ fn extra() -> [] &static [byte] {
 }
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve every path relative to this directory (default: the working directory) and refuse paths outside it;op||choice:list/extract/create|none|list|list shows the entries, extract writes them beneath --into, create writes an archive of the PATHs;into||path|path-write||extract beneath this directory, which must exist (default: the root);as|a|choice:tar/tgz/gz/zip|none|tgz|what create writes: a tar, a gzip-compressed tar, one file gzipped, or a zip;dry-run||bool|guard||check everything and report what would be written, exit 9, write nothing;max-bytes||nat|none|67108864|the largest archive read, expanded size included, and the largest archive written (ceiling 1073741824);max-entries||nat|none|10000|the most entries read or written (ceiling 1000000)";
+    return "root||path|root||resolve every path relative to this directory (default: the working directory) and refuse paths outside it;op||choice:list/extract/create|none|list|list shows the entries, extract writes them beneath --into, create writes an archive of the PATHs;into||path|path-write||extract beneath this directory, which must exist (default: the root);as|a|choice:tar/tgz/gz/zip/tzst/zst|none|tgz|what create writes: a tar, a gzip-compressed tar, one file gzipped, a zip, a zstd-compressed tar, or one file zstd-compressed;dry-run||bool|guard||check everything and report what would be written, exit 9, write nothing;max-bytes||nat|none|67108864|the largest archive read, expanded size included, and the largest archive written (ceiling 1073741824);max-entries||nat|none|10000|the most entries read or written (ceiling 1000000)";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "archive", version: "0.7.0", summary: "List, extract and create tar archives, gzip-, bzip2-, xz- or zstd-compressed or not, and zips, and gzip one file; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz|zip] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.unsupported;archive.bad-bzip2;archive.bad-xz;archive.bad-zstd;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
+    return describe.Tool { name: "archive", version: "0.8.0", summary: "List, extract and create tar archives, gzip- or zstd-compressed or not (and read bzip2- and xz-compressed ones), and zips, and compress one file with gzip or zstd; refuses links, absolute names, .. and overwriting by rule, checks the whole archive before writing any of it, and writes the same bytes for the same files.", usage: "archive [--root DIR] --op list|extract|create [--into DIR] [--as tar|tgz|gz|zip] [--dry-run] [--max-bytes N] [--max-entries N] ARCHIVE [PATH...]", output: "stream", schema: "archive.v1", flags: flag_table(), operands: "ARCHIVE|path-write|1|1|the archive to list or extract, or the one to create (it must not exist);PATH...|path-read|0||create: the files and directories to add, in order (a directory with everything beneath it, sorted). For list and extract these are the entries to select, as list shows them (a directory selects everything beneath it), and none selects every entry", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.conflict;args.missing-operand;args.too-many-operands;args.required-flag;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;io.rename-unsupported;conflict.exists;conflict.locked;archive.not-an-archive;archive.bad-gzip;archive.crc-mismatch;archive.bad-deflate;archive.bad-checksum;archive.bad-header;archive.truncated;archive.unsafe-name;archive.entry-kind;archive.duplicate-entry;archive.directory-missing;archive.special-mode;archive.no-match;archive.unsupported;archive.bad-bzip2;archive.bad-xz;archive.bad-zstd;archive.name-too-long;limit.archive-too-large;limit.too-many-entries", extra_rules: extra(), limits: "max-bytes|67108864|1073741824;max-entries|10000|1000000", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -1899,8 +1899,8 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
             e = after;
             borrow source as &sp in {
                 if path.ok(sp) {
-                    if bytes.equal(format, "gz") {
-                        // One file, gzipped: no tar around it.
+                    if bytes.equal(format, "gz") || bytes.equal(format, "zst") {
+                        // One file, compressed: no tar around it.
                         let (read, errno, big) = atomic.read_all(heap, place.open_operand(fs, root, path.shown(sp), path.full(sp)), most_bytes, buffer.empty(heap, 4096));
                         if errno != 0 {
                             e = fail.io_error(heap, e, errno, false, path.shown(sp));
@@ -1913,7 +1913,11 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
                         } else {
                             buffer.drop(heap, archive);
                             borrow read as &rd in {
-                                archive = flate.gzip(heap, buffer.bytes(rd));
+                                if bytes.equal(format, "zst") {
+                                    archive = zstd.compress(heap, buffer.bytes(rd));
+                                } else {
+                                    archive = flate.gzip(heap, buffer.bytes(rd));
+                                }
                                 let digest = atomic.sha256_hex(heap, buffer.bytes(rd));
                                 var wrote = false;
                                 borrow digest as &hx in {
@@ -1935,8 +1939,8 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
             path.drop(heap, source);
             k = k + 1;
         }
-        if bytes.equal(format, "gz") && cli.operand_count(parsed) != 2 {
-            e = flag_problem(heap, e, "args.too-many-operands", "--as gz gzips exactly one file", "archive --op create --as gz ARCHIVE FILE", "PATH");
+        if (bytes.equal(format, "gz") || bytes.equal(format, "zst")) && cli.operand_count(parsed) != 2 {
+            e = flag_problem(heap, e, "args.too-many-operands", "--as gz and --as zst compress exactly one file", "archive --op create --as gz ARCHIVE FILE", "PATH");
         }
         borrow e as &er in {
             count = sync(heap, io, er, count);
@@ -1944,7 +1948,7 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
                 gathered = Gathered { entries: gathered.entries, bytes: gathered.bytes, held: gathered.held, broken: true };
             }
         }
-        if !gathered.broken && !bytes.equal(format, "gz") {
+        if !gathered.broken && !bytes.equal(format, "gz") && !bytes.equal(format, "zst") {
             archive = tar.finish(heap, archive);
             if bytes.equal(format, "zip") {
                 // A zip of the same files: the tar just made is read back for its entries, so the walk, the limits and the receipts are one.
@@ -1967,11 +1971,15 @@ fn create_archive[&h, &g, &p, &f, &i, &r](heap: &!h Heap, args: &g Args, parsed:
                     gathered = Gathered { entries: gathered.entries, bytes: gathered.bytes, held: gathered.held, broken: true };
                 }
             }
-            if bytes.equal(format, "tgz") {
+            if bytes.equal(format, "tgz") || bytes.equal(format, "tzst") {
                 var zipped = buffer.empty(heap, 1);
                 borrow archive as &ar in {
                     buffer.drop(heap, zipped);
-                    zipped = flate.gzip(heap, buffer.bytes(ar));
+                    if bytes.equal(format, "tzst") {
+                        zipped = zstd.compress(heap, buffer.bytes(ar));
+                    } else {
+                        zipped = flate.gzip(heap, buffer.bytes(ar));
+                    }
                 }
                 buffer.drop(heap, archive);
                 archive = zipped;
@@ -2246,6 +2254,10 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                     format = 2;
                 } else if bytes.equal(kind, "zip") {
                     format = 4;
+                } else if bytes.equal(kind, "tzst") {
+                    format = 9;
+                } else if bytes.equal(kind, "zst") {
+                    format = 10;
                 } else {
                     format = 3;
                 }

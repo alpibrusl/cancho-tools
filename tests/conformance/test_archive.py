@@ -2172,6 +2172,154 @@ class Archive(unittest.TestCase):
             self.assertEqual(out.status, 0, (label, out.raw[-200:]))
             self.assertEqual((self.dir / "o" / "lit").read_bytes(), data, label)
 
+    # ---- writing zstd (docs/archive.md section 18.5) -----------------------------------------------------------------------------
+
+    def zstd_inputs(self):
+        rnd = random.Random(23)
+        words = [bytes(rnd.randrange(97, 123) for _ in range(rnd.randrange(2, 9))) for _ in range(300)]
+        chunk = bytes(rnd.randrange(256) for _ in range(65536))
+        return {
+            "prose": b" ".join(rnd.choice(words) for _ in range(40000)),
+            "records": b"".join(b'{"id": %d, "name": "item%d"}\n' % (i, i * 7 % 13) for i in range(8000)),
+            "random": bytes(rnd.randrange(256) for _ in range(50000)),
+            "ones": b"\x01" * 300000,
+            "one": b"x",
+            "two": b"xy",
+            "three-runs": b"a" * 5 + b"b" * 5 + b"c" * 5,
+            "mixed": b"".join(bytes(rnd.randrange(256) for _ in range(rnd.randrange(1, 200))) if rnd.random() < 0.3 else b"abcabcabd" * rnd.randrange(1, 40) for _ in range(800)),
+            # A match across blocks, and one the window cannot reach (the chunk comes back after more than 8 MiB).
+            "across-blocks": chunk + bytes(rnd.randrange(256) for _ in range(150000)) + chunk,
+            "past-the-window": chunk + bytes(9 * 1024 * 1024) + chunk,
+            "within-window": chunk + bytes(4 * 1024 * 1024) + chunk,
+            # One match too short to pay for itself: the block stays raw.
+            "one-match": chunk[:1000] + chunk[2000:3000] + chunk[:4] + chunk[5000:5500],
+            "block-sized": bytes(rnd.randrange(4) for _ in range(131072)),
+            "block-sized-plus-one": bytes(rnd.randrange(4) for _ in range(131073)),
+        }
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_what_archive_writes_zstd_reads_back(self):
+        for name, data in self.zstd_inputs().items():
+            (self.dir / (name + ".bin")).write_bytes(data)
+            out = self.archive("--op", "create", "--as", "zst", name + ".zst", name + ".bin", "--max-bytes", "100000000")
+            check_stream(self, out)
+            self.assertEqual(out.status, 0, (name, out.raw[-300:]))
+            blob = (self.dir / (name + ".zst")).read_bytes()
+            self.assertEqual(zstandard.ZstdDecompressor().decompress(blob, max_output_size=len(data) + 1), data, name)
+            # ... and the same file is read by archive itself, and written again to the same bytes.
+            (self.dir / "o").mkdir(exist_ok=True)
+            out = self.archive("--op", "extract", "--into", "o", name + ".zst", "--max-bytes", "100000000")
+            self.assertEqual(out.status, 0, (name, out.raw[-300:]))
+            self.assertEqual((self.dir / "o" / name).read_bytes(), data, name)
+            (self.dir / "again").mkdir(exist_ok=True)
+            (self.dir / "again" / (name + ".bin")).write_bytes(data)
+            out = self.archive("--op", "create", "--as", "zst", "again/" + name + ".zst", name + ".bin", "--max-bytes", "100000000")
+            self.assertEqual((self.dir / "again" / (name + ".zst")).read_bytes(), blob, name)
+            if name == "one-match":
+                self.assertEqual(len(blob), len(data) + 17, "a block that does not shrink is stored")
+            if name == "block-sized":
+                self.assertEqual(len(self.zstd_counts(blob)), 1, "a block of exactly 128 KiB is the last one")
+            if name == "within-window":
+                self.assertEqual(blob[5], 0x68, "the frame says its window is 8 MiB")
+            if name == "ones":
+                self.assertLessEqual(len(blob), 30, "a run is a run block")
+            if name == "random":
+                self.assertLess(len(blob), len(data) + 40)
+            if name in ("prose", "records"):
+                self.assertLess(len(blob), len(data) * 0.7, name)
+
+    @staticmethod
+    def zstd_counts(blob):
+        """For each block of a frame this tool wrote: (kind, the number of sequences or 0, the literals)."""
+        at = 10
+        found = []
+        while True:
+            head = blob[at] | blob[at + 1] << 8 | blob[at + 2] << 16
+            kind, size, last = head >> 1 & 3, head >> 3, head & 1
+            body = blob[at + 3:at + 3 + (size if kind != 1 else 1)]
+            if kind == 2:
+                fmt = body[0] >> 2 & 3
+                if fmt in (0, 2):
+                    lits, hlen = body[0] >> 3, 1
+                elif fmt == 1:
+                    lits, hlen = (body[0] | body[1] << 8) >> 4, 2
+                else:
+                    lits, hlen = (body[0] | body[1] << 8 | body[2] << 16) >> 4, 3
+                rest = body[hlen + lits:]
+                if rest[0] < 128:
+                    n = rest[0]
+                elif rest[0] < 255:
+                    n = (rest[0] - 128) << 8 | rest[1]
+                else:
+                    n = rest[1] | rest[2] << 8
+                    n += 0x7f00
+                found.append((kind, n, lits))
+            else:
+                found.append((kind, 0, 0))
+            at += 3 + (size if kind != 1 else 1)
+            if last:
+                return found
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_zstd_writes_the_edges_of_its_headers_right(self):
+        rnd = random.Random(29)
+        rb = lambda n: bytes(rnd.randrange(256) for _ in range(n))
+        cases = []
+        # The literals header grows at 32 and at 4096 literals: a block of them and then a copy. (The matcher's table is lossy, so the
+        # number of literals that come out is a little over: many sizes are tried, and the ones that matter are required to have come up.)
+        for lits in list(range(26, 40)) + list(range(4088, 4104)) + [60000]:
+            r = rb(lits)
+            cases.append((r + r, None))
+        # The sequence count takes one byte up to 127 and two from 128 (the writer makes no more than 32511 in a block).
+        table = rb(8192)
+        for n in list(range(118, 142)) + [255, 256, 1000]:
+            cases.append((table + b"".join(rb(6) + table[64 * i:64 * i + 20] for i in range(n)), None))
+        lit_counts, seq_counts = set(), set()
+        for number, (data, _) in enumerate(cases):
+            (self.dir / "in.bin").write_bytes(data)
+            out = self.archive("--op", "create", "--as", "zst", "e%d.zst" % number, "in.bin", "--max-bytes", "100000000")
+            self.assertEqual(out.status, 0, (number, out.raw[-200:]))
+            blob = (self.dir / ("e%d.zst" % number)).read_bytes()
+            for kind, n, lits in self.zstd_counts(blob):
+                if kind == 2:
+                    lit_counts.add(lits)
+                    seq_counts.add(n)
+            self.assertEqual(zstandard.ZstdDecompressor().decompress(blob, max_output_size=len(data) + 1), data, number)
+        for edge in (31, 32, 4095, 4096):
+            self.assertIn(edge, lit_counts, "no block with %d literals came out" % edge)
+        for edge in (127, 128):
+            self.assertIn(edge, seq_counts, "no block with %d sequences came out" % edge)
+
+    @unittest.skipUnless(zstandard, "needs the zstandard package")
+    def test_a_tar_zst_is_created_listed_extracted_and_read_by_others(self):
+        self.umask(0o022)
+        files = self.corpus(self.dir)
+        out = self.archive("--op", "create", "--as", "tzst", "mine.tar.zst", "src", "empty")
+        check_stream(self, out)
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        self.assertEqual(out.end()["format"], "tzst")
+        raw = zstandard.ZstdDecompressor().decompress((self.dir / "mine.tar.zst").read_bytes(), max_output_size=1 << 28)
+        with tarfile.open(fileobj=io.BytesIO(raw)) as t:
+            names = sorted(m.name for m in t.getmembers())
+            self.assertIn("src/a.txt", names)
+            self.assertEqual(t.extractfile("src/deep/text.txt").read(), files["src/deep/text.txt"])
+        out = self.archive("--op", "list", "mine.tar.zst")
+        self.assertEqual(out.end()["format"], "tzst")
+        (self.dir / "o").mkdir()
+        out = self.archive("--op", "extract", "--into", "o", "mine.tar.zst")
+        self.assertEqual(out.status, 0, out.raw[-300:])
+        for name, data in files.items():
+            if name.startswith("src/"):
+                self.assertEqual((self.dir / "o" / name).read_bytes(), data, name)
+        self.assertTrue(os.access(self.dir / "o/src/run.sh", os.X_OK))
+        # The zeros of the corpus (3 MiB) are runs, not 3 MiB of blocks.
+        self.assertLess((self.dir / "mine.tar.zst").stat().st_size, 400000)
+        # One file only for --as zst, and an archive is never overwritten.
+        out = self.archive("--op", "create", "--as", "zst", "two.zst", "src/a.txt", "src/empty.txt")
+        self.assertEqual(out.rules(), ["args.too-many-operands"])
+        out = self.archive("--op", "create", "--as", "tzst", "mine.tar.zst", "src")
+        self.assertEqual(out.rules(), ["conflict.exists"])
+
     @unittest.skipUnless(zstandard, "needs the zstandard package")
     def test_zstd_damage_and_unsupported_forms_are_tags(self):
         data = self.zstd_data()["records"][:20000]

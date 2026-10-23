@@ -186,6 +186,7 @@ shared catalogue and its 39 fixtures are untouched; `test_archive.py` holds a fi
 | `archive.duplicate-entry` | 8 | two entries name the same file |
 | `archive.directory-missing` | 8 | `--into`, or a directory above it, does not exist (§13: extract makes the directories an entry needs beneath `--into`, never `--into`); the detail names the shallowest missing one |
 | `archive.no-match` | 8 | (list, extract) a selected path matches no entry of the archive (§14); an extract writes nothing |
+| `archive.bad-bzip2` | 8 | a bzip2 stream that is not valid, or bytes after it (§16) |
 | `archive.special-mode` | 8 | (extract) an entry's mode has a setuid, setgid or sticky bit (§13); nothing was extracted |
 | `archive.name-too-long` | 8 | (create) a name does not fit a ustar header |
 | `limit.archive-too-large` | 8 | expanded size would pass `--max-bytes` (or the file grew while it was read) |
@@ -590,3 +591,41 @@ be unpacked into a tree that already existed, and it dropped the execute bit. Bo
 * **Checked against** Python's `zipfile`, Info-ZIP's `zip` and `unzip` in both directions (`test_archive.py`), every cut and every changed
   byte of a small zip (no trap, a tag each), and mutants of the reader and the writer.
 * **Version.** 0.3.0 to 0.4.0: `--as zip`, the `zip` format, and a new rule, `archive.unsupported`.
+
+## 16. bzip2
+
+> **Status: built (0.5.0), reading only.** `list` and `extract` read `.tar.bz2` (format `tbz`) and a single `.bz2` file (format `bz2`), recognised by
+> `BZh` and a level `1`..`9` at the start. Everything in §13 and §14 applies. `create` does not write bzip2 (§16.3).
+
+### 16.1 What is read
+
+One bzip2 stream: blocks of up to 100,000 times the level bytes, each with its Huffman tables (2 to 6, switched every 50 symbols by a
+move-to-front coded selector), the zero-run coding of the move-to-front indexes, the inverse Burrows-Wheeler transform, bzip2's last run-length
+step (four equal bytes and a count), and the block's CRC-32; then the end marker and the combined CRC-32. The decompressed content is a tar
+(listed and extracted as one) or, when it is not, one file named as the archive is without `.bz2`, as a `.gz` is (§4.1).
+
+### 16.2 What is refused, and bounds
+
+* **Bytes after the stream, and a second stream** are `archive.bad-bzip2`, as they are for gzip (a concatenation is not one archive).
+* **A randomised block** (a form no bzip2 since 0.9.5 writes) is `archive.unsupported`.
+* **A CRC-32 that is not the data's**, block or combined, is `archive.crc-mismatch`; a stream that stops early is `archive.truncated`; anything
+  else that is not a bzip2 stream (a count out of range, a code that is not a prefix code, an index past the block, a position past the
+  block) is `archive.bad-bzip2`.
+* **The expansion is bounded** by `--max-bytes` as everything is (`limit.archive-too-large`), checked as the bytes are produced, so a 96 MiB
+  run of one byte compressed to a few hundred bytes (measured: the test) is refused at the cap with the memory of the tables and one block
+  (about 5 MiB for level 9), not of the expansion.
+* **Memory** is the compressed file, the expanded content (to `--max-bytes`) and the decoder's block (4 bytes per byte of the block size). `list` of a
+  bzip2 reads and expands the whole file, as a zip's reads the whole file (§15): there is no streaming of a bzip2 here (§12 is gzip's).
+
+### 16.3 What is not done
+
+Writing bzip2: the encoder's work is the Burrows-Wheeler sort, a large piece with nothing to check it against but the decoders, and an agent
+that wants a `.tar.bz2` has the other formats here. Concatenated streams, and the randomised form, are refused above. Both are listed so that
+the next reader knows they are decisions and not omissions.
+
+### 16.4 Measured
+
+32 MiB of text-like data at level 9 expands in 2.5 s here (Python's C `bz2` module: 1.7 s on the same machine), and the output is byte for byte the
+original. Checked against Python's `bz2` and the command-line `bzip2` at levels 1 and 9 on text, random bytes, long runs, two symbols, one byte, a
+byte repeated 300,000 times, an empty stream and `tar -cjf` trees; every cut and every changed byte of a small stream gives a tag and never a trap
+(`test_archive.py`); 15 mutants of the decoder (`scripts/archive_mutants.py`).

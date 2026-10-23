@@ -525,6 +525,16 @@ class Archive(unittest.TestCase):
             self.assertEqual(by["src/a.txt"].external_attr >> 16 & 0o777, 0o644)
             self.assertEqual(by["src/"].external_attr >> 16 & 0o170000, 0o040000)
             self.assertEqual({i.date_time for i in z.infolist()}, {(1980, 1, 1, 0, 0, 0)})
+        # The local headers carry the same time as the directory, byte for byte.
+        whole = (self.dir / "mine.zip").read_bytes()
+        at = whole.find(b"PK\x03\x04")
+        locals_seen = 0
+        while at >= 0:
+            self.assertEqual(whole[at + 10:at + 14], b"\x00\x00\x21\x00", at)
+            locals_seen += 1
+            at = whole.find(b"PK\x03\x04", at + 4)
+        self.assertGreaterEqual(locals_seen, 5)
+        with zipfile.ZipFile(self.dir / "mine.zip") as z:
             self.assertTrue(any(i.compress_type == zipfile.ZIP_DEFLATED for i in z.infolist()), "nothing was deflated")
             self.assertTrue(any(i.compress_type == zipfile.ZIP_STORED and i.file_size > 0 for i in z.infolist()), "an incompressible file was not stored")
         # The same files give the same bytes, and a zip made here is read here.

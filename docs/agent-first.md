@@ -15,7 +15,11 @@ agent in the loop ([cancho#228](https://github.com/alpibrusl/cancho/issues/228))
   table promises, and it carries `code`, `rule`, `message`, `hint`, `repair` and `detail`.
 * **Every refusal says what to do.** The `hint` is never empty: a source scan fails on any refusal written with an
   empty hint, so a new refusal cannot be added without advice. (The scan found sixteen when it was first run, in `hash`,
-  `write`, `replace`, `move`, `jsonq`, `run` and the shared `contract/`; they are fixed.)
+  `write`, `replace`, `move`, `jsonq`, `run` and the shared `contract/`; they are fixed.) The scan reads the argument
+  of a constructor, so it cannot see a hint that is a variable: `fail.io_error` chose its hint in a variable and left
+  three of the operating system's answers (`io.not-a-directory`, `io.permission-denied`, and the default
+  `io.read-failed` / `io.write-failed`) with `"hint":null`. `test_io_hints.py` runs those refusals on every tool
+  that reaches them (the nine of `test_rules.py`, `archive` and `run`) and pins the sentence of each.
 * **Same bytes everywhere.** A refusal is byte-identical under a foreign locale, time zone, terminal width and colour
   settings. No tool reads a terminal or waits for one.
 * **A host can gate on what a tool may do.** The MCP server's `tools/list` carries `readOnlyHint`, `destructiveHint`,

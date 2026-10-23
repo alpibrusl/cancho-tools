@@ -853,6 +853,81 @@ class Archive(unittest.TestCase):
         self.write("junk.bz2", b"BZh9" + bytes(40))
         self.assertEqual(self.archive("--op", "extract", "junk.bz2").rules(), ["archive.bad-bzip2"])
 
+    def test_bzip2_header_counts_out_of_range_are_tags_not_traps(self):
+        good = bz2.compress(b"hello hello hello world\n" * 200)
+        total = len(good) * 8
+        value = int.from_bytes(good, "big")
+
+        def field(pos, n):
+            return value >> (total - pos - n) & (1 << n) - 1
+
+        def with_field(pos, n, new):
+            cleared = value & ~(((1 << n) - 1) << (total - pos - n))
+            return (cleared | new << (total - pos - n)).to_bytes(len(good), "big")
+
+        # The block header starts after `BZh9`: magic, CRC, randomised bit, origin pointer, the bytes in use, then the table count.
+        pos = 32 + 48 + 32 + 1 + 24
+        used = field(pos, 16)
+        pos += 16 + 16 * bin(used).count("1")
+        self.assertIn(field(pos, 3), (2, 3))
+        for groups in (0, 1, 7):
+            self.write("groups.bz2", with_field(pos, 3, groups))
+            out = self.archive("--op", "extract", "groups.bz2")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], groups)
+        # No byte in use at all.
+        self.write("nouse.bz2", with_field(32 + 48 + 32 + 1 + 24, 16, 0))
+        out = self.archive("--op", "extract", "nouse.bz2")
+        check_stream(self, out)
+        self.assertEqual(out.rules(), ["archive.bad-bzip2"])
+
+    def test_bzip2_code_lengths_and_blocks_past_their_bounds_are_tags_not_traps(self):
+        good = bz2.compress(b"hello hello hello world\n" * 200)
+        total = len(good) * 8
+        value = int.from_bytes(good, "big")
+
+        def field(pos, n):
+            return value >> (total - pos - n) & (1 << n) - 1
+
+        def with_field(pos, n, new):
+            cleared = value & ~(((1 << n) - 1) << (total - pos - n))
+            return (cleared | new << (total - pos - n)).to_bytes(len(good), "big")
+
+        pos = 32 + 48 + 32 + 1 + 24
+        pos += 16 + 16 * bin(field(pos, 16)).count("1")
+        pos += 3
+        selectors = field(pos, 15)
+        pos += 15
+        for _ in range(selectors):
+            while field(pos, 1):
+                pos += 1
+            pos += 1
+        # `pos` is now the first table's 5-bit starting length: 0 and 21 and up are not code lengths.
+        for start in (0, 21, 31):
+            self.write("len.bz2", with_field(pos, 5, start))
+            out = self.archive("--op", "extract", "len.bz2")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], start)
+        # A block bigger than the level says: level 9 data (one block of a few hundred KB) under a level 1 header.
+        rnd = random.Random(21)
+        words = [bytes(rnd.choice(b"abcdefghij") for _ in range(rnd.randrange(2, 9))) for _ in range(300)]
+        texty = b" ".join(rnd.choice(words) for _ in range(120000))
+        for label, data in [("text", texty), ("runs", b"aaab" * 200000)]:
+            blob = bytearray(bz2.compress(data, 9))
+            self.assertEqual(bytes(blob[:4]), b"BZh9")
+            self.assertGreater(len(data), 150000, label)
+            blob[3] = ord("1")
+            self.write("big.bz2", bytes(blob))
+            out = self.archive("--op", "extract", "--max-bytes", "1073741824", "big.bz2")
+            check_stream(self, out)
+            self.assertEqual(out.rules(), ["archive.bad-bzip2"], label)
+
+    def test_a_bzip2_bomb_is_refused_in_the_memory_of_a_block_not_of_the_expansion(self):
+        self.write("bomb.bz2", bz2.compress(b"a" * (96 * 1024 * 1024), 9))
+        status, peak_kib = peak_rss([binary("archive"), "--op", "extract", "--max-bytes", "1048576", "bomb.bz2"], cwd=self.dir)
+        self.assertEqual(status, 8)
+        self.assertLess(peak_kib, 24 * 1024, "the expansion was held, not refused at the cap")
+
     def test_a_bzip2_bomb_is_bounded_and_every_cut_and_flip_is_a_tag(self):
         self.write("bomb.bz2", bz2.compress(b"a" * (96 * 1024 * 1024), 9))
         out = self.archive("--op", "extract", "--max-bytes", "1048576", "bomb.bz2")

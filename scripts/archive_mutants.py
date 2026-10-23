@@ -67,15 +67,15 @@ MUTANTS = [
     ("a zip member is never deflated", "zip.cho", "                smaller = buffer.size(pr) < size;", "                smaller = false;"),
     ("a zip's time is not fixed", "zip.cho", "        out = put16(heap, out, 0x21);", "        out = put16(heap, out, 0x22);"),
     ("a zip's entry count is not limited", "zip.cho", "    if n > 65534 {", "    if n > 65534000 {"),
+    # Not mutated, on purpose: `n_in_use == 0` is also caught by `n_block == 0` a few steps later (same answer), and the first
+    # `run_total > block_max` only keeps the run's weight from overflowing: the check at the run's end is what bounds a block.
     ("a bzip2 block's CRC-32 is not compared", "bzip2.cho", "                                    if crc != block_crc {", "                                    if false {"),
     ("a bzip2 stream's combined CRC-32 is not compared", "bzip2.cho", "                            } else if stored != combined {", "                            } else if false {"),
     ("bytes after a bzip2 stream are accepted", "bzip2.cho", "                            } else if bits.at < len(src) {", "                            } else if false {"),
     ("a randomised bzip2 block is read", "bzip2.cho", "                            } else if randomised != 0 {", "                            } else if false {"),
-    ("a bzip2 block without a byte in use is read", "bzip2.cho", "                                } else if n_in_use == 0 {", "                                } else if false {"),
     ("the bzip2 table count is not bounded", "bzip2.cho", "                                } else if n_groups < 2 || n_groups > 6 || n_selectors < 1 {", "                                } else if false {"),
     ("a bzip2 code length is not bounded", "bzip2.cho", "                                            } else if curr < 1 || curr > 20 {", "                                            } else if false {"),
     ("bzip2's RUNB counts as RUNA", "bzip2.cho", "run_total = run_total + run_weight * (symbol + 1);", "run_total = run_total + run_weight;"),
-    ("a bzip2 run may pass the block", "bzip2.cho", "                                                if n_block + run_total > block_max {", "                                                if false {"),
     ("a bzip2 block may pass its size", "bzip2.cho", "                                                } else if n_block >= block_max {", "                                                } else if false {"),
     ("a bzip2 origin pointer past the block is used", "bzip2.cho", "                            if status == 0 && (orig_ptr >= n_block || n_block == 0) {", "                            if status == 0 && n_block == 0 {"),
     ("a run of four is not a run to bzip2's last step", "bzip2.cho", "                                    if same == 4 {", "                                    if same == 5 {"),

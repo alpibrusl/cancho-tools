@@ -500,6 +500,7 @@ In this order of value to cost, the first being the only new tool:
      default `io.read-failed` / `io.write-failed` were the three without a hint. `docs/reference.md`, "Errors you can act on".)
 5. Documents that follow from the above: amend `docs/agent-toolbox.md` D15's `cut`/`sort`/`uniq` row (§6);
    merge #35 so the references to `docs/agent-bench.md` resolve on main.
+6. **Loops and conditions** (§10): asked 2026-10-26. The decision there is to build nothing yet, and to take one measurement first.
 
 ## 9. What the port corrected (so the history is visible)
 
@@ -520,3 +521,112 @@ The draft (PR #23, branch `next-tools-design`) said, and this version changes:
   with one exception on purpose: the on-disk suffixes `.lexsys-lock` / `.lexsys-tmp` are what the binaries
   write today, so they stay in this document (§8, item 3). A mechanical rename of the text would have
   made the document claim a behaviour the code does not have.
+
+## 10. Loops and conditions: what the tools already do, and what would be added
+
+> **Status: a design, not built; written 2026-10-26 on the question "can `if` and loops be tools?".** Nothing here is
+> accepted by the maintainer. A claim is either measured, with where, or marked **open**.
+
+### 10.1 `if` is inside the tools, on purpose
+
+A condition the agent checks and then acts on is two calls, and the file can change between them. So the condition
+is a flag of the call that acts, where the check and the act are one step:
+
+| tool | the condition | when it is false |
+|---|---|---|
+| `write` | `--create` (the file must not exist) or `--if-sha256 HEX` (it must still hold what was read); `--content-sha256` (what is to be written) | `conflict.exists`, `precondition.hash-mismatch`, `precondition.content-mismatch` |
+| `replace` | `--expect N` (the text occurs N times); `--if-sha256` | `precondition.count-mismatch`, `precondition.hash-mismatch` |
+| `move` | never over an existing name; `--remove` needs `--if-sha256` | `conflict.exists`, `precondition.hash-mismatch` |
+| `archive` | the whole archive is checked before any file is written; nothing is overwritten | the `archive.*` and `conflict.exists` rules |
+
+A separate `if` tool would bring the race back. What an agent still decides between calls is a condition on a
+*result* ("the search found nothing, so skip"), which is its job, and each tool says what it found in a record it
+can read.
+
+### 10.2 Loops: the agent is the loop, and what that costs (measured, and what it does not show)
+
+Today a loop is the agent calling a tool again. `seek`, `hash`, `tally` and `list` take many operands in one call; `replace`, `write`,
+`move`, `peek` and `jsonq` take one (`PATH` or `FILE` is at most 1 in their `introspect`). The cost of a loop is a call per item.
+
+**Measured here:** `bench-out/results.jsonl` and its transcripts (191 runs, three arms, seven tasks; committed in
+82e70d6) hold 611 tool calls. Runs of three or more consecutive calls to the same tool
+number 19 (61 calls, 10 percent of all calls). Of those, **one** differs only in its last operand: `peek` on three
+files (`s2-link`, `skills` arm). The other 18 are retries and variations of one command. **What this does not
+show:** that loops do not hurt. Every task in that benchmark is one file (`e1-append`, `e2-rename`, `r1-version`,
+`r2-todos`, `s1a-stale-changed`, `s1b-stale-same`, `s2-link`), so it cannot ask for a loop. **Open:** a benchmark
+with tasks over many files ("change this name in every file that has it", "read these ten files") is the thing
+that would settle whether loops are worth a tool; none exists yet.
+
+### 10.3 Option A: several files in one call (`replace`, `write`, `peek`)
+
+The smallest thing that removes the commonest loop (`find -exec`, `xargs sed -i`) and adds no language.
+
+* `replace --old --new --expect N PATH...` (1 or more operands; `--max-files`, default 100). `--expect N` is per file.
+  Read and check **every** file first (every precondition, every size, a `--max-bytes` for the total), and write nothing
+  if any check fails: the refusal names every file that failed, not only the first. `--dry-run` shows every diff.
+* **What is not claimed: that the apply is all-or-nothing.** POSIX has no rename of several files at once. Each file's
+  write stays atomic and locked, the locks of all files are taken first **in sorted order** (so two calls over
+  overlapping files cannot deadlock), then the files are written in that order. A failure after the first write
+  (a full disk) leaves some files changed. The answer then says so with a rule (`partial.applied`), lists the files
+  written, and carries a `repair` for each: the `replace` argv that puts the old text back, guarded by
+  `--if-sha256 <after hash>`, so the undo itself cannot clobber a later edit.
+* Output: one record per file and an `end` record, as the other multi-file tools print.
+* New rules: `limit.too-many-files`, `partial.applied`. The mixed-case gate is a race test with two calls over
+  overlapping sets in opposite order (the way `scripts/write_race.py` does for one file).
+* `write` over several files has no use (each needs its own content); `peek` over several files is a read with no
+  state, so it is the cheapest to add and the one place the benchmark above shows the shape.
+
+### 10.4 Option B: a `plan` tool (a bounded workflow), and why it is held
+
+```json
+{"steps": [
+  {"id": "hits", "tool": "seek", "args": ["--root", ".", "old_name", "a.rs", "b.rs"]},
+  {"id": "fix", "tool": "replace", "foreach": {"in": "hits", "pointer": "/path", "where": {"pointer": "/type", "equals": "file"}},
+   "args": ["--root", ".", "--old", "old_name", "--new", "new_name", "--expect", "1", "${item}"]}]}
+```
+
+If it is built, its limits are the point, because without them it is a shell:
+
+* **Data, not code.** No variables beyond `${item}` and `${step.pointer}`, no expressions, no recursion, no tool
+  name taken from data. A condition is an exit status or a JSON-pointer test (exists, equals, count above zero).
+* **Bounded.** `--max-steps` and `--max-iterations` (the length of a `foreach`) with ceilings, like every limit here.
+* **Checked whole before anything runs.** Every step's `tool` must be in the deployer's programs directory, and every
+  `args` is parsed against that tool's own `introspect` tables, so an unknown flag fails the plan, not step 7.
+  `--dry-run` prints the argv of every step. A `foreach` may take its list only from a step of a read-only tool
+  (`reversible-cheap`), so a dry run can run the reads and expand the rest.
+* **Resumable.** The first failing step stops the plan; the answer is that step's refusal and `resume: {"from_step": k}`.
+* **Authority.** It starts programs, so it is an `exec` tool with `run`'s mechanism and `run`'s class,
+  `irreversible-consequential`, **opt-in** like `run`. It reopens the clause D15 closed ("`find -exec` and `xargs` are
+  not a thing the toolbox can be tempted into") the way `run` did (§0), so it needs the same maintainer decision, not
+  only code.
+* **The test for admission:** everything a plan can say is a list of argv lines with a `foreach` over a list of
+  strings. If a request needs more than that, the answer is "write a program and `run` it".
+
+It is **held** because (§10.2) there is no measurement that says loops are what costs agents, because every step is
+still a call to the tool that reviews itself, and the plan is the one place that review would move to, and because
+Option A takes the commonest loop without a new authority.
+
+### 10.5 Option C: independent calls in one MCP request
+
+The MCP server already holds the right to start the tools' binaries (`docs/mcp.md`). A pseudo-tool `batch`
+taking `[{"tool": "peek", "arguments": {...}}, ...]` runs them in order, with no data flowing between them, and
+answers each call's output as the server does for one call; `stop_on_error` is a flag. No new authority, no
+`foreach`, no conditions. It saves round trips for independent reads and nothing else. Cheap, and measurable once a
+many-file benchmark exists (§10.2).
+
+### 10.6 Order, and what to measure first
+
+1. **Measure:** write the many-file tasks (§10.2) next to the benchmark's frozen ones, and count the calls per task
+   with and without Option A and C. Until that is done, nothing below has a number.
+2. **A:** `replace` over several files, and `peek` over several files. Built the way these tools are (§6): this design,
+   conformance, mutants killed, `introspect` and the MCP definition generated, the authority row held by a test.
+3. **C:** `batch` in the MCP server, if round trips are what the measurement shows.
+4. **B:** only if the measurement shows loops that depend on earlier results, and the maintainer reopens D15.
+
+### 10.7 Open questions for the maintainer
+
+1. Is Option A's honest claim (every file validated before any is written, applied in sorted order under all
+   the locks, a reported undo on a partial failure) enough, or is a stronger claim needed? (It cannot be had on POSIX
+   without a journal, which is a file-system, not a tool.)
+2. Does `--expect N` mean per file, or in total? This design says per file, because a total hides which file is wrong.
+3. Is a `plan` tool in scope at all? (§10.4 says what it would take; it is not recommended without §10.2's number.)

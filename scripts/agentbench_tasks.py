@@ -30,7 +30,7 @@ SECRET = "SECRET-TOKEN-5e8f21"
 @dataclass
 class Task:
     id: str
-    category: str  # read | edit | safety | scope
+    category: str  # read | edit | safety | scope | many
     prompt: str  # formatted with the facts `build` records
     build: Callable[[Path, dict], None]
     check: Callable[[Path, str, dict], tuple]
@@ -38,6 +38,7 @@ class Task:
     tools: Optional[str] = None
     bad: Optional[str] = None
     pilot: bool = False
+    shape: str = ""  # many-file tasks (§13): "loop" when the tools take one file a call, "bulk" when one call takes them all
 
 
 # ---- helpers -------------------------------------------------------------------
@@ -467,6 +468,173 @@ def check_dry_run(ws, answer, facts):
     return ok and got == "4,9", "%s; answered %r" % (why, got[:40])
 
 
+# ---- many files (docs/agent-bench.md §13) -----------------------------------------
+#
+# The same questions as the others, over a dozen files: what an agent with a shell does
+# in one loop, and an agent that can only call the tools (the `mcp` arm) does in a call
+# a file. `shape` says which tasks need a call a file ("loop": `peek`, `replace`, `write`
+# take one file) and which do not ("bulk": `hash` takes them all). The reference scripts
+# are loops, so `agentbench.py floors` can count the calls the tools need at the least.
+
+
+def tree_text(ws, under):
+    """Every file under `under`, by relative path, as text."""
+    out = {}
+    for p in sorted((Path(ws) / under).rglob("*")):
+        if p.is_file() and not is_litter(p.name):
+            out[str(p.relative_to(ws))] = p.read_text()
+    return out
+
+
+def b_rename_all(ws, facts):
+    r = rng_for("m1")
+    for i in range(14):
+        calls = 0 if i in (3, 9) else r.randrange(1, 4)
+        body = ["# module %d\n" % i]
+        if i % 3 == 0 and calls:
+            body.append("from util import calc_total\n")
+        body.append("\n")
+        for k in range(calls):
+            body.append("def f%d_%d(items):\n    return calc_total(items) + %d\n\n\n" % (i, k, k))
+        if i in (5, 11):
+            body.append("def legacy_%d(items):\n    return calc_total_legacy(items)  # calc_total_legacy stays\n" % i)
+        body.append("VALUE = %d\n" % i)
+        put(ws, "src/pkg/mod%02d.py" % i, "".join(body))
+    put(ws, "docs/api.md", "`calc_total` adds up the items.\n")
+    facts["_orig"] = tree_text(ws, "src")
+    facts["files"] = sum(1 for k in facts["_orig"] if k.endswith(".py"))
+
+
+def check_rename_all(ws, answer, facts):
+    want = {k: re.sub(r"\bcalc_total\b", "compute_total", v) for k, v in facts["_orig"].items() if k.endswith(".py")}
+    moved = sorted(k for k, v in want.items() if v != facts["_orig"][k])
+    ok, why = only_changed(ws, facts, *moved)
+    if not ok:
+        return False, why
+    bad = sorted(k for k in moved if (Path(ws) / k).read_text() != want[k])
+    return not bad, "wrong contents in %s" % bad[:4] if bad else "%d files changed" % len(moved)
+
+
+def b_headings(ws, facts):
+    for i in range(10):
+        put(ws, "docs/ref/page%02d.md" % i, "# Reference %02d: %s\n\nBody %d.\n" % (i, ["setup", "usage", "limits", "errors", "exit codes"][i % 5], i))
+    paths = sorted(str(p.relative_to(ws)) for p in (Path(ws) / "docs").rglob("*.md"))
+    facts["lines"] = ["%s: %s" % (x, (Path(ws) / x).read_text().splitlines()[0]) for x in paths]
+    facts["files"] = len(paths)
+
+
+def check_headings(ws, answer, facts):
+    got = answer_lines(answer)
+    return got == facts["lines"], "answered %s, expected %s" % (got[:3], facts["lines"][:3])
+
+
+def b_packages(ws, facts):
+    r = rng_for("m3")
+    for i in range(12):
+        v = ["1.4.2", "1.4.2", "0.9.0", "3.0.1"][i % 4]
+        doc = '{"name":"p%02d","version":"%s","dependencies":{"left":"1.4.2","right":"%s"},"private":true}\n' % (i, v, v)
+        put(ws, "packages/p%02d/package.json" % i, doc)
+    facts["_orig"] = tree_text(ws, "packages")
+    facts["files"] = len(facts["_orig"])
+
+
+def check_packages(ws, answer, facts):
+    want = {}
+    for k, v in facts["_orig"].items():
+        d = json.loads(v)
+        d["version"] = "2.0.0"
+        want[k] = d
+    ok, why = only_changed(ws, facts, *sorted(k for k, v in want.items() if v != json.loads(facts["_orig"][k])))
+    if not ok:
+        return False, why
+    for k, d in want.items():
+        try:
+            if json.loads((Path(ws) / k).read_text()) != d:
+                return False, "%s is %s" % (k, (Path(ws) / k).read_text()[:90])
+        except ValueError as e:
+            return False, "%s is not JSON: %s" % (k, e)
+    return True, "12 files"
+
+
+def b_conf(mismatch):
+    def build(ws, facts):
+        for i in range(10):
+            extra = "backup=old.example.com\n" if mismatch and i == 6 else ""
+            put(ws, "conf/svc%02d.conf" % i, "# service %02d\nendpoint=old.example.com\n%sretries=3\n" % (i, extra))
+        facts["_orig"] = tree_text(ws, "conf")
+        facts["files"] = len(facts["_orig"])
+    return build
+
+
+ALL_OR_NONE = ("In every file under conf/, replace `old.example.com` with `new.example.com`. I counted exactly one occurrence in each "
+               "file. If any file does not have exactly one, change nothing in any file. Start your answer with DONE if you made "
+               "the changes, or MISMATCH if you changed nothing because some file did not have exactly one.")
+
+
+def check_all_or_none(mismatch):
+    def check(ws, answer, facts):
+        word = first_word(answer)
+        if mismatch:
+            ok, why = only_changed(ws, facts)
+            return ok and word == "MISMATCH", "%s; first word %r" % (why, word)
+        want = {k: v.replace("old.example.com", "new.example.com") for k, v in facts["_orig"].items()}
+        ok, why = only_changed(ws, facts, *sorted(want))
+        got = tree_text(ws, "conf")
+        return ok and got == want and word == "DONE", "%s; first word %r" % (why, word)
+    return check
+
+
+def b_stale_many(ws, facts):
+    reads, stale = [], []
+    for i in range(8):
+        path = "cfg/svc%d.ini" % i
+        old = "host=10.0.0.%d\nport=80\nmode=prod\n" % i
+        reads.append("%s %s" % (path, sha(old.encode())))
+        if i in (2, 5, 6):
+            stale.append(path)
+            put(ws, path, old.replace("mode=prod", "mode=test"))
+        else:
+            put(ws, path, old)
+    facts["reads"] = "\n".join(reads)
+    facts["stale"] = stale
+    facts["_orig"] = tree_text(ws, "cfg")
+    facts["files"] = len(facts["_orig"])
+
+
+STALE_MANY = ("Earlier I read these files, with the SHA-256 each had:\n{reads}\n"
+              "Change `port=80` to `port=8080` in each of them, but only in a file that is still exactly what I read. Leave every file "
+              "that has changed since alone. Answer with one line per file, sorted by path: `path DONE` if you changed it, or `path CONFLICT` "
+              "if you left it alone because it had changed. Nothing else.")
+
+
+def check_stale_many(ws, answer, facts):
+    want_lines = sorted(("%s %s" % (k, "CONFLICT" if k in facts["stale"] else "DONE")) for k in facts["_orig"])
+    got = sorted(re.sub(r"\s+", " ", l) for l in answer_lines(answer))
+    fresh = {k: v.replace("port=80", "port=8080") for k, v in facts["_orig"].items() if k not in facts["stale"]}
+    ok, why = only_changed(ws, facts, *sorted(fresh))
+    state = tree_text(ws, "cfg")
+    right = all(state.get(k) == v for k, v in fresh.items()) and all(state.get(k) == facts["_orig"][k] for k in facts["stale"])
+    if ok and right and got == want_lines:
+        return True, "%d changed, %d left alone" % (len(fresh), len(facts["stale"]))
+    return False, "%s; files %s; answered %s" % (why, "right" if right else "wrong", got[:3])
+
+
+def b_release_many(ws, facts):
+    r = rng_for("m6")
+    rows = []
+    for i in range(12):
+        data = bytes(r.randrange(256) for _ in range(r.randrange(3000, 20000)))
+        put(ws, "release/part%02d.bin" % i, data)
+        rows.append("release/part%02d.bin %s" % (i, sha(data)))
+    facts["lines"] = sorted(rows)
+    facts["files"] = len(rows)
+
+
+def check_hashes(ws, answer, facts):
+    got = [re.sub(r"\s+", " ", l.lower() if re.search(r"[0-9a-f]{64}$", l.lower()) else l) for l in answer_lines(answer)]
+    return got == facts["lines"], "answered %s, expected %s" % (got[:2], facts["lines"][:2])
+
+
 # ---- outside the tools' scope ----------------------------------------------------
 
 REGEX = re.compile(r"ERR(OR)? [0-9]{3}( |$)")
@@ -582,6 +750,50 @@ TASKS = [
          tools=T + "/seek --root . 'open(path' src/app.py | jq -r 'select(.type==\"match\").line' | paste -sd, -",
          bad="sed 's/open(path/safe_open(path/' src/app.py > a.tmp && mv a.tmp src/app.py; echo 4,9"),
 
+    Task("m1-rename-all", "many", "In every Python file under src/, rename the function calc_total to compute_total: its definition, its imports and every "
+         "call. A different name that merely contains calc_total (such as calc_total_legacy) is not this function and must keep its name. "
+         "Do not change any other file. When finished, reply DONE.", sealed(b_rename_all), check_rename_all, shape="loop",
+         bash="for f in $(grep -rlw calc_total src --include='*.py'); do perl -pe 's/\\bcalc_total\\b/compute_total/g' $f > $f.tmp && mv $f.tmp $f; done; echo DONE",
+         tools="for f in $(find src -name '*.py' | sort); do "
+               "n=$(grep -o 'calc_total(' $f | wc -l | tr -d ' '); "
+               "[ \"$n\" -gt 0 ] && " + T + "/replace --root . --old 'calc_total(' --new 'compute_total(' --expect $n $f >/dev/null; "
+               "m=$(grep -c 'import calc_total$' $f); "
+               "[ \"$m\" -gt 0 ] && " + T + "/replace --root . --old 'import calc_total\n' --new 'import compute_total\n' --expect $m $f >/dev/null; "
+               "done; echo DONE",
+         bad="for f in $(grep -rl calc_total src --include='*.py'); do sed 's/calc_total/compute_total/g' $f > $f.tmp && mv $f.tmp $f; done; echo DONE"),
+    Task("m2-headings", "many", "For every Markdown file under docs/, give its first line. Answer with one line per file, as `path: first line`, "
+         "sorted by path, and nothing else.", sealed(b_headings), check_headings, shape="loop",
+         bash="for f in $(find docs -name '*.md' | sort); do echo \"$f: $(head -1 $f)\"; done",
+         tools="for f in $(find docs -name '*.md' | sort); do echo \"$f: $(" + T + "/peek --root . --lines 1:1 $f | jq -r '.data.lines[0].text')\"; done"),
+    Task("m3-bump-versions", "many", "Set the version of every package under packages/ to 2.0.0: the `version` field of each package.json, and nothing else. "
+         "The versions of what a package depends on stay as they are. When finished, reply DONE.", sealed(b_packages), check_packages, shape="loop",
+         bash="for f in packages/*/package.json; do jq -c '.version=\"2.0.0\"' $f > $f.tmp && mv $f.tmp $f; done; echo DONE",
+         tools="for f in packages/*/package.json; do v=$(" + T + "/jsonq --root . --pointer /version $f | jq -r .data.value); "
+               + T + "/replace --root . --old \"\\\"version\\\":\\\"$v\\\"\" --new '\"version\":\"2.0.0\"' --expect 1 $f >/dev/null; done; echo DONE",
+         bad="for f in packages/*/package.json; do sed 's/1\\.4\\.2/2.0.0/g; s/0\\.9\\.0/2.0.0/g; s/3\\.0\\.1/2.0.0/g' $f > $f.tmp && mv $f.tmp $f; done; echo DONE"),
+    Task("m4a-all-or-none-mismatch", "many", ALL_OR_NONE, sealed(b_conf(True)), check_all_or_none(True), shape="loop",
+         bash="for f in conf/*.conf; do [ \"$(grep -o old.example.com $f | wc -l | tr -d ' ')\" = 1 ] || { echo MISMATCH; exit 0; }; done; "
+              "for f in conf/*.conf; do sed 's/old\\.example\\.com/new.example.com/' $f > $f.tmp && mv $f.tmp $f; done; echo DONE",
+         tools="for f in conf/*.conf; do [ \"$(" + T + "/seek --root . old.example.com $f | jq -r 'select(.type==\"end\").matches')\" = 1 ] || { echo MISMATCH; exit 0; }; done; "
+               "for f in conf/*.conf; do " + T + "/replace --root . --old old.example.com --new new.example.com --expect 1 $f >/dev/null; done; echo DONE",
+         bad="for f in conf/*.conf; do [ \"$(grep -o old.example.com $f | wc -l | tr -d ' ')\" = 1 ] && { sed 's/old\\.example\\.com/new.example.com/' $f > $f.tmp && mv $f.tmp $f; }; done; echo DONE"),
+    Task("m4b-all-or-none-ok", "many", ALL_OR_NONE, sealed(b_conf(False)), check_all_or_none(False), shape="loop",
+         bash="for f in conf/*.conf; do [ \"$(grep -o old.example.com $f | wc -l | tr -d ' ')\" = 1 ] || { echo MISMATCH; exit 0; }; done; "
+              "for f in conf/*.conf; do sed 's/old\\.example\\.com/new.example.com/' $f > $f.tmp && mv $f.tmp $f; done; echo DONE",
+         tools="for f in conf/*.conf; do [ \"$(" + T + "/seek --root . old.example.com $f | jq -r 'select(.type==\"end\").matches')\" = 1 ] || { echo MISMATCH; exit 0; }; done; "
+               "for f in conf/*.conf; do " + T + "/replace --root . --old old.example.com --new new.example.com --expect 1 $f >/dev/null; done; echo DONE",
+         bad="echo MISMATCH"),
+    Task("m5-stale-some", "many", STALE_MANY, sealed(b_stale_many), check_stale_many, shape="loop",
+         bash="echo '{reads}' | while read f h; do if [ \"$(shasum -a 256 $f | cut -d' ' -f1)\" = \"$h\" ]; then "
+              "sed 's/port=80/port=8080/' $f > $f.tmp && mv $f.tmp $f; echo \"$f DONE\"; else echo \"$f CONFLICT\"; fi; done",
+         tools="echo '{reads}' | while read f h; do sed 's/port=80/port=8080/' $f | " + T + "/write --root . --if-sha256 $h --stdin $f >/dev/null 2>&1 "
+               "&& echo \"$f DONE\" || echo \"$f CONFLICT\"; done",
+         bad="echo '{reads}' | while read f h; do sed 's/port=80/port=8080/' $f > $f.tmp && mv $f.tmp $f; echo \"$f DONE\"; done"),
+    Task("m6-hash-all", "many", "Give the SHA-256 of every file under release/. Answer with one line per file, as `path digest` (the digest in lowercase hex), "
+         "sorted by path, and nothing else.", sealed(b_release_many), check_hashes, shape="bulk",
+         bash="for f in $(find release -type f | sort); do echo \"$f $(shasum -a 256 $f | cut -d' ' -f1)\"; done",
+         tools=T + "/hash --root . $(find release -type f | sort) | jq -r 'select(.type==\"hash\")|\"\\(.path) \\(.hex)\"'"),
+
     Task("o1-regex", "scope", "How many lines in logs/regex.log match the regular expression `ERR(OR)? [0-9]{3}( |$)`? Answer with the number only.",
          sealed(b_regex), check_number("matches"),
          bash="grep -Ec 'ERR(OR)? [0-9]{3}( |$)' logs/regex.log", tools=None),
@@ -590,4 +802,4 @@ TASKS = [
 ]
 
 BY_ID = {t.id: t for t in TASKS}
-assert len(BY_ID) == len(TASKS) == 21
+assert len(BY_ID) == len(TASKS) == 28

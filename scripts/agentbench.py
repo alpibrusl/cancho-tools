@@ -85,6 +85,37 @@ def verify(bins):
     return problems
 
 
+def floors(bins):
+    """§13: for each many-file task, how many files it is about and how many calls to the tools its reference solution makes:
+    what an agent that can only call tools (the `mcp` arm) needs, if it does as the reference does (not shown to be the least).
+    A shell loop, as the `bash` and `skills` arms may write, is one call. Answers `[(task, shape, files, tool calls)]`."""
+    rows = []
+    with tempfile.TemporaryDirectory() as shims:
+        log = pathlib.Path(shims) / "log"
+        for name in TOOL_NAMES:
+            exe = pathlib.Path(shims) / name
+            exe.write_text('#!/bin/sh\necho %s >> "$AB_LOG"\nexec "%s/%s" "$@"\n' % (name, bins, name))
+            exe.chmod(0o755)
+        for t in tasks.TASKS:
+            if t.shape and t.tools:
+                run_dir, ws, facts = new_workspace(t)
+                try:
+                    log.write_text("")
+                    os.environ["AB_LOG"] = str(log)
+                    run_script(t.tools, ws, facts, pathlib.Path(shims))
+                    rows.append((t.id, t.shape, facts["files"], len(log.read_text().split())))
+                finally:
+                    os.environ.pop("AB_LOG", None)
+                    shutil.rmtree(run_dir, ignore_errors=True)
+    return rows
+
+
+def floors_table(bins):
+    out = ["| task | shape | files | calls the reference solution makes to the tools |", "|---|---|---|---|"]
+    out += ["| `%s` | %s | %d | %d |" % row for row in floors(bins)]
+    return "\n".join(out)
+
+
 # ---- the arms ---------------------------------------------------------------------
 
 
@@ -570,6 +601,8 @@ def cmd_run(a):
     chosen = [t for t in tasks.TASKS if (a.pilot and t.pilot) or (not a.pilot and (not a.tasks or t.id in a.tasks.split(",")))]
     if a.pilot and a.tasks:
         chosen = [t for t in chosen if t.id in a.tasks.split(",")]
+    if a.category:
+        chosen = [t for t in chosen if t.category == a.category]
     arms = a.arms.split(",")
     # Arm-major: a local model keeps its prompt cache for as long as the prefix (the system
     # prompt and the arm's tool definitions) is the same, and on a CPU a cold prefix of a few
@@ -606,9 +639,9 @@ def cmd_report(a):
     for agent_model in sorted({(r["agent"], r["model"]) for r in rows}):
         mine = [r for r in rows if (r["agent"], r["model"]) == agent_model]
         print("\n## %s, %s: %d runs, %d tasks" % (*agent_model, len(mine), len({r["task"] for r in mine})))
-        print("\n| category | arm | passed | 95% interval | turns | tokens in | first call | seconds | litter | exposed |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
-        for cat in ("read", "edit", "safety", "scope"):
+        print("\n| category | arm | passed | 95% interval | turns | calls | tokens in | first call | seconds | litter | exposed |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
+        for cat in ("read", "edit", "safety", "scope", "many"):
             for arm in ARMS:
                 rs = [r for r in mine if r["category"] == cat and r["arm"] == arm and not r["harness"]]
                 if not rs:
@@ -618,8 +651,8 @@ def cmd_report(a):
                 passed = [r for r in rs if r["ok"]] or rs
                 med = lambda f: "%d" % statistics.median([f(r) for r in passed if f(r) is not None] or [0])
                 exposed = sum(bool(r["exposed"]) if "exposed" in r else exposed_in(r["transcript"]) for r in rs)
-                print("| %s | %s | %d/%d | %.0f%%–%.0f%% | %s | %s | %s | %s | %d | %d |" % (
-                    cat, arm, k, len(rs), 100 * lo, 100 * hi, med(lambda r: r["turns"]), med(lambda r: r["tokens_in"]),
+                print("| %s | %s | %d/%d | %.0f%%–%.0f%% | %s | %s | %s | %s | %s | %d | %d |" % (
+                    cat, arm, k, len(rs), 100 * lo, 100 * hi, med(lambda r: r["turns"]), med(lambda r: sum(r["calls"].values())), med(lambda r: r["tokens_in"]),
                     med(lambda r: r["first_input"]), med(lambda r: r["seconds"]), sum(r.get("litter", 0) for r in rs), exposed))
         harness = [r for r in mine if r["harness"]]
         if harness:
@@ -645,11 +678,13 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("verify")
+    sub.add_parser("floors", help="§13: the calls the many-file tasks need at the least, from their reference solutions")
     r = sub.add_parser("run")
     r.add_argument("--agent", choices=sorted(AGENTS), required=True)
     r.add_argument("--model", default="")
     r.add_argument("--arms", default=",".join(ARMS))
     r.add_argument("--tasks", default="")
+    r.add_argument("--category", default="", help="only the tasks of this category (read, edit, safety, scope, many)")
     r.add_argument("--pilot", action="store_true")
     r.add_argument("--reps", type=int, default=1)
     r.add_argument("--timeout", type=int, default=600)
@@ -674,6 +709,9 @@ def main():
         print("\n".join(problems) or "the preflight found no escape: as %s it cannot read an operator-only file, list or write "
               "the operator's home, use docker or sudo, and it can run the agent and the tools" % a.run_as)
         sys.exit(1 if problems else 0)
+    if a.cmd == "floors":
+        print(floors_table(bin_dir()))
+        return
     if a.cmd == "verify":
         problems = verify(bin_dir())
         print("\n".join(problems) or "every task: the reference solutions pass, doing nothing fails, the unsafe solution fails")

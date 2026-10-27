@@ -57,7 +57,7 @@ overhead can be read off.
 
 ## 3. The tasks
 
-Twenty-one small tasks, each in a fresh workspace built from a seed, so every
+Twenty-one small tasks (and seven many-file ones, kept apart: §13), each in a fresh workspace built from a seed, so every
 repeat starts from the same state. A task has a prompt, a fixture, and a
 **checker** that reads the final workspace and the agent's answer. Prompts
 fix the form of the answer (`path:line` per line; one number alone), so a
@@ -466,3 +466,85 @@ What this does and does not say:
 * Which build of the mcp server (before or after the precise refusal messages of cancho-tools#22)
   this roster ran against is not recorded in the results, so whether those messages move the mcp
   safety numbers is a rerun still owed, with the build named.
+
+## 13. Many-file tasks (built and checked; not run)
+
+> **Status: the seven tasks are built, and `verify` shows their checks can fail (§4); no model has been run on them, so
+> there is no result.** Written 2026-10-27 for the question `docs/next-tools.md` §10 left open: **is a loop what costs an
+> agent?** That document measured the benchmark's earlier transcripts (611 calls in 191 runs): one run is loop-shaped,
+> because **every task in §3 is about one file**, so the benchmark cannot show a loop's cost either way. These tasks are
+> the missing half.
+
+### 13.1 What the arms make of a loop
+
+* `bash` and `skills` have a shell: a loop over twelve files is one `for` in one call. The tools do not change that.
+* `mcp` has only the tools, and `replace`, `write` and `peek` take **one** file (`hash`, `seek` and `tally` take many).
+  A loop is a call a file there.
+
+So the comparison that matters is `mcp` against `skills` on the same tasks, not `mcp` against `bash`: the tasks are the same
+and what changes is whether the agent can loop in a shell. §10 and §12 found `skills` the arm least used by small models, so
+a gap between them may be about use of skills; the control task (§13.3) is there to tell the two apart.
+
+### 13.2 The tasks
+
+Each is built from a seed and has a checker, a `bash` and a `tools` reference solution (a loop), and, where it changes
+files, an unsafe `bad` one that the checker must refuse. **Prompts name no tool, as in §3.**
+
+| task | shape | asks | what it carries |
+|---|---|---|---|
+| `m1-rename-all` | loop | rename a function in 18 Python files: definition, import, every call | two files hold a longer name that contains it (`calc_total_legacy`) and must keep it; a Markdown file outside `src/` mentions it and must not change |
+| `m2-headings` | loop | the first line of every Markdown file under `docs/`, as `path: line` | a read: `peek` takes one file |
+| `m3-bump-versions` | loop | set `version` to `2.0.0` in 12 `package.json` files | the dependencies hold the same version strings, so a global replace of the number is wrong |
+| `m4a-all-or-none-mismatch` | loop | replace one text in 10 config files, **only if every file has it exactly once; else change nothing** | one file has it twice: a loop that edits as it goes leaves nine changed |
+| `m4b-all-or-none-ok` | loop | the same prompt, every file has it once | the twin: here the right move is to go ahead |
+| `m5-stale-some` | loop | change a port in 8 files, **only in those still exactly what I read** (their hashes are given); say which were left | three files changed since: a per-file condition inside the loop |
+| `m6-hash-all` | bulk | the SHA-256 of 12 files, `path digest` per line | **the control:** one `hash` call does it, so a gap between `mcp` and `skills` here is not about loops |
+
+`m4a` and `m4b` are a pair on purpose, as the stale and the counted edits are (§3). `m4a` is also the check on a claim
+`docs/next-tools.md` §10.3 makes: validate every file before writing any. A task whose right answer is "change nothing"
+is what that design is for.
+
+**Left out:** renaming many files (`move`). The harness drives eight binaries (`TOOL_NAMES`, §2), and `move` is not one of
+them; adding it changes what every arm is shown, which is a separate decision, not a side effect of a new task set.
+
+### 13.3 What the reference solutions make
+
+The `tools` reference of each task is a loop over its files, run here with each binary counted. This is what an agent that
+can only call tools needs **if it does as the reference does**; it is not shown to be the least (`m3` reads each version
+before it replaces it, which an agent that read them all at once might not). `python3 scripts/agentbench.py floors` prints
+it, and a test fails if this table is not what it prints:
+
+| task | shape | files | calls the reference solution makes to the tools |
+|---|---|---|---|
+| `m1-rename-all` | loop | 18 | 17 |
+| `m2-headings` | loop | 12 | 12 |
+| `m3-bump-versions` | loop | 12 | 24 |
+| `m4a-all-or-none-mismatch` | loop | 10 | 7 |
+| `m4b-all-or-none-ok` | loop | 10 | 20 |
+| `m5-stale-some` | loop | 8 | 8 |
+| `m6-hash-all` | bulk | 12 | 1 |
+
+### 13.4 What is recorded, and what would count
+
+`python3 scripts/agentbench.py run --category many --agent ... --model ... --arms mcp,skills,bash --reps 3` runs them. The
+report has the columns of §5 and one more, **calls**: the median number of tool calls in the runs that passed (a `skills` or
+`bash` call is one shell command, whatever it loops over).
+
+**Proposed, not accepted** (the maintainer has not reviewed this), and fixed before any run, as §11.5 does:
+
+* Option A of `docs/next-tools.md` §10.3 (several files in one call) is worth building if, on the six loop tasks, **`mcp`
+  makes at least four times the calls of `skills` on at least four of them**, or **its pass rate is lower than `skills`' on the
+  loop tasks taken together with 95 percent intervals that do not overlap**, **and** on `m6-hash-all` the two arms are within
+  two calls of each other (otherwise the gap is the arm, not the loop).
+* It is **not** worth building if neither holds. Option B (a `plan` tool) needs more than this: tasks whose later steps depend
+  on earlier results, which none of these has.
+* At least two models and three repeats, or nothing is said. The results of §10 and §12 say small local models fail these
+  arms often (`skills` worst), so **a floor effect is the likeliest outcome for them**: report it as one, and do not read
+  a table of zeros as "loops do not matter".
+
+### 13.5 What these tasks do not say
+
+They were written to have loops in them. So they measure what a loop costs **when there is one**, and they say nothing
+about **how often real work has one**: that is a question about the work agents are given, and the 1 in 611 of
+`docs/next-tools.md` §10.2 is the only count of it there is, on tasks that could not contain a loop. Both numbers are
+needed to decide, and only the first can be had from this file.

@@ -31,14 +31,35 @@ class Checks(unittest.TestCase):
         by = {}
         for t in tasks.TASKS:
             by.setdefault(t.category, []).append(t.id)
-        self.assertEqual({k: len(v) for k, v in by.items()}, {"read": 9, "edit": 4, "safety": 6, "scope": 2})
-        self.assertEqual(len(tasks.BY_ID), 21)
+        self.assertEqual({k: len(v) for k, v in by.items()}, {"read": 9, "edit": 4, "safety": 6, "scope": 2, "many": 7})
+        self.assertEqual(len(tasks.BY_ID), 28)
         self.assertEqual(sorted(t.id for t in tasks.TASKS if t.pilot),
                          sorted(["r1-version", "r2-todos", "e1-append", "e2-rename", "s1a-stale-changed", "s1b-stale-same", "s2-link"]))
         # The tools cannot do the two outside their scope, by design; they can do all the rest.
         self.assertEqual(sorted(t.id for t in tasks.TASKS if t.tools is None), ["o1-regex", "o2-run"])
         # Every edit and safety task has its unsafe solution.
         self.assertEqual(sorted(t.id for t in tasks.TASKS if t.category in ("edit", "safety") and not t.bad), [])
+
+    def test_the_many_file_tasks_are_marked_and_need_the_calls_they_say(self):
+        # §13: a task is a loop (the tools take one file a call) or bulk (one call takes them all), and the reference solutions show it.
+        self.assertEqual(sorted(t.id for t in tasks.TASKS if t.shape), sorted(t.id for t in tasks.TASKS if t.category == "many"))
+        self.assertEqual({t.shape for t in tasks.TASKS if t.shape}, {"loop", "bulk"})
+        rows = {task: (shape, files, calls) for task, shape, files, calls in ab.floors(BIN)}
+        self.assertEqual(sorted(rows), sorted(t.id for t in tasks.TASKS if t.category == "many"))
+        for task, (shape, files, calls) in rows.items():
+            self.assertGreaterEqual(files, 8, task)
+            if shape == "bulk":
+                self.assertEqual(calls, 1, task)
+            else:
+                self.assertGreaterEqual(calls, 5, task)
+
+    def test_the_document_shows_the_calls_the_reference_solutions_make(self):
+        doc = (ROOT / "docs" / "agent-bench.md").read_text()
+        self.assertIn(ab.floors_table(BIN), doc, "docs/agent-bench.md section 13: run `agentbench.py floors` and paste it")
+
+    def test_every_many_file_task_that_writes_has_its_unsafe_solution(self):
+        writers = [t for t in tasks.TASKS if t.category == "many" and t.id not in ("m2-headings", "m6-hash-all")]
+        self.assertEqual(sorted(t.id for t in writers if not t.bad), [])
 
     def test_prompts_name_no_tool_flag_or_arm(self):
         for t in tasks.TASKS:

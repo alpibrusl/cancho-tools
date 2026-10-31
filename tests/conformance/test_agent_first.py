@@ -161,5 +161,37 @@ class McpAnnotations(unittest.TestCase):
         self.assertTrue(by["run"]["openWorldHint"])
 
 
+
+class TextModeKeepsWhatAnAgentNeeds(unittest.TestCase):
+    """`--format text` is the cheapest way for an agent to read a tool (no envelope, no schema, no meta), so a
+    refusal in text mode must keep what the JSON one carries that decides the next step: the hint, the repair as a
+    command line, the reason when there is none, and the detail (it holds, for example, the count that was found).
+    The extra lines are indented two spaces, so the first line of each error is still `tool: rule: message`."""
+
+    def test_a_refusal_in_text_mode_carries_its_hint_its_repair_and_its_detail(self):
+        for tool in EVERY:
+            if tool == "archive":
+                continue  # its --format text applies to a listing; a refusal is still a JSON record (see docs/archive.md)
+            result = run(tool, "--format", "text", "--no-such-flag")
+            text = (result.stderr + result.stdout).decode("utf-8")
+            lines = text.splitlines()
+            self.assertTrue(lines and lines[0].startswith("%s: args.unknown-flag: " % tool), "%s: %r" % (tool, text[:120]))
+            self.assertTrue(any(l.startswith("  hint: ") and len(l) > 10 for l in lines), "%s: no hint line: %r" % (tool, text[:300]))
+            self.assertTrue(any(l.startswith("  detail: {") for l in lines), "%s: no detail line: %r" % (tool, text[:300]))
+            for l in lines[1:]:
+                self.assertTrue(l.startswith("  ") or l.startswith(tool + ": "), "%s: a stray line: %r" % (tool, l))
+
+    def test_a_repair_is_a_command_line_in_text_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = pathlib.Path(d) / "a.txt"
+            path.write_text("one two two\n")
+            result = run("replace", "--root", d, "--old", "two", "--new", "2", "--format", "text", "a.txt")
+            text = (result.stderr + result.stdout).decode("utf-8")
+            self.assertIn("replace: precondition.count-mismatch: ", text)
+            self.assertIn("  no repair: ", text)
+            self.assertIn('"found":2', text)
+            self.assertEqual(result.status, 5)
+
+
 if __name__ == "__main__":
     unittest.main()

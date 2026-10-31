@@ -170,6 +170,7 @@
     "operand_index",
     "parent_of",
     "parse_nat",
+    "plain_byte",
     "prefix",
     "rename_unsupported",
     "repairable_in",
@@ -187,6 +188,7 @@
     "start",
     "starts_line",
     "starts_with",
+    "string_end",
     "suffix",
     "summary_in",
     "takes_value",
@@ -201,5 +203,5 @@
   ],
   "folded_operators": 29,
   "folded_calls": 0,
-  "functions": 248
+  "functions": 252
 }

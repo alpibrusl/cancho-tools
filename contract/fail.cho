@@ -37,6 +37,7 @@ module toolbox.fail;
 // repair by script and checks it succeeds and adds no such flag.
 
 import std.buffer;
+import std.bytes;
 import std.json;
 import std.vec;
 import toolbox.rules;
@@ -308,6 +309,104 @@ fn message_of[&w](doc: &w [byte]) -> [] &w [byte] {
     return doc[at..end];
 }
 
+// The index of the closing quote of the JSON string whose first byte is at
+// `at` (just past the opening quote); an escaped byte is skipped.
+fn string_end[&w](doc: &w [byte], at: int) -> [] int {
+    var end = at;
+    while end < len(doc) && int_of(doc[end]) != '"' {
+        if int_of(doc[end]) == '\\' {
+            end = end + 1;
+        }
+        end = end + 1;
+    }
+    if end > len(doc) {
+        return len(doc);
+    }
+    return end;
+}
+
+// A byte a shell word can hold without quoting.
+fn plain_byte(c: int) -> [] bool {
+    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '/' || c == ':' || c == '=' || c == '@' || c == '%' || c == '+' || c == ',' || c == '-';
+}
+
+// `word` as one shell word: as it is when every byte is plain, else in
+// single quotes (an agent can paste the line).
+fn put_word[&h, &w](heap: &!h Heap, t: buffer.Buffer, word: &w [byte]) -> [heap] buffer.Buffer {
+    var plain = len(word) > 0;
+    var k = 0;
+    while k < len(word) {
+        if !plain_byte(int_of(word[k])) {
+            plain = false;
+        }
+        k = k + 1;
+    }
+    if plain {
+        return buffer.append(heap, t, word);
+    }
+    var o = buffer.push(heap, t, byte_of('\''));
+    o = buffer.append(heap, o, word);
+    return buffer.push(heap, o, byte_of('\''));
+}
+
+// The lines `--format text` adds under `rule: message`, read back from the
+// finished error object: its hint, each repair as the command to run, the
+// reason when there is none, and the detail (at most 240 bytes). They are
+// indented two spaces, so a reader of the text can tell them from a new
+// error. The error carries them anyway; an agent that reads `--format text`
+// to spend fewer tokens would otherwise lose the repair and the count the
+// tool found.
+fn put_extra_lines[&h, &w](heap: &!h Heap, t: buffer.Buffer, doc: &w [byte]) -> [heap] buffer.Buffer {
+    var o = t;
+    let hint_at = bytes.find(doc, "\"hint\":\"");
+    if hint_at >= 0 {
+        let start = hint_at + 8;
+        o = buffer.append(heap, o, "  hint: ");
+        o = buffer.append(heap, o, doc[start..string_end(doc, start)]);
+        o = buffer.push(heap, o, byte_of(10));
+    }
+    var from = 0;
+    var more = true;
+    while more && from < len(doc) {
+        let rel = bytes.find(doc[from..len(doc)], "\"argv\":[");
+        if rel < 0 {
+            more = false;
+        } else {
+            var at = from + rel + 8;
+            o = buffer.append(heap, o, "  repair:");
+            while at < len(doc) && int_of(doc[at]) == '"' {
+                let e = string_end(doc, at + 1);
+                o = buffer.push(heap, o, byte_of(' '));
+                o = put_word(heap, o, doc[at + 1..e]);
+                at = e + 2;
+            }
+            o = buffer.push(heap, o, byte_of(10));
+            from = at;
+        }
+    }
+    let reason_at = bytes.find(doc, "\"reason\":\"");
+    if reason_at >= 0 {
+        let start = reason_at + 10;
+        o = buffer.append(heap, o, "  no repair: ");
+        o = buffer.append(heap, o, doc[start..string_end(doc, start)]);
+        o = buffer.push(heap, o, byte_of(10));
+    }
+    let detail_at = bytes.find(doc, "\"detail\":");
+    if detail_at >= 0 {
+        var start = detail_at + 9;
+        var end = len(doc) - 1;
+        if end - start > 240 {
+            end = start + 240;
+        }
+        if end - start > 2 {
+            o = buffer.append(heap, o, "  detail: ");
+            o = buffer.append(heap, o, doc[start..end]);
+            o = buffer.push(heap, o, byte_of(10));
+        }
+    }
+    return o;
+}
+
 // Close the detail and the error, and keep it.
 pub fn add[&h](heap: &!h Heap, e: Errors, w: json.Writer) -> [heap] Errors {
     let closed_detail = json.end_object(heap, w);
@@ -333,6 +432,7 @@ pub fn add[&h](heap: &!h Heap, e: Errors, w: json.Writer) -> [heap] Errors {
         t = buffer.append(heap, t, ": ");
         t = buffer.append(heap, t, message_of(doc));
         t = buffer.push(heap, t, byte_of(10));
+        t = put_extra_lines(heap, t, doc);
         if count == 0 {
             exit = rules.exit_of_in(extra, rule);
         }

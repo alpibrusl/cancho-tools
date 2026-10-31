@@ -300,6 +300,7 @@
     "ph_header",
     "ph_skip",
     "piece",
+    "plain_byte",
     "pos_slot_base",
     "pos_special",
     "probs_size",
@@ -346,6 +347,7 @@
     "starts_zero",
     "status",
     "stop",
+    "string_end",
     "summary_in",
     "table_size",
     "take",
@@ -385,5 +387,5 @@
   ],
   "folded_operators": 108,
   "folded_calls": 16,
-  "functions": 580
+  "functions": 584
 }

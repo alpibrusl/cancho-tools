@@ -309,7 +309,6 @@ fn message_of[&w](doc: &w [byte]) -> [] &w [byte] {
     return doc[at..end];
 }
 
-
 // The index of the closing quote of the JSON string whose first byte is at
 // `at` (just past the opening quote); an escaped byte is skipped.
 fn string_end[&w](doc: &w [byte], at: int) -> [] int {
@@ -328,7 +327,7 @@ fn string_end[&w](doc: &w [byte], at: int) -> [] int {
 
 // A byte a shell word can hold without quoting.
 fn plain_byte(c: int) -> [] bool {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '/' || c == ':' || c == '=' || c == '@' || c == '%' || c == '+' || c == ',' || c == '-';
+    return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '/' || c == ':' || c == '=' || c == '@' || c == '%' || c == '+' || c == ',' || c == '-';
 }
 
 // `word` as one shell word: as it is when every byte is plain, else in

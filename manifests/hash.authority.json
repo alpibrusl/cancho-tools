@@ -143,6 +143,7 @@
     "operand_count",
     "operand_index",
     "parse_nat",
+    "plain_byte",
     "repairable_in",
     "rotr64",
     "rule_of",
@@ -157,6 +158,7 @@
     "slash",
     "start",
     "starts_with",
+    "string_end",
     "summary_in",
     "takes_value",
     "tape_len",
@@ -169,5 +171,5 @@
   ],
   "folded_operators": 29,
   "folded_calls": 0,
-  "functions": 215
+  "functions": 219
 }

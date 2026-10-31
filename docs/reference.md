@@ -653,3 +653,20 @@ and what it found in the compiler, is in [`docs/history.md`](history.md).
 ## License
 
 EUPL-1.2, as cancho.
+
+## `--format text` as the cheap way for an agent to read a tool
+
+`--format text` leaves out the envelope (`ok`, `command`, `schema`, `meta`), so an answer costs a fraction of the tokens
+of the JSON one. A refusal in text mode keeps what decides the next step; each error is
+
+```
+replace: precondition.count-mismatch: --old occurs a different number of times than --expect says
+  hint: make --old longer so it is unique, or pass --expect with the count found
+  no repair: which occurrences to change is the caller's decision
+  detail: {"path":"a.txt","expected":1,"found":2}
+```
+
+The first line is `tool: rule: message` as before; the lines under it are indented two spaces: the `hint`, each `repair`
+as a command line to run (`  repair: replace --old two ...`, shell-quoted), the reason when there is no repair, and
+the `detail` (cut at 240 bytes). Match on the rule on the first line; the exit status is the same as in JSON mode
+(`tests/conformance/test_agent_first.py`, `TextModeKeepsWhatAnAgentNeeds`).

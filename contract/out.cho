@@ -70,8 +70,12 @@ pub fn say_errors[&i, &e](io: &!i Io, tool: &static [byte], errs: &e fail.Errors
         while end < len(text) && int_of(text[end]) != 10 {
             end = end + 1;
         }
-        io.error_all(io, tool);
-        io.error_all(io, ": ");
+        // A line indented two spaces continues the error above it (its hint,
+        // repair or detail): no tool prefix.
+        if !(end - at >= 2 && int_of(text[at]) == ' ' && int_of(text[at + 1]) == ' ') {
+            io.error_all(io, tool);
+            io.error_all(io, ": ");
+        }
         io.error_all(io, text[at..end]);
         io.error_all(io, "\n");
         at = end + 1;

@@ -122,3 +122,9 @@ std = true
 name = "tar"
 sources = ["contract", "tools/archive/tar.cho", "tests/tar_test.cho"]
 std = true
+
+[[bin]]
+name = "dialect"
+sources = ["contract", "tools/dialect", "generated/dialect"]
+std = true
+out = "build/dialect"

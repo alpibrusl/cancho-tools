@@ -255,6 +255,31 @@ SCHEMAS = {
         "stdout": TB, "stderr": TB,
         "milliseconds": NAT,
     })),
+    "dialect": document("dialect", {
+        "oneOf": [
+            obj({
+                "delimiter": TB, "delimiter_name": {"enum": ["comma", "semicolon", "tab", "pipe", "other"]},
+                "confidence": {"enum": ["high", "medium", "low", "none"]},
+                "also_fits": {"type": "array", "items": {"type": "string"}},
+                "fields": NAT, "rows": NAT, "ragged_rows": NAT, "blank_lines": NAT,
+                "line_ending": {"enum": ["lf", "crlf"]}, "byte_order_mark": {"type": "boolean"},
+                "columns": {"type": "array", "items": obj({
+                    "name": TB, "kind": {"enum": ["empty", "integer", "number", "date", "text"]},
+                    "decimal": {"oneOf": [{"type": "null"}, {"enum": ["dot", "comma", "mixed"]}]},
+                    "missing": NAT, "missing_marker": {"oneOf": [{"type": "null"}, TB]},
+                    "values": {"oneOf": [{"type": "null"}, {"type": "array", "items": TB}]},
+                })},
+                "text_missing_markers": {"type": "array", "items": obj({"column": TB, "marker": TB, "cells": NAT})},
+                "label_candidates": {"type": "array", "items": obj({"column": TB, "values": {"type": "array", "items": TB}, "map": TB})},
+                "normalize": TB,
+            }),
+            obj({
+                "delimiter_read": {"enum": ["comma", "semicolon", "tab", "pipe", "other"]},
+                "columns": NAT, "rows": NAT, "decimals_converted": NAT, "cells_blanked": NAT,
+                "cells_recoded": NAT, "bytes": NAT, "note": TB,
+            }),
+        ]
+    }),
     "tally": document("tally", obj({
         "total": NAT, "distinct": NAT, "skipped": NAT,
         "top": {"type": "array", "items": obj({"key": TB, "count": {"type": "integer", "minimum": 1}})},

@@ -157,6 +157,8 @@ def fixtures(fx):
     add("move", "path.bad-name", ["plain.txt", "a/b"])
     add("move", "precondition.hash-mismatch", ["--if-sha256", "0" * 64, "plain.txt", "moved.txt"])
     add("move", "conflict.exists", ["plain.txt", "crlf.txt"])
+    add("move", "args.conflict", ["--across", "--remove", "--if-sha256", "0" * 64, "plain.txt"])
+    add("move", "limit.input-too-large", ["--across", "--max-bytes", "3", "plain.txt", "sub/new.txt"])
     add("seek", "args.missing-operand", ["gamma"])
     add("write", "args.missing-operand", ["--create", "--stdin"])
     add("replace", "args.missing-operand", ["--old", "a", "--new", "b"])
@@ -186,6 +188,7 @@ def fixtures(fx):
     add("write", "args.bad-value", ["--max-diff-lines", "100001", "--create", "--stdin", "fresh.txt"])
     add("replace", "args.bad-value", ["--max-diff-lines", "100001", "--old", "alpha", "--new", "b", "plain.txt"])
     add("tally", "limit.too-many-keys", ["--max-keys", "1", "words.txt"])
+    add("seek", "limit.too-many-files", ["--recursive", "--max-files", "1", "gamma", "."])
 
     # Preconditions and conflicts.
     add("write", "precondition.required", ["--stdin", "plain.txt"])

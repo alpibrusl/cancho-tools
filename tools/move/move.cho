@@ -2,7 +2,7 @@ edition 7;
 
 // `move` -- rename a file or directory in place, and never over anything.
 //
-//     move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME
+//     move [--root DIR] [--if-sha256 HEX] [--dry-run] [--across [--max-bytes N]] [--format json|text] PATH NEWNAME
 //
 // `docs/next-tools.md` §4. The benchmark's `bash` transcripts show agents
 // reaching for `mv` and nothing here did what it does; `mv` is also blind in
@@ -10,9 +10,15 @@ edition 7;
 // word.
 //
 // * **One directory.** NEWNAME is one component (`path.bad-name` otherwise):
-//   `dir_rename_new` works on one directory handle, so a move to another
-//   directory is not something this tool can do, and it does not pretend to
-//   (cancho `docs/directory-handles.md`).
+//   `dir_rename_new` works on one directory handle, so a rename that crosses
+//   directories is not one atomic step this tool can take (cancho
+//   `docs/directory-handles.md`). `--across` is the honest substitute, not a
+//   pretence of that step: see the last bullet.
+//   `--across` (`docs/move-across.md`) puts a regular file into another
+//   directory in two steps that each keep the guarantees below: a copy made
+//   with the same no-replace create `write --create` uses, then the source
+//   renamed to its tombstone. If the second step fails both files exist and
+//   nothing is lost; any existing destination name is `conflict.exists`.
 // * **Never over anything, by the kernel.** An existing destination is
 //   `conflict.exists` and nothing changes. POSIX `renameat` would replace it
 //   silently, so the rename is `dir_rename_new` (Linux `renameat2` with
@@ -64,11 +70,11 @@ import toolbox.place;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
-    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;if-sha256||hex64|guard||the file's current content must hash to this SHA-256, and a retry that already landed then answers changed: false;remove||bool|guard||remove the file by renaming it to its tombstone .NAME.removed-HASH8 (needs --if-sha256, takes no NEWNAME, and nothing is deleted);dry-run||bool|guard||check everything and report planned_actions, exit 9, change nothing;format||choice:json/text|none|json|json for a program, text for a person";
+    return "root||path|root||resolve PATH relative to this directory and refuse paths outside it;if-sha256||hex64|guard||the file's current content must hash to this SHA-256, and a retry that already landed then answers changed: false;remove||bool|guard||remove the file by renaming it to its tombstone .NAME.removed-HASH8 (needs --if-sha256, takes no NEWNAME, and nothing is deleted);across|a|bool|none||NEWNAME is a path in any directory beneath --root, not one name beside the file. The file is copied there without ever replacing a name, then the source is renamed to its tombstone .NAME.removed-HASH8. It is not one atomic step, if the second fails both files exist and nothing is lost. A regular file only;max-bytes||nat|none|16777216|the largest file --across copies, a larger one is limit.input-too-large (ceiling 1073741824);dry-run||bool|guard||check everything and report planned_actions, exit 9, change nothing;format||choice:json/text|none|json|json for a program, text for a person";
 }
 
 fn tool() -> [] describe.Tool {
-    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name (the kernel refuses it, even if another process creates it mid-move); locked, atomic, idempotent with --if-sha256, with --dry-run. One directory: a move to another is not offered. With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked;io.rename-unsupported", extra_rules: "", limits: "", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
+    return describe.Tool { name: "move", version: "0.1.0", summary: "Rename a file or directory in place, never over an existing name (the kernel refuses it, even if another process creates it mid-move); locked, atomic, idempotent with --if-sha256, with --dry-run. By default one directory. With --across a file is copied into another directory without ever replacing a name, then the source is renamed to its tombstone (two steps, nothing lost if the second fails). With --remove and --if-sha256, a file is removed by renaming it to a tombstone, and nothing is deleted.", usage: "move [--root DIR] [--if-sha256 HEX] [--dry-run] [--format json|text] PATH NEWNAME | move --across [--max-bytes N] [--root DIR] [--if-sha256 HEX] [--dry-run] PATH DESTPATH | move --remove --if-sha256 HEX [--root DIR] [--dry-run] PATH", output: "document", schema: "move.v1", flags: flag_table(), operands: "PATH|path-write|1|1|the file or directory to rename;NEWNAME|none|0|1|its new name: one component, in the same directory, and not one that exists, and none with --remove", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.unexpected-value;args.duplicate-flag;args.required-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;path.bad-name;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;io.write-failed;precondition.hash-mismatch;conflict.exists;conflict.locked;io.rename-unsupported;args.conflict;limit.input-too-large", extra_rules: "", limits: "max-bytes|16777216|1073741824", reversibility: "irreversible-bounded", stdin: "no", guarantees: "deterministic;idempotent;atomic;dry_run" };
 }
 
 fn built() -> [] describe.Built {
@@ -149,7 +155,7 @@ fn tombstone[&h, &n, &x](heap: &!h Heap, leaf: &n [byte], hex: &x [byte]) -> [he
     return buffer.append(heap, b, hex[0..8]);
 }
 
-fn data[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byte], o: Outcome, sha: &x [byte]) -> [heap] buffer.Buffer {
+fn data[&h, &p, &t, &x, &k](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byte], o: Outcome, sha: &x [byte], tomb: &k [byte]) -> [heap] buffer.Buffer {
     var w = json.writer(heap, 192);
     w = json.begin_object(heap, w);
     w = json.put_key(heap, w, "path");
@@ -165,6 +171,10 @@ fn data[&h, &p, &t, &x](heap: &!h Heap, from_shown: &p [byte], to_shown: &t [byt
         w = json.put_null(heap, w);
     } else {
         w = json.put_string(heap, w, sha);
+    }
+    if len(tomb) > 0 {
+        w = json.put_key(heap, w, "tombstone");
+        w = text.put(heap, w, tomb);
     }
     w = json.end_object(heap, w);
     return json.finish(w);
@@ -474,6 +484,258 @@ fn beneath[&h, &g, &p, &f, &r, &s, &u, &t, &w](heap: &!h Heap, args: &g Args, pa
     }
 }
 
+// ---- --across: a file into another directory --------------------------------------------------------------
+
+// The copy was made but the source could not be renamed to its tombstone: both names exist, and nothing is lost.
+fn copied_not_removed[&h, &p, &z](heap: &!h Heap, e: fail.Errors, from_shown: &p [byte], to_shown: &z [byte], errno: int, hex: &static [byte]) -> [heap] fail.Errors {
+    var w = fail.open(heap, fail.io_rule(errno, true), "the file was copied, but the source could not be renamed to its tombstone; both exist and nothing is lost", "finish with: move --remove --if-sha256 <sha256> <path>");
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = fail.detail_text(heap, w, "path", from_shown);
+    w = fail.detail_text(heap, w, "to", to_shown);
+    w = fail.detail_int(heap, w, "errno", errno);
+    return fail.add(heap, e, w);
+}
+
+// Both directories are open (and, unless this is a dry run, both names locked): look, check, copy, tombstone.
+fn across_apply[&h, &g, &p, &sd, &dd, &s, &x, &q, &z](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, sdir: &sd Dir, name: &s [byte], ddir: &dd Dir, dname: &x [byte], from_shown: &q [byte], to_shown: &z [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+    let table = flag_table();
+    var e = errs;
+    var o = no_outcome();
+    var sha = buffer.empty(heap, 64);
+    let (src_kind, src_errno) = look(sdir, name);
+    if src_errno != 0 {
+        e = fail.io_error(heap, e, src_errno, true, from_shown);
+        return (e, o, sha);
+    }
+    if src_kind != dirs.kind_file() {
+        // Only a regular file is copied: a directory has no content to copy, a link is not followed, and opening a
+        // FIFO or a device would wait for a peer.
+        var why = 22;
+        if src_kind == dirs.kind_directory() {
+            why = 21;
+        } else if src_kind == dirs.kind_link() {
+            why = 40;
+        }
+        e = fail.io_error(heap, e, why, false, from_shown);
+        return (e, o, sha);
+    }
+    let (content, errno, too_big) = atomic.read_all(heap, dir_open_read(sdir, name), cli.nat(args, parsed, table, "max-bytes"), buffer.empty(heap, 4096));
+    if errno != 0 {
+        e = fail.io_error(heap, e, errno, false, from_shown);
+        buffer.drop(heap, content);
+        return (e, o, sha);
+    }
+    if too_big {
+        e = fail.simple(heap, e, "limit.input-too-large", "the file is larger than --max-bytes, so --across did not copy it", "raise --max-bytes, up to 1073741824, or move a smaller file", "", "");
+        buffer.drop(heap, content);
+        return (e, o, sha);
+    }
+    var hex = buffer.empty(heap, 64);
+    borrow content as &cb in {
+        buffer.drop(heap, hex);
+        hex = atomic.sha256_hex(heap, buffer.bytes(cb));
+    }
+    buffer.drop(heap, sha);
+    sha = buffer.empty(heap, 64);
+    borrow hex as &hb in {
+        sha = buffer.append(heap, sha, buffer.bytes(hb));
+    }
+    var proceed = true;
+    borrow hex as &hb in {
+        if cli.has(parsed, table, "if-sha256") && !bytes.equal(buffer.bytes(hb), cli.text(args, parsed, table, "if-sha256")) {
+            var w = fail.open(heap, "precondition.hash-mismatch", "the file does not hold the content --if-sha256 named", "re-read the file, then decide");
+            w = fail.repair_none(heap, w, "the file changed since it was read; re-read, then decide");
+            w = fail.detail_open(heap, w);
+            w = fail.detail_text(heap, w, "path", from_shown);
+            w = fail.detail_str(heap, w, "expected_sha256", cli.text(args, parsed, table, "if-sha256"));
+            w = fail.detail_str(heap, w, "actual_sha256", buffer.bytes(hb));
+            e = fail.add(heap, e, w);
+            proceed = false;
+        }
+        // The tombstone name must fit before anything is written.
+        if proceed {
+            let tomb = tombstone(heap, name, buffer.bytes(hb));
+            borrow tomb as &tb in {
+                if bad_name(buffer.bytes(tb)) {
+                    e = name_too_long(heap, e, from_shown);
+                    proceed = false;
+                }
+            }
+            buffer.drop(heap, tomb);
+        }
+    }
+    // Any existing name at the destination is a conflict, whatever it holds: there is no resuming a copy, because a
+    // file moved onto itself would then be tombstoned.
+    if proceed {
+        let (dst_kind, dst_errno) = look(ddir, dname);
+        if dst_errno == 0 {
+            e = name_taken(heap, e, from_shown, to_shown);
+            proceed = false;
+        } else if dst_errno != 2 {
+            e = fail.io_error(heap, e, dst_errno, true, to_shown);
+            proceed = false;
+        }
+    }
+    if proceed && cli.has(parsed, table, "dry-run") {
+        o = Outcome { changed: false, planned: true, found: dirs.kind_file() };
+        proceed = false;
+    }
+    if proceed {
+        var copied = false;
+        borrow hex as &hb in {
+            borrow content as &cb in {
+                let temp = atomic.temp_path(heap, dname, buffer.bytes(hb));
+                borrow temp as &tp in {
+                    let (made, step) = atomic.create(ddir, dname, buffer.bytes(tp), buffer.bytes(cb));
+                    if made == 17 {
+                        e = name_taken(heap, e, from_shown, to_shown);
+                    } else if made == 95 || made == 45 {
+                        e = rename_unsupported(heap, e, from_shown, to_shown, made);
+                    } else if made != 0 {
+                        var w = fail.open(heap, fail.io_rule(made, true), "the copy could not be made; nothing was moved", "nothing changed, so the same command can be retried once the cause (permissions, a read-only filesystem, no space) is fixed");
+                        w = fail.no_repair(heap, w);
+                        w = fail.detail_open(heap, w);
+                        w = fail.detail_text(heap, w, "path", from_shown);
+                        w = fail.detail_text(heap, w, "to", to_shown);
+                        w = fail.detail_int(heap, w, "errno", made);
+                        e = fail.add(heap, e, w);
+                    } else {
+                        copied = true;
+                    }
+                }
+                buffer.drop(heap, temp);
+            }
+        }
+        if copied {
+            var failed = 0;
+            borrow hex as &hb in {
+                let tomb = tombstone(heap, name, buffer.bytes(hb));
+                borrow tomb as &tb in {
+                    match dir_rename_new(sdir, name, buffer.bytes(tb)) {
+                        Done::Ok(n) => {
+                        }
+                        Done::Failed(reason) => {
+                            failed = reason;
+                            if failed == 0 {
+                                failed = 5;
+                            }
+                        }
+                    }
+                }
+                buffer.drop(heap, tomb);
+            }
+            if failed != 0 {
+                e = copied_not_removed(heap, e, from_shown, to_shown, failed, "");
+            } else {
+                atomic.sync_parent(sdir);
+                o = Outcome { changed: true, planned: false, found: dirs.kind_file() };
+            }
+        }
+    }
+    buffer.drop(heap, content);
+    buffer.drop(heap, hex);
+    return (e, o, sha);
+}
+
+// Lock both names (the source's and the destination's, each in its own directory) and apply.
+fn across_locked[&h, &g, &p, &sd, &dd, &s, &x, &q, &z](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, sdir: &sd Dir, name: &s [byte], ddir: &dd Dir, dname: &x [byte], from_shown: &q [byte], to_shown: &z [byte], errs: fail.Errors) -> [heap, args, dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+    if cli.has(parsed, flag_table(), "dry-run") {
+        return across_apply(heap, args, parsed, sdir, name, ddir, dname, from_shown, to_shown, errs);
+    }
+    var e = errs;
+    var o = no_outcome();
+    var sha = buffer.empty(heap, 1);
+    match atomic.acquire(heap, sdir, name) {
+        Opened::Failed(reason) => {
+            if atomic.would_block(reason) {
+                e = conflict_locked(heap, e, from_shown);
+            } else if reason == 36 || reason == 22 {
+                e = name_too_long(heap, e, from_shown);
+            } else {
+                e = fail.io_error(heap, e, reason, true, from_shown);
+            }
+        }
+        Opened::Ok(source_lock) => {
+            match atomic.acquire(heap, ddir, dname) {
+                Opened::Failed(reason) => {
+                    if atomic.would_block(reason) {
+                        e = conflict_locked(heap, e, to_shown);
+                    } else if reason == 36 || reason == 22 {
+                        e = name_too_long(heap, e, to_shown);
+                    } else {
+                        e = fail.io_error(heap, e, reason, true, to_shown);
+                    }
+                }
+                Opened::Ok(target_lock) => {
+                    buffer.drop(heap, sha);
+                    let (applied, outcome, digest) = across_apply(heap, args, parsed, sdir, name, ddir, dname, from_shown, to_shown, e);
+                    e = applied;
+                    o = outcome;
+                    sha = digest;
+                    file_close(target_lock);
+                }
+            }
+            file_close(source_lock);
+        }
+    }
+    return (e, o, sha);
+}
+
+// Open the two directories beneath --root (no link followed), then lock and apply.
+fn across_beneath[&h, &g, &p, &f, &r, &s, &u, &t, &w](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), root: &r [byte], from_full: &s [byte], from_shown: &u [byte], to_full: &t [byte], to_shown: &w [byte], errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write] (fail.Errors, Outcome, buffer.Buffer) {
+    var e = errs;
+    let name = place.leaf(from_full);
+    let dname = place.leaf(to_full);
+    if place.is_directory_name(name) {
+        e = fail.io_error(heap, e, 21, true, from_shown);
+        return (e, no_outcome(), buffer.empty(heap, 1));
+    }
+    if bad_name(dname) {
+        var w = fail.open(heap, "path.bad-name", "the destination's last component must be a name of 1 to 243 bytes, not . or .., not a lock sidecar", "give DESTPATH as the directory and the new file name, for example archive/notes.txt");
+        w = fail.no_repair(heap, w);
+        w = fail.detail_open(heap, w);
+        w = fail.detail_text(heap, w, "newname", dname);
+        e = fail.add(heap, e, w);
+        return (e, no_outcome(), buffer.empty(heap, 1));
+    }
+    if bytes.equal(from_full, to_full) {
+        // The same name: already where it is to be, and nothing is touched.
+        return (e, Outcome { changed: false, planned: false, found: dirs.kind_file() }, buffer.empty(heap, 1));
+    }
+    match place.parent(fs, root, from_shown, from_full) {
+        DirOpened::Failed(reason) => {
+            e = fail.io_error(heap, e, reason, true, from_shown);
+            return (e, no_outcome(), buffer.empty(heap, 1));
+        }
+        DirOpened::Ok(src_opened) => {
+            var sdir = src_opened;
+            var o = no_outcome();
+            var sha = buffer.empty(heap, 1);
+            match place.parent(fs, root, to_shown, to_full) {
+                DirOpened::Failed(reason) => {
+                    e = fail.io_error(heap, e, reason, true, to_shown);
+                }
+                DirOpened::Ok(dst_opened) => {
+                    var ddir = dst_opened;
+                    borrow sdir as &sdr in {
+                        borrow ddir as &ddr in {
+                            buffer.drop(heap, sha);
+                            let (applied, outcome, digest) = across_locked(heap, args, parsed, sdr, name, ddr, dname, from_shown, to_shown, e);
+                            e = applied;
+                            o = outcome;
+                            sha = digest;
+                        }
+                    }
+                    dir_close(ddir);
+                }
+            }
+            dir_close(sdir);
+            return (e, o, sha);
+        }
+    }
+}
+
 fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, dir_write, file_write, io_write, err_write] int {
     let table = flag_table();
     var e = errs;
@@ -481,8 +743,11 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     let (root, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
     e = after_root;
     let removing = cli.has(parsed, table, "remove");
+    let across = cli.has(parsed, table, "across");
     var operands_ok = false;
-    if removing {
+    if across && removing {
+        e = flag_problem(heap, e, "args.conflict", "--across and --remove exclude each other", "--across copies a file to another directory, --remove tombstones one in place", "--across --remove");
+    } else if removing {
         if !cli.has(parsed, table, "if-sha256") {
             e = flag_problem(heap, e, "args.required-flag", "--remove needs --if-sha256: a file is removed only as the caller read it", "read the file's hash first, then pass it", "--if-sha256");
         } else if cli.operand_count(parsed) < 1 {
@@ -500,10 +765,10 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
         operands_ok = true;
     }
     var newname: &static [byte] = "";
-    if operands_ok && !removing {
+    if operands_ok && !removing && !across {
         newname = cli.operand(args, parsed, 1);
         if bad_name(newname) {
-            var w = fail.open(heap, "path.bad-name", "NEWNAME must be one name in the same directory: 1 to 243 bytes, not . or .., no /, not a lock sidecar", "give a bare name; to move to another directory is not something this tool does");
+            var w = fail.open(heap, "path.bad-name", "NEWNAME must be one name in the same directory: 1 to 243 bytes, not . or .., no /, not a lock sidecar", "give a bare name, or add --across to put the file in another directory: move --across PATH DIR/NAME");
             w = fail.no_repair(heap, w);
             w = fail.detail_open(heap, w);
             w = fail.detail_text(heap, w, "newname", newname);
@@ -515,6 +780,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     var o = no_outcome();
     var from_copy = buffer.empty(heap, 64);
     var to_copy = buffer.empty(heap, 64);
+    var tomb_shown = buffer.empty(heap, 1);
     var sha = buffer.empty(heap, 1);
     var refused = false;
     borrow e as &er in {
@@ -526,7 +792,31 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
             e = checked;
             borrow target as &tp in {
                 from_copy = buffer.append(heap, from_copy, path.shown(tp));
-                if path.ok(tp) {
+                if path.ok(tp) && across {
+                    let (target2, checked2) = path.operand(heap, args, buffer.bytes(rr), cli.operand_index(parsed, 1), e);
+                    e = checked2;
+                    borrow target2 as &tp2 in {
+                        to_copy = buffer.append(heap, to_copy, path.shown(tp2));
+                        if path.ok(tp2) {
+                            let (applied, outcome, digest) = across_beneath(heap, args, parsed, fs, buffer.bytes(rr), path.full(tp), path.shown(tp), path.full(tp2), path.shown(tp2), e);
+                            e = applied;
+                            o = outcome;
+                            buffer.drop(heap, sha);
+                            sha = digest;
+                            if o.changed {
+                                borrow sha as &shb in {
+                                    let tn = tombstone(heap, place.leaf(path.full(tp)), buffer.bytes(shb));
+                                    borrow tn as &tnb in {
+                                        buffer.drop(heap, tomb_shown);
+                                        tomb_shown = destination(heap, path.shown(tp), buffer.bytes(tnb));
+                                    }
+                                    buffer.drop(heap, tn);
+                                }
+                            }
+                        }
+                    }
+                    path.drop(heap, target2);
+                } else if path.ok(tp) {
                     // The name to rename to: NEWNAME, or the tombstone `--remove` derives.
                     var chosen = buffer.empty(heap, len(newname) + 1);
                     var fits = true;
@@ -573,7 +863,9 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                     var line = buffer.empty(heap, 64);
                     if fail.count(er) == 0 {
                         buffer.drop(heap, payload);
-                        payload = data(heap, buffer.bytes(fc), buffer.bytes(tc), o, buffer.bytes(sh));
+                        borrow tomb_shown as &tsb in {
+                            payload = data(heap, buffer.bytes(fc), buffer.bytes(tc), o, buffer.bytes(sh), buffer.bytes(tsb));
+                        }
                         if cli.has(parsed, table, "dry-run") {
                             buffer.drop(heap, extra);
                             var op: &static [byte] = "move";
@@ -586,6 +878,8 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
                         if o.changed {
                             if removing {
                                 line = buffer.append(heap, line, "removed (tombstoned) ");
+                            } else if across {
+                                line = buffer.append(heap, line, "copied and tombstoned the source, moved ");
                             } else {
                                 line = buffer.append(heap, line, "moved ");
                             }
@@ -623,6 +917,7 @@ fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed
     }
     buffer.drop(heap, from_copy);
     buffer.drop(heap, to_copy);
+    buffer.drop(heap, tomb_shown);
     buffer.drop(heap, sha);
     fail.drop(heap, e);
     return status;

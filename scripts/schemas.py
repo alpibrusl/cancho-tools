@@ -149,7 +149,8 @@ SCHEMAS = {
     }, {
         "files": NAT, "matches": NAT, "errors": NAT, "truncated": {"type": "boolean"},
         "next": {"oneOf": [{"type": "null"}, obj({"skip": NAT})]},
-    }),
+        "skipped": NAT,
+    }, optional=("skipped",)),
     "archive": stream("archive", {
         "entry": obj({"type": {"const": "entry"}, "path": TB,
                       "kind": {"enum": ["file", "directory", "hardlink", "symlink", "device", "fifo", "sparse", "other"]},
@@ -194,7 +195,8 @@ SCHEMAS = {
         "path": TB, "to": TB, "changed": {"type": "boolean"},
         "kind": {"enum": ["file", "directory", "link", "other"]},
         "sha256": {"oneOf": [{"type": "null"}, HEX64]},
-    }), {
+        "tombstone": TB,
+    }, required=["path", "to", "changed", "kind", "sha256"]), {
         "dry_run": {"const": True},
         "planned_actions": {"type": "array", "items": obj({
             "op": {"enum": ["move", "remove"]}, "path": TB, "to": TB,

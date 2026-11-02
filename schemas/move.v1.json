@@ -302,6 +302,9 @@
               "pattern": "^[0-9a-f]{64}$"
             }
           ]
+        },
+        "tombstone": {
+          "$ref": "#/$defs/text_or_bytes"
         }
       },
       "required": [

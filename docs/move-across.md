@@ -4,9 +4,11 @@
 
 `move PATH NEWNAME` renames in place and refuses a NEWNAME with a `/` (`path.bad-name`): `dir_rename_new` works on one
 directory handle. In an agent run where the cancho tools were the only file tools, "move everything in `inbox/` into
-`archive/`" had no single call. The agents fetched the existing destination's hash and overwrote it with
-`write --if-sha256`, on purpose, in 4 of 4 runs: the guard made the overwrite explicit, it did not stop it, because there
-was no safe way to do what was asked.
+`archive/`" had no single call. In the two valid runs where only these tools were available, the agents fetched the
+existing destination's hash and overwrote it with `write --if-sha256`, on purpose (one said so in its answer, one did
+not); in the two runs that also had Bash, they tried `move`, found it could not cross, and fell back to `mv`, which
+overwrote silently. Four runs is a pilot, not a rate. The point is that the guard made the overwrite explicit and did
+not stop it, because there was no safe way to do what was asked.
 
 ## What it does
 

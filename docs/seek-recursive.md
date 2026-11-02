@@ -2,9 +2,10 @@
 
 ## Why
 
-`seek PATTERN FILE...` took files only. A directory was `io.is-a-directory`. An agent given the tool as its only
-file search (the `mcp` arm of an agent run, 26 `seek` calls and 7 `list` calls of 40) could not search a tree of 6,000
-files and spent $0.37 where `grep -r` cost $0.016. The tool had no way to say "everything under here".
+`seek PATTERN FILE...` took files only. A directory was `io.is-a-directory`. In an agent run where the tools were the only
+file tools, the two valid runs on a 6,000-file tree made about 40 calls each (one in the run read: 26 `seek` and 7 `list`),
+neither found the answer, and each cost about $0.37, where an agent with `grep -r` answered in a few calls for about
+$0.016. Two runs is a pilot, not a rate. The tool had no way to say "everything under here".
 
 ## What it does
 

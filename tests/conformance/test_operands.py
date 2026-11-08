@@ -28,6 +28,7 @@ SETUP = {
     "tally": ([], ["words.txt"]),
     "hash": ([], ["plain.txt"]),
     "list": ([], ["sub"]),
+    "dialect": ([], ["sniff", "fields.csv"]),
     # Two operands, and a dry run so that none of the counts moves a file.
     "move": (["--dry-run"], ["plain.txt", "moved.txt"]),
 }

@@ -1,0 +1,1280 @@
+edition 5;
+
+// `dialect` -- say what the dialect of a delimited text file is, and rewrite
+// the file into the one dialect the other tools read: comma separated, dot
+// decimals, empty cells for missing values, LF line ends.
+//
+//     dialect [--root DIR] [--sample-rows N] [--max-bytes N] [--max-columns N]
+//             [--format json|text] sniff FILE
+//     dialect [--root DIR] [--delimiter D] [--decimal auto|.|,] [--na LIST]
+//             [--map COLUMN=a:1/b:0] [--max-bytes N] [--max-columns N]
+//             --format text normalize FILE > clean.csv
+//
+// An export of unknown origin is the first thing an agent meets, and the
+// questions about it are always the same: which byte separates the fields,
+// which cells are numbers and with which decimal mark, which cells mean
+// "missing", which columns hold two values (a label to predict). `sniff`
+// answers them in one call and prints the `normalize` line to run; it
+// states how sure it is and which other delimiters fit, and it never edits
+// anything. `normalize` is the same reading, written out. With
+// `--format text` the answer on standard output is the cleaned CSV itself;
+// with `--format json` it is a report of what was changed and no CSV.
+//
+// * The file is read whole, up to `--max-bytes` (default 64 MiB): the
+//   decision about a column needs every cell of it. Memory is the file, a
+//   column profile of a fixed size, and the cleaned copy.
+// * A field may be quoted (RFC 4180, a quote doubled inside), but a quoted
+//   field may not hold a line break: a record is a line. A line with a quote
+//   that does not close is `dialect.bad-quote`.
+// * A row whose field count is not the header's is `dialect.ragged-row`; no
+//   cleaned file is written past it, so a cleaned file is always rectangular.
+// * A column is decimal-comma when every number in it is written with a
+//   comma, and decimal-dot when every one is written with a dot. A column that
+//   has both is `dialect.mixed-decimal`: the tool does not guess which one is
+//   the thousands mark. There is no thousands mark: `1,234` is 1.234.
+// * Missing markers (NA, N/A, NaN, null, None, ?, - and the like) are blanked
+//   only in a column that is numeric apart from them. In a text column they
+//   are blanked only when `--na` names them: "NA" may be a country.
+// * A label column is recoded only with `--map`; a value the map does not
+//   name is `dialect.unmapped-value`, never passed through.
+
+import std.buffer;
+import std.bytes;
+import std.json;
+import toolbox.built;
+import toolbox.cli;
+import toolbox.describe;
+import toolbox.fail;
+import toolbox.limit;
+import toolbox.out;
+import toolbox.path;
+import toolbox.place;
+import toolbox.text;
+import toolbox.atomic;
+
+fn flag_table() -> [] &static [byte] {
+    return "root||path|root||resolve FILE relative to this directory and refuse paths outside it;delimiter|d|text|none|auto|the byte that separates fields: auto, a comma, a semicolon, tab, pipe, or one other byte (normalize only, and sniff always finds it);decimal||text|none|auto|the decimal mark of the numbers: auto (decided column by column), a dot or a comma (normalize only, and a comma converts every number written with one);na||any|none||markers to blank in every column, separated by commas, beside the ones blanked in numeric columns (normalize only);map||text|none||recode one column: COLUMN=value:code/value:code, for example outcome=lost:0/won:1 (normalize only);sample-rows||nat|none|1000|how many rows sniff reads to find the delimiter (ceiling 1000000);max-bytes||nat|none|67108864|the largest file read, a larger one is limit.input-too-large (ceiling 1073741824);max-columns||nat|none|256|the most columns, one more is limit.too-many-columns (ceiling 4096);format||choice:json/text|none|json|json for a program, text is the answer in plain words for sniff and the cleaned CSV for normalize";
+}
+
+// The rules this tool has beside the shared catalogue: tag, exit code, whether a repair exists, summary.
+fn extra() -> [] &static [byte] {
+    return "limit.too-many-columns|8|never|the header holds more columns than --max-columns;dialect.empty-file|8|never|the file has no line to read;dialect.bad-quote|8|never|a quote in a row does not close or is followed by text;dialect.ragged-row|8|never|a row has a different number of fields than the header;dialect.mixed-decimal|8|never|a column has numbers written with a dot and numbers written with a comma;dialect.unmapped-value|8|never|a value in the --map column has no code in the map;dialect.map-column-not-found|8|never|the column --map names is not in the header";
+}
+
+fn tool() -> [] describe.Tool {
+    return describe.Tool { name: "dialect", version: "0.1.0", summary: "Find the delimiter, decimal marks, missing markers, column kinds and two-valued columns of a delimited text file, and rewrite it as plain comma separated CSV; reads one bounded file, writes nothing.", usage: "dialect [--root DIR] [--delimiter D] [--decimal auto|.|,] [--na LIST] [--map COLUMN=a:1/b:0] [--sample-rows N] [--max-bytes N] [--max-columns N] [--format json|text] VERB FILE", output: "document", schema: "dialect.v1", flags: flag_table(), operands: "VERB|none|1|1|sniff to describe the file, normalize to rewrite it;FILE|path-read|1|1|the delimited text file", rules: "args.unknown-flag;args.missing-value;args.bad-value;args.duplicate-flag;args.missing-operand;args.too-many-operands;path.empty;path.dotdot;path.absolute;path.outside-root;path.too-long;path.symlink;io.not-found;io.not-a-directory;io.is-a-directory;io.permission-denied;io.read-failed;limit.input-too-large;limit.too-many-columns;dialect.empty-file;dialect.bad-quote;dialect.ragged-row;dialect.mixed-decimal;dialect.unmapped-value;dialect.map-column-not-found", extra_rules: extra(), limits: "sample-rows|1000|1000000;max-bytes|67108864|1073741824;max-columns|256|4096", reversibility: "reversible-cheap", stdin: "never", guarantees: "deterministic;idempotent" };
+}
+
+fn built() -> [] describe.Built {
+    return describe.Built { authority: built.authority(), schema: built.schema(), compiler: built.compiler() };
+}
+
+fn flag_problem[&h](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], flags: &static [byte]) -> [heap] fail.Errors {
+    var w = fail.open(heap, rule, message, hint);
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, "flags");
+    w = json.put_string(heap, w, flags);
+    return fail.add(heap, e, w);
+}
+
+// The shape of one problem with the data: a rule, what is wrong, how to go on,
+// and one number and one text that say where.
+fn data_problem[&h, &t](heap: &!h Heap, e: fail.Errors, rule: &static [byte], message: &static [byte], hint: &static [byte], key: &static [byte], n: int, name: &static [byte], value: &t [byte]) -> [heap] fail.Errors {
+    var w = fail.open_in(heap, extra(), rule, message, hint);
+    w = fail.no_repair(heap, w);
+    w = fail.detail_open(heap, w);
+    w = json.put_key(heap, w, key);
+    w = json.put_int(heap, w, n);
+    w = json.put_key(heap, w, name);
+    w = text.put(heap, w, value);
+    return fail.add(heap, e, w);
+}
+
+// ---- the grammar of a line --------------------------------------------------
+
+// Per column, 24 counters in one flat array:
+// 0 cells, 1 empty, 2 integers, 3 dot decimals, 4 comma decimals, 5 dates,
+// 6 missing markers, 7 other text, 8 distinct values held (5 = more than 4),
+// 9..16 the four values held as (offset into the file, length),
+// 17 offset and 18 length of the first missing marker, 19 quoted cells.
+fn stride() -> [] int {
+    return 24;
+}
+
+// The next line of `data` from `pos`: its start, its end (the LF and a CR before it dropped) and where the
+// one after starts. A start of -1 says there is none.
+fn next_line[&d](data: &d [byte], pos: int) -> [] (int, int, int) {
+    let n = len(data);
+    if pos >= n {
+        return (0 - 1, 0, pos);
+    }
+    let k = index_of_byte(data[pos..n], byte_of(10));
+    var e = n;
+    var after = n;
+    if k >= 0 {
+        e = pos + k;
+        after = e + 1;
+    }
+    var stop = e;
+    if stop > pos && int_of(data[stop - 1]) == 13 {
+        stop = stop - 1;
+    }
+    return (pos, stop, after);
+}
+
+// The fields of one line: for field `n` its start, its end and whether it was quoted, in `cells` (three ints
+// each, the first `room` fields only; all are counted). Start and end exclude the quotes of a quoted field,
+// and a doubled quote inside stays doubled. Answers the count and whether a quote did not close properly.
+fn split_line[&l, &c](line: &l [byte], delim: int, cells: &!c [int], room: int) -> [] (int, bool) {
+    let end = len(line);
+    var p = 0;
+    var n = 0;
+    var bad = false;
+    var going = true;
+    while going {
+        var first = p;
+        var last = end;
+        var quoted = 0;
+        var next = end + 1;
+        if p < end && int_of(line[p]) == 34 {
+            var q = p + 1;
+            var closed = false;
+            while !closed && !bad {
+                if q >= end {
+                    bad = true;
+                } else if int_of(line[q]) == 34 {
+                    if q + 1 < end && int_of(line[q + 1]) == 34 {
+                        q = q + 2;
+                    } else {
+                        closed = true;
+                        first = p + 1;
+                        last = q;
+                        quoted = 1;
+                        if q + 1 == end {
+                            next = end + 1;
+                        } else if int_of(line[q + 1]) == delim {
+                            next = q + 2;
+                        } else {
+                            bad = true;
+                        }
+                    }
+                } else {
+                    q = q + 1;
+                }
+            }
+        } else {
+            var q = p;
+            while q < end && int_of(line[q]) != delim {
+                q = q + 1;
+            }
+            if q < end {
+                last = q;
+                next = q + 1;
+            }
+        }
+        if bad {
+            going = false;
+        } else {
+            if n < room {
+                cells[3 * n] = first;
+                cells[3 * n + 1] = last;
+                cells[3 * n + 2] = quoted;
+            }
+            n = n + 1;
+            if next > end {
+                going = false;
+            } else {
+                p = next;
+            }
+        }
+    }
+    return (n, bad);
+}
+
+fn digit_at[&s](s: &s [byte], i: int) -> [] bool {
+    return bytes.is_digit(int_of(s[i]));
+}
+
+fn known_marker[&s](s: &s [byte]) -> [] bool {
+    return bytes.equal(s, "NA") || bytes.equal(s, "N/A") || bytes.equal(s, "#N/A") || bytes.equal(s, "NaN") || bytes.equal(s, "nan") || bytes.equal(s, "NULL") || bytes.equal(s, "null") || bytes.equal(s, "None") || bytes.equal(s, "?") || bytes.equal(s, "-") || bytes.equal(s, "n/a");
+}
+
+// What one cell is: 0 empty, 1 integer, 2 number with a dot, 3 number with a comma, 4 date YYYY-MM-DD,
+// 5 a missing marker, 6 anything else.
+fn classify[&s](s: &s [byte]) -> [] int {
+    let n = len(s);
+    if n == 0 {
+        return 0;
+    }
+    var i = 0;
+    if int_of(s[0]) == 45 || int_of(s[0]) == 43 {
+        i = 1;
+    }
+    var whole = 0;
+    while i < n && digit_at(s, i) {
+        whole = whole + 1;
+        i = i + 1;
+    }
+    if whole > 0 && i == n {
+        return 1;
+    }
+    if whole > 0 && i < n && (int_of(s[i]) == 46 || int_of(s[i]) == 44) {
+        let mark = int_of(s[i]);
+        i = i + 1;
+        var frac = 0;
+        while i < n && digit_at(s, i) {
+            frac = frac + 1;
+            i = i + 1;
+        }
+        if frac > 0 && i == n {
+            if mark == 46 {
+                return 2;
+            }
+            return 3;
+        }
+    }
+    if n == 10 && digit_at(s, 0) && digit_at(s, 1) && digit_at(s, 2) && digit_at(s, 3) && int_of(s[4]) == 45 && digit_at(s, 5) && digit_at(s, 6) && int_of(s[7]) == 45 && digit_at(s, 8) && digit_at(s, 9) {
+        return 4;
+    }
+    if known_marker(s) {
+        return 5;
+    }
+    return 6;
+}
+
+// Count one cell of column `col` into the profile. `at` is the offset of the cell in the file.
+fn count_cell[&d, &s](data: &d [byte], at: int, size: int, quoted: int, col: int, st: &!s [int]) -> [] int {
+    let base = col * stride();
+    let cell = data[at..at + size];
+    let kind = classify(cell);
+    st[base] = st[base] + 1;
+    st[base + 19] = st[base + 19] + quoted;
+    if kind == 0 {
+        st[base + 1] = st[base + 1] + 1;
+        return 0;
+    }
+    if kind == 1 {
+        st[base + 2] = st[base + 2] + 1;
+    } else if kind == 2 {
+        st[base + 3] = st[base + 3] + 1;
+    } else if kind == 3 {
+        st[base + 4] = st[base + 4] + 1;
+    } else if kind == 4 {
+        st[base + 5] = st[base + 5] + 1;
+    } else if kind == 5 {
+        if st[base + 6] == 0 {
+            st[base + 17] = at;
+            st[base + 18] = size;
+        }
+        st[base + 6] = st[base + 6] + 1;
+        return 0;
+    } else {
+        st[base + 7] = st[base + 7] + 1;
+    }
+    // Up to four distinct values are kept, to say which columns hold a label.
+    let held = st[base + 8];
+    var seen = false;
+    var k = 0;
+    while k < held && k < 4 {
+        let vs = st[base + 9 + 2 * k];
+        let vl = st[base + 10 + 2 * k];
+        if bytes.equal(data[vs..vs + vl], cell) {
+            seen = true;
+        }
+        k = k + 1;
+    }
+    if !seen {
+        if held < 4 {
+            st[base + 9 + 2 * held] = at;
+            st[base + 10 + 2 * held] = size;
+            st[base + 8] = held + 1;
+        } else {
+            st[base + 8] = 5;
+        }
+    }
+    return 0;
+}
+
+// Profile the rows of `data` from `pos`, at most `limit` of them (0 for all), with the fields of `delim`. Rows
+// that do not hold `ncols` fields are counted and not profiled. Answers the rows profiled, the ragged rows
+// and the blank lines.
+fn profile[&d, &s, &c](data: &d [byte], pos: int, delim: int, ncols: int, limit: int, st: &!s [int], cells: &!c [int]) -> [] (int, int, int) {
+    var p = pos;
+    var rows = 0;
+    var ragged = 0;
+    var blank = 0;
+    var going = true;
+    while going {
+        let (ls, le, after) = next_line(data, p);
+        p = after;
+        if ls < 0 {
+            going = false;
+        } else if le == ls {
+            blank = blank + 1;
+        } else {
+            let (n, bad) = split_line(data[ls..le], delim, cells, ncols);
+            if bad || n != ncols {
+                ragged = ragged + 1;
+            } else {
+                var col = 0;
+                while col < ncols {
+                    let first = ls + cells[3 * col];
+                    let last = ls + cells[3 * col + 1];
+                    count_cell(data, first, last - first, cells[3 * col + 2], col, st);
+                    col = col + 1;
+                }
+                rows = rows + 1;
+            }
+            if limit > 0 && rows + ragged >= limit {
+                going = false;
+            }
+        }
+    }
+    return (rows, ragged, blank);
+}
+
+// ---- the delimiter ----------------------------------------------------------
+
+fn candidate(i: int) -> [] int {
+    if i == 0 {
+        return 44;
+    }
+    if i == 1 {
+        return 59;
+    }
+    if i == 2 {
+        return 9;
+    }
+    return 124;
+}
+
+// How well `delim` splits the file: the number of fields of the header and the percent of the first `sample`
+// lines that have as many. A line with a quote that does not close counts against it.
+fn score[&d, &c](data: &d [byte], pos: int, delim: int, sample: int, cells: &!c [int]) -> [] (int, int) {
+    var p = pos;
+    var header = 0;
+    var seen = 0;
+    var same = 0;
+    var going = true;
+    while going {
+        let (ls, le, after) = next_line(data, p);
+        p = after;
+        if ls < 0 {
+            going = false;
+        } else if le > ls {
+            let (n, bad) = split_line(data[ls..le], delim, cells, 0);
+            if seen == 0 {
+                header = n;
+            }
+            seen = seen + 1;
+            if !bad && n == header {
+                same = same + 1;
+            }
+            if seen >= sample {
+                going = false;
+            }
+        }
+    }
+    if seen == 0 {
+        return (0, 0);
+    }
+    return (header, 100 * same / seen);
+}
+
+// The delimiter that splits the sample into the most fields at a steady count (at least 90 percent of the
+// lines, at least two fields). Answers it, its fields, how sure that is (0 none fits, 1 low: another delimiter
+// fits as well, 2 medium: another fits with fewer fields, 3 high: no other fits) and a bit mask of the
+// candidates that fit.
+fn detect[&d, &c](data: &d [byte], pos: int, sample: int, cells: &!c [int]) -> [] (int, int, int, int) {
+    var best = 0 - 1;
+    var best_fields = 0;
+    var mask = 0;
+    var i = 0;
+    while i < 4 {
+        let (fields, steady) = score(data, pos, candidate(i), sample, cells);
+        if fields >= 2 && steady >= 90 {
+            mask = mask + (1 << i);
+            if fields > best_fields {
+                best = i;
+                best_fields = fields;
+            }
+        }
+        i = i + 1;
+    }
+    if best < 0 {
+        let (fields, steady) = score(data, pos, 44, sample, cells);
+        return (44, fields, 0, 0);
+    }
+    var sure = 3;
+    var j = 0;
+    while j < 4 {
+        if j != best && mask / (1 << j) % 2 == 1 {
+            let (f, s) = score(data, pos, candidate(j), sample, cells);
+            if f == best_fields {
+                sure = 1;
+            } else if sure > 2 {
+                sure = 2;
+            }
+        }
+        j = j + 1;
+    }
+    return (candidate(best), best_fields, sure, mask);
+}
+
+// The delimiter the caller asked for: the byte, -1 for auto, -2 for something that is not one byte or a name.
+fn delimiter_of[&t](name: &t [byte]) -> [] int {
+    if bytes.equal(name, "auto") {
+        return 0 - 1;
+    }
+    if bytes.equal(name, "tab") || bytes.equal(name, "\t") {
+        return 9;
+    }
+    if bytes.equal(name, "pipe") {
+        return 124;
+    }
+    if bytes.equal(name, "semicolon") {
+        return 59;
+    }
+    if bytes.equal(name, "comma") {
+        return 44;
+    }
+    if len(name) == 1 && int_of(name[0]) != 34 && int_of(name[0]) != 10 && int_of(name[0]) != 13 {
+        return int_of(name[0]);
+    }
+    return 0 - 2;
+}
+
+fn delimiter_name(d: int) -> [] &static [byte] {
+    if d == 44 {
+        return "comma";
+    }
+    if d == 59 {
+        return "semicolon";
+    }
+    if d == 9 {
+        return "tab";
+    }
+    if d == 124 {
+        return "pipe";
+    }
+    return "other";
+}
+
+// ---- what a column is --------------------------------------------------------
+
+// 0 empty, 1 integer, 2 number, 3 date, 4 text.
+fn kind_of[&s](st: &s [int], col: int) -> [] int {
+    let b = col * stride();
+    let numbers = st[b + 2] + st[b + 3] + st[b + 4];
+    if st[b + 7] > 0 {
+        return 4;
+    }
+    if numbers > 0 && st[b + 5] > 0 {
+        return 4;
+    }
+    if numbers > 0 {
+        if st[b + 3] + st[b + 4] > 0 {
+            return 2;
+        }
+        return 1;
+    }
+    if st[b + 5] > 0 {
+        return 3;
+    }
+    if st[b + 6] > 0 {
+        return 4;
+    }
+    return 0;
+}
+
+fn kind_name(k: int) -> [] &static [byte] {
+    if k == 1 {
+        return "integer";
+    }
+    if k == 2 {
+        return "number";
+    }
+    if k == 3 {
+        return "date";
+    }
+    if k == 4 {
+        return "text";
+    }
+    return "empty";
+}
+
+fn numeric_kind(k: int) -> [] bool {
+    return k == 1 || k == 2;
+}
+
+// The decimal mark of a numeric column: 46, 44, 0 when it has no decimals, -1 when it has both.
+fn decimal_of[&s](st: &s [int], col: int) -> [] int {
+    let b = col * stride();
+    if st[b + 3] > 0 && st[b + 4] > 0 {
+        return 0 - 1;
+    }
+    if st[b + 4] > 0 {
+        return 44;
+    }
+    if st[b + 3] > 0 {
+        return 46;
+    }
+    return 0;
+}
+
+// ---- writing cells ----------------------------------------------------------
+
+fn needs_quotes[&s](s: &s [byte]) -> [] bool {
+    var i = 0;
+    while i < len(s) {
+        let c = int_of(s[i]);
+        if c == 44 || c == 34 || c == 10 || c == 13 {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// A cell of the cleaned file. `was_quoted` says the raw text still has its quotes doubled.
+fn put_cell[&h, &s](heap: &!h Heap, out: buffer.Buffer, raw: &s [byte], was_quoted: bool, dot: bool) -> [heap] buffer.Buffer {
+    var o = out;
+    if dot {
+        // a number: its comma is the decimal mark, and it holds nothing that needs quotes
+        var i = 0;
+        while i < len(raw) {
+            if int_of(raw[i]) == 44 {
+                o = buffer.push(heap, o, byte_of(46));
+            } else {
+                o = buffer.push(heap, o, raw[i]);
+            }
+            i = i + 1;
+        }
+        return o;
+    }
+    if !needs_quotes(raw) {
+        return buffer.append(heap, o, raw);
+    }
+    o = buffer.push(heap, o, byte_of(34));
+    var i = 0;
+    while i < len(raw) {
+        o = buffer.push(heap, o, raw[i]);
+        if int_of(raw[i]) == 34 && !was_quoted {
+            o = buffer.push(heap, o, byte_of(34));
+        } else if int_of(raw[i]) == 34 && was_quoted {
+            // the quote that follows is the second of the pair
+            i = i + 1;
+            o = buffer.push(heap, o, raw[i]);
+        }
+        i = i + 1;
+    }
+    o = buffer.push(heap, o, byte_of(34));
+    return o;
+}
+
+// Whether `needle` is one of the markers of `list` (separated by commas).
+fn in_list[&n, &l](needle: &n [byte], list: &l [byte]) -> [] bool {
+    if len(list) == 0 {
+        return false;
+    }
+    let count = bytes.count_byte(list, 44) + 1;
+    var k = 1;
+    while k <= count {
+        if bytes.equal(bytes.field(list, 44, k), needle) {
+            return true;
+        }
+        k = k + 1;
+    }
+    return false;
+}
+
+// The code `map` ("col=a:1/b:0", the part after the `=`) gives `value`, as (found, offset into map, length).
+fn mapped[&v, &m](value: &v [byte], map: &m [byte]) -> [] (bool, int, int) {
+    let pairs = bytes.count_byte(map, 47) + 1;
+    var k = 1;
+    while k <= pairs {
+        let pair = bytes.field(map, 47, k);
+        let colon = index_of_byte(pair, byte_of(58));
+        if colon > 0 && bytes.equal(pair[0..colon], value) {
+            // pair is a slice of map: its offset is found by walking the fields
+            var at = 0;
+            var j = 1;
+            while j < k {
+                at = at + len(bytes.field(map, 47, j)) + 1;
+                j = j + 1;
+            }
+            return (true, at + colon + 1, len(pair) - colon - 1);
+        }
+        k = k + 1;
+    }
+    return (false, 0, 0);
+}
+
+// ---- the report --------------------------------------------------------------
+
+// The name of column `col` (its offset and length are in `hd`).
+fn name_of[&d, &h](data: &d [byte], hd: &h [int], col: int) -> [] &d [byte] {
+    return data[hd[2 * col]..hd[2 * col] + hd[2 * col + 1]];
+}
+
+fn put_values[&h, &d, &s](heap: &!h Heap, w: json.Writer, data: &d [byte], st: &s [int], col: int) -> [heap] json.Writer {
+    var o = json.begin_array(heap, w);
+    let b = col * stride();
+    var k = 0;
+    while k < st[b + 8] && k < 4 {
+        o = text.put(heap, o, data[st[b + 9 + 2 * k]..st[b + 9 + 2 * k] + st[b + 10 + 2 * k]]);
+        k = k + 1;
+    }
+    return json.end_array(heap, o);
+}
+
+// The sniff report: the JSON document and the plain words.
+fn sniff_report[&h, &d, &s, &n, &t](heap: &!h Heap, data: &d [byte], shown: &t [byte], hd: &n [int], st: &s [int], ncols: int, delim: int, sure: int, mask: int, rows: int, ragged: int, blank: int, crlf: bool, bom: bool) -> [heap] (buffer.Buffer, buffer.Buffer) {
+    var w = json.writer(heap, 1024 + ncols * 256);
+    var plain = buffer.empty(heap, 1024);
+    var line = buffer.empty(heap, 256);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "delimiter");
+    var dbytes = buffer.push(heap, buffer.empty(heap, 4), byte_of(delim));
+    borrow dbytes as &db in {
+        w = text.put(heap, w, buffer.bytes(db));
+    }
+    buffer.drop(heap, dbytes);
+    w = json.put_key(heap, w, "delimiter_name");
+    w = json.put_string(heap, w, delimiter_name(delim));
+    w = json.put_key(heap, w, "confidence");
+    if sure == 3 {
+        w = json.put_string(heap, w, "high");
+    } else if sure == 2 {
+        w = json.put_string(heap, w, "medium");
+    } else if sure == 1 {
+        w = json.put_string(heap, w, "low");
+    } else {
+        w = json.put_string(heap, w, "none");
+    }
+    w = json.put_key(heap, w, "also_fits");
+    w = json.begin_array(heap, w);
+    var j = 0;
+    while j < 4 {
+        if mask / (1 << j) % 2 == 1 && candidate(j) != delim {
+            w = json.put_string(heap, w, delimiter_name(candidate(j)));
+        }
+        j = j + 1;
+    }
+    w = json.end_array(heap, w);
+    w = json.put_key(heap, w, "fields");
+    w = json.put_int(heap, w, ncols);
+    w = json.put_key(heap, w, "rows");
+    w = json.put_int(heap, w, rows);
+    w = json.put_key(heap, w, "ragged_rows");
+    w = json.put_int(heap, w, ragged);
+    w = json.put_key(heap, w, "blank_lines");
+    w = json.put_int(heap, w, blank);
+    w = json.put_key(heap, w, "line_ending");
+    if crlf {
+        w = json.put_string(heap, w, "crlf");
+    } else {
+        w = json.put_string(heap, w, "lf");
+    }
+    w = json.put_key(heap, w, "byte_order_mark");
+    w = json.put_bool(heap, w, bom);
+    w = json.put_key(heap, w, "columns");
+    w = json.begin_array(heap, w);
+    plain = buffer.append(heap, plain, "delimiter ");
+    plain = buffer.append(heap, plain, delimiter_name(delim));
+    plain = buffer.append(heap, plain, ", ");
+    plain = buffer.push_nat(heap, plain, ncols);
+    plain = buffer.append(heap, plain, " fields, ");
+    plain = buffer.push_nat(heap, plain, rows);
+    plain = buffer.append(heap, plain, " rows, ragged ");
+    plain = buffer.push_nat(heap, plain, ragged);
+    plain = buffer.push(heap, plain, byte_of(10));
+    var comma_cols = 0;
+    var col = 0;
+    while col < ncols {
+        let b = col * stride();
+        let k = kind_of(st, col);
+        let dec = decimal_of(st, col);
+        w = json.begin_object(heap, w);
+        w = json.put_key(heap, w, "name");
+        w = text.put(heap, w, name_of(data, hd, col));
+        w = json.put_key(heap, w, "kind");
+        w = json.put_string(heap, w, kind_name(k));
+        w = json.put_key(heap, w, "decimal");
+        if dec == 44 {
+            w = json.put_string(heap, w, "comma");
+            comma_cols = comma_cols + 1;
+        } else if dec == 46 {
+            w = json.put_string(heap, w, "dot");
+        } else if dec < 0 {
+            w = json.put_string(heap, w, "mixed");
+        } else {
+            w = json.put_null(heap, w);
+        }
+        w = json.put_key(heap, w, "missing");
+        w = json.put_int(heap, w, st[b + 1] + st[b + 6]);
+        w = json.put_key(heap, w, "missing_marker");
+        if st[b + 6] > 0 {
+            w = text.put(heap, w, data[st[b + 17]..st[b + 17] + st[b + 18]]);
+        } else {
+            w = json.put_null(heap, w);
+        }
+        w = json.put_key(heap, w, "values");
+        if st[b + 8] <= 4 && k != 1 && k != 2 {
+            w = put_values(heap, w, data, st, col);
+        } else {
+            w = json.put_null(heap, w);
+        }
+        w = json.end_object(heap, w);
+        // plain line for the column
+        plain = buffer.append(heap, plain, "  ");
+        plain = buffer.append(heap, plain, name_of(data, hd, col));
+        plain = buffer.append(heap, plain, ": ");
+        plain = buffer.append(heap, plain, kind_name(k));
+        if dec == 44 {
+            plain = buffer.append(heap, plain, ", decimal comma");
+        } else if dec < 0 {
+            plain = buffer.append(heap, plain, ", MIXED decimal marks");
+        }
+        if st[b + 1] + st[b + 6] > 0 {
+            plain = buffer.append(heap, plain, ", missing ");
+            plain = buffer.push_nat(heap, plain, st[b + 1] + st[b + 6]);
+        }
+        plain = buffer.push(heap, plain, byte_of(10));
+        col = col + 1;
+    }
+    buffer.drop(heap, line);
+    w = json.end_array(heap, w);
+    // what to run next: the columns that hold two values (a label to predict), the text columns that
+    // hold a missing marker, and the normalize line that follows from them
+    var cmd = buffer.append(heap, buffer.empty(heap, 256), "dialect --format text normalize");
+    if delim != 44 {
+        cmd = buffer.append(heap, cmd, " --delimiter ");
+        if delim == 59 {
+            cmd = buffer.append(heap, cmd, "';'");
+        } else if delim == 9 {
+            cmd = buffer.append(heap, cmd, "tab");
+        } else if delim == 124 {
+            cmd = buffer.append(heap, cmd, "pipe");
+        } else {
+            cmd = buffer.push(heap, cmd, byte_of(39));
+            cmd = buffer.push(heap, cmd, byte_of(delim));
+            cmd = buffer.push(heap, cmd, byte_of(39));
+        }
+    }
+    var na_list = buffer.empty(heap, 16);
+    var na_count = 0;
+    w = json.put_key(heap, w, "text_missing_markers");
+    w = json.begin_array(heap, w);
+    var tc = 0;
+    while tc < ncols {
+        let tb = tc * stride();
+        if kind_of(st, tc) == 4 && st[tb + 6] > 0 {
+            w = json.begin_object(heap, w);
+            w = json.put_key(heap, w, "column");
+            w = text.put(heap, w, name_of(data, hd, tc));
+            w = json.put_key(heap, w, "marker");
+            w = text.put(heap, w, data[st[tb + 17]..st[tb + 17] + st[tb + 18]]);
+            w = json.put_key(heap, w, "cells");
+            w = json.put_int(heap, w, st[tb + 6]);
+            w = json.end_object(heap, w);
+            if na_count > 0 {
+                na_list = buffer.push(heap, na_list, byte_of(44));
+            }
+            na_count = na_count + 1;
+            na_list = buffer.append(heap, na_list, data[st[tb + 17]..st[tb + 17] + st[tb + 18]]);
+        }
+        tc = tc + 1;
+    }
+    w = json.end_array(heap, w);
+    if na_count > 0 {
+        cmd = buffer.append(heap, cmd, " --na ");
+        borrow na_list as &nl in {
+            cmd = buffer.append(heap, cmd, buffer.bytes(nl));
+        }
+    }
+    w = json.put_key(heap, w, "label_candidates");
+    w = json.begin_array(heap, w);
+    var first_label = true;
+    var lc = 0;
+    while lc < ncols {
+        let lb = lc * stride();
+        if kind_of(st, lc) == 4 && st[lb + 8] == 2 {
+            let v0 = data[st[lb + 9]..st[lb + 9] + st[lb + 10]];
+            let v1 = data[st[lb + 11]..st[lb + 11] + st[lb + 12]];
+            var lo = v0;
+            var hi = v1;
+            if bytes.compare(v0, v1) > 0 {
+                lo = v1;
+                hi = v0;
+            }
+            w = json.begin_object(heap, w);
+            w = json.put_key(heap, w, "column");
+            w = text.put(heap, w, name_of(data, hd, lc));
+            w = json.put_key(heap, w, "values");
+            w = json.begin_array(heap, w);
+            w = text.put(heap, w, lo);
+            w = text.put(heap, w, hi);
+            w = json.end_array(heap, w);
+            var m = buffer.append(heap, buffer.empty(heap, 64), name_of(data, hd, lc));
+            m = buffer.push(heap, m, byte_of(61));
+            m = buffer.append(heap, m, lo);
+            m = buffer.append(heap, m, ":0/");
+            m = buffer.append(heap, m, hi);
+            m = buffer.append(heap, m, ":1");
+            w = json.put_key(heap, w, "map");
+            borrow m as &mr in {
+                w = text.put(heap, w, buffer.bytes(mr));
+                if first_label {
+                    cmd = buffer.append(heap, cmd, " --map ");
+                    cmd = buffer.append(heap, cmd, buffer.bytes(mr));
+                }
+            }
+            buffer.drop(heap, m);
+            first_label = false;
+            w = json.end_object(heap, w);
+        }
+        lc = lc + 1;
+    }
+    w = json.end_array(heap, w);
+    cmd = buffer.push(heap, cmd, byte_of(32));
+    cmd = buffer.append(heap, cmd, shown);
+    cmd = buffer.append(heap, cmd, " > clean.csv");
+    w = json.put_key(heap, w, "normalize");
+    borrow cmd as &cr in {
+        w = text.put(heap, w, buffer.bytes(cr));
+        plain = buffer.append(heap, plain, "next: ");
+        plain = buffer.append(heap, plain, buffer.bytes(cr));
+        plain = buffer.push(heap, plain, byte_of(10));
+        plain = buffer.append(heap, plain, "(the --map line is a template: the label that is 1 is the one you predict; swap the codes if it is the other)\n");
+    }
+    buffer.drop(heap, cmd);
+    buffer.drop(heap, na_list);
+    w = json.end_object(heap, w);
+    return (json.finish(w), plain);
+}
+
+// Write the cleaned file: the header, then every row of `data` from `after`. `conv[col]` says to turn the
+// comma decimals of the column into dot decimals, `blk[col]` to blank its missing markers; `na` is a list of
+// markers to blank in every column; the column `mapcol` (-1 for none) is recoded with `mapvals`.
+// Answers the file so far, the problems, and the counts: rows, decimals converted, cells blanked, cells recoded.
+fn write_csv[&h, &d, &c, &v, &w, &n, &m](heap: &!h Heap, data: &d [byte], hs: int, he: int, hline: int, after: int, delim: int, ncols: int, conv: &v [int], blk: &w [int], na: &n [byte], mapcol: int, mapvals: &m [byte], cells: &!c [int], errs: fail.Errors) -> [heap] (buffer.Buffer, fail.Errors, int, int, int, int) {
+    var e = errs;
+    var o = buffer.empty(heap, len(data) + 1024);
+    var rows = 0;
+    var decimals = 0;
+    var blanked = 0;
+    var recoded = 0;
+    var failed = false;
+    var lineno = hline;
+    // the header, as written
+    split_line(data[hs..he], delim, cells, ncols);
+    var col = 0;
+    while col < ncols {
+        if col > 0 {
+            o = buffer.push(heap, o, byte_of(44));
+        }
+        o = put_cell(heap, o, data[hs + cells[3 * col]..hs + cells[3 * col + 1]], cells[3 * col + 2] == 1, false);
+        col = col + 1;
+    }
+    o = buffer.push(heap, o, byte_of(10));
+    var p = after;
+    var going = true;
+    while going && !failed {
+        let (ls, le, nx) = next_line(data, p);
+        p = nx;
+        lineno = lineno + 1;
+        if ls < 0 {
+            going = false;
+        } else if le > ls {
+            let (n, bad) = split_line(data[ls..le], delim, cells, ncols);
+            if bad {
+                e = data_problem(heap, e, "dialect.bad-quote", "a quote in this row does not close, or is followed by text", "check the quoting of the row", "line", lineno, "text", data[ls..le]);
+                failed = true;
+            } else if n != ncols {
+                e = data_problem(heap, e, "dialect.ragged-row", "this row has a different number of fields than the header", "fix or drop the row, or give the right --delimiter", "line", lineno, "text", data[ls..le]);
+                failed = true;
+            } else {
+                var c = 0;
+                while c < ncols && !failed {
+                    if c > 0 {
+                        o = buffer.push(heap, o, byte_of(44));
+                    }
+                    let raw = data[ls + cells[3 * c]..ls + cells[3 * c + 1]];
+                    let quoted = cells[3 * c + 2] == 1;
+                    if c == mapcol {
+                        let (hit, at, size) = mapped(raw, mapvals);
+                        if hit {
+                            o = buffer.append(heap, o, mapvals[at..at + size]);
+                            recoded = recoded + 1;
+                        } else {
+                            e = data_problem(heap, e, "dialect.unmapped-value", "a value in the --map column has no code in the map", "add the value to --map, or clean the column first", "line", lineno, "value", raw);
+                            failed = true;
+                        }
+                    } else if in_list(raw, na) && len(raw) > 0 {
+                        blanked = blanked + 1;
+                    } else {
+                        let kind = classify(raw);
+                        if kind == 5 && blk[c] == 1 {
+                            blanked = blanked + 1;
+                        } else if kind == 3 && conv[c] == 1 {
+                            o = put_cell(heap, o, raw, quoted, true);
+                            decimals = decimals + 1;
+                        } else {
+                            o = put_cell(heap, o, raw, quoted, false);
+                        }
+                    }
+                    c = c + 1;
+                }
+                o = buffer.push(heap, o, byte_of(10));
+                rows = rows + 1;
+            }
+        }
+    }
+    return (o, e, rows, decimals, blanked, recoded);
+}
+
+// The JSON report of a normalize: what was read and what was changed.
+fn normalize_report[&h](heap: &!h Heap, delim: int, ncols: int, rows: int, decimals: int, blanked: int, recoded: int, size: int) -> [heap] buffer.Buffer {
+    var w = json.writer(heap, 512);
+    w = json.begin_object(heap, w);
+    w = json.put_key(heap, w, "delimiter_read");
+    w = json.put_string(heap, w, delimiter_name(delim));
+    w = json.put_key(heap, w, "columns");
+    w = json.put_int(heap, w, ncols);
+    w = json.put_key(heap, w, "rows");
+    w = json.put_int(heap, w, rows);
+    w = json.put_key(heap, w, "decimals_converted");
+    w = json.put_int(heap, w, decimals);
+    w = json.put_key(heap, w, "cells_blanked");
+    w = json.put_int(heap, w, blanked);
+    w = json.put_key(heap, w, "cells_recoded");
+    w = json.put_int(heap, w, recoded);
+    w = json.put_key(heap, w, "bytes");
+    w = json.put_int(heap, w, size);
+    w = json.put_key(heap, w, "note");
+    w = json.put_string(heap, w, "the cleaned CSV is the standard output of --format text; with --format json only this report is printed");
+    w = json.end_object(heap, w);
+    return json.finish(w);
+}
+
+// Decide what to change in each column, then write the cleaned file.
+fn normalized[&h, &g, &p, &d, &n, &s, &c](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, data: &d [byte], hs: int, he: int, hline: int, after: int, delim: int, ncols: int, hd: &n [int], st: &s [int], cells: &!c [int], errs: fail.Errors) -> [heap, args] (buffer.Buffer, buffer.Buffer, fail.Errors) {
+    let table = flag_table();
+    var e = errs;
+    let want = cli.text(args, parsed, table, "decimal");
+    var conv = box_slice(heap, ncols + 1, 0);
+    var blk = box_slice(heap, ncols + 1, 0);
+    var mapcol = 0 - 1;
+    var mapvals = "";
+    let spec = cli.text(args, parsed, table, "map");
+    var cut = 0 - 1;
+    if len(spec) > 0 {
+        cut = index_of_byte(spec, byte_of(61));
+        if cut < 1 {
+            e = flag_problem(heap, e, "args.bad-value", "--map is COLUMN=value:code/value:code", "--map outcome=lost:0/won:1", "--map");
+        } else {
+            mapvals = spec[cut + 1..len(spec)];
+        }
+    }
+    borrow mut conv as &!cvw in {
+        borrow mut blk as &!bkw in {
+            let ca = contents(cvw);
+            let ba = contents(bkw);
+            var col = 0;
+            while col < ncols {
+                let k = kind_of(st, col);
+                let dec = decimal_of(st, col);
+                if numeric_kind(k) {
+                    ba[col] = 1;
+                }
+                if bytes.equal(want, ",") {
+                    ca[col] = 1;
+                } else if bytes.equal(want, "auto") {
+                    if numeric_kind(k) && dec == 44 {
+                        ca[col] = 1;
+                    } else if numeric_kind(k) && dec < 0 {
+                        e = data_problem(heap, e, "dialect.mixed-decimal", "a column has numbers with a dot and numbers with a comma", "say which with --decimal . or --decimal , or fix the column", "column", col + 1, "name", name_of(data, hd, col));
+                    }
+                }
+                if cut > 0 && bytes.equal(name_of(data, hd, col), spec[0..cut]) {
+                    mapcol = col;
+                }
+                col = col + 1;
+            }
+        }
+    }
+    if cut > 0 && mapcol < 0 {
+        e = data_problem(heap, e, "dialect.map-column-not-found", "the --map column is not in the header", "spell it as the header does; sniff lists the names", "columns", ncols, "name", spec[0..cut]);
+    }
+    var refused = false;
+    borrow e as &er in {
+        refused = fail.count(er) > 0;
+    }
+    var data_json = buffer.empty(heap, 1);
+    var plain = buffer.empty(heap, 1);
+    if !refused {
+        borrow conv as &cvr in {
+            borrow blk as &bkr in {
+                let (o, e2, rows, decimals, blanked, recoded) = write_csv(heap, data, hs, he, hline, after, delim, ncols, contents(cvr), contents(bkr), cli.text(args, parsed, table, "na"), mapcol, mapvals, cells, e);
+                e = e2;
+                var failed = false;
+                borrow e as &er2 in {
+                    failed = fail.count(er2) > 0;
+                }
+                if failed {
+                    buffer.drop(heap, o);
+                } else {
+                    buffer.drop(heap, data_json);
+                    buffer.drop(heap, plain);
+                    plain = o;
+                    data_json = normalize_report(heap, delim, ncols, rows, decimals, blanked, recoded, 0);
+                }
+            }
+        }
+    }
+    unbox_slice(heap, conv);
+    unbox_slice(heap, blk);
+    return (data_json, plain, e);
+}
+
+// The whole file, the header and the profile; `normalize` and `sniff` share it.
+fn work[&h, &g, &p, &d, &t](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, data: &d [byte], shown: &t [byte], verb: int, errs: fail.Errors) -> [heap, args] (buffer.Buffer, buffer.Buffer, fail.Errors) {
+    let table = flag_table();
+    var e = errs;
+    var bom = false;
+    var pos = 0;
+    if len(data) >= 3 && int_of(data[0]) == 239 && int_of(data[1]) == 187 && int_of(data[2]) == 191 {
+        bom = true;
+        pos = 3;
+    }
+    // the header is the first line that is not empty
+    var hs = 0 - 1;
+    var he = 0;
+    var hline = 0;
+    var after = pos;
+    var going = true;
+    while going {
+        let (ls, le, nx) = next_line(data, after);
+        after = nx;
+        hline = hline + 1;
+        if ls < 0 {
+            going = false;
+        } else if le > ls {
+            hs = ls;
+            he = le;
+            going = false;
+        }
+    }
+    if hs < 0 {
+        return (buffer.empty(heap, 1), buffer.empty(heap, 1), data_problem(heap, e, "dialect.empty-file", "the file has no line to read", "give a file with a header row", "bytes", len(data), "file", ""));
+    }
+    let sample = cli.nat(args, parsed, table, "sample-rows");
+    var cells = box_slice(heap, 3 * 4097, 0);
+    var delim = delimiter_of(cli.text(args, parsed, table, "delimiter"));
+    var sure = 3;
+    var mask = 0;
+    var ncols = 0;
+    borrow mut cells as &!cw in {
+        let ca = contents(cw);
+        let (found, fields, how, fits) = detect(data, hs, sample, ca);
+        if delim == 0 - 1 || verb == 1 {
+            delim = found;
+            sure = how;
+            mask = fits;
+        }
+        let (n, bad) = split_line(data[hs..he], delim, ca, 0);
+        ncols = n;
+        if bad {
+            e = data_problem(heap, e, "dialect.bad-quote", "a quote in the header does not close", "check the quoting of the first row", "line", 1, "text", data[hs..he]);
+        }
+    }
+    unbox_slice(heap, cells);
+    if ncols > cli.nat(args, parsed, table, "max-columns") {
+        e = data_problem(heap, e, "limit.too-many-columns", "the header holds more columns than --max-columns", "raise --max-columns, up to 4096", "columns", ncols, "text", "");
+        return (buffer.empty(heap, 1), buffer.empty(heap, 1), e);
+    }
+    var refused = false;
+    borrow e as &er in {
+        refused = fail.count(er) > 0;
+    }
+    if refused {
+        return (buffer.empty(heap, 1), buffer.empty(heap, 1), e);
+    }
+    var st = box_slice(heap, ncols * stride() + 1, 0);
+    var hd = box_slice(heap, 2 * ncols + 1, 0);
+    var cells2 = box_slice(heap, 3 * (ncols + 1), 0);
+    var rows = 0;
+    var ragged = 0;
+    var blank = 0;
+    var data_json = buffer.empty(heap, 1);
+    var plain = buffer.empty(heap, 1);
+    borrow mut st as &!sw in {
+        borrow mut hd as &!hw in {
+            borrow mut cells2 as &!c2 in {
+                let sa = contents(sw);
+                let ha = contents(hw);
+                let c2a = contents(c2);
+                split_line(data[hs..he], delim, c2a, ncols);
+                var col = 0;
+                while col < ncols {
+                    ha[2 * col] = hs + c2a[3 * col];
+                    ha[2 * col + 1] = c2a[3 * col + 1] - c2a[3 * col];
+                    col = col + 1;
+                }
+                var limit = 0;
+                if verb == 1 {
+                    limit = 0;
+                } else {
+                    limit = 0;
+                }
+                if verb == 0 {
+                    limit = sample;
+                }
+                let (r, rg, bl) = profile(data, after, delim, ncols, limit, sa, c2a);
+                rows = r;
+                ragged = rg;
+                blank = bl;
+                var crlf = false;
+                if he < len(data) && int_of(data[he]) == 13 {
+                    crlf = true;
+                }
+                buffer.drop(heap, data_json);
+                buffer.drop(heap, plain);
+                if verb == 0 {
+                    let (dj, pl) = sniff_report(heap, data, shown, ha, sa, ncols, delim, sure, mask, rows, ragged, blank, crlf, bom);
+                    data_json = dj;
+                    plain = pl;
+                } else {
+                    let (dj, pl, e3) = normalized(heap, args, parsed, data, hs, he, hline, after, delim, ncols, ha, sa, c2a, e);
+                    data_json = dj;
+                    plain = pl;
+                    e = e3;
+                }
+            }
+        }
+    }
+    unbox_slice(heap, st);
+    unbox_slice(heap, hd);
+    unbox_slice(heap, cells2);
+    return (data_json, plain, e);
+}
+
+fn body[&h, &g, &p, &f, &i](heap: &!h Heap, args: &g Args, parsed: &p cli.Parsed, fs: &f Fs(""), io: &!i Io, errs: fail.Errors) -> [heap, args, fs_read(""), dir_read, file_read, io_write, err_write] int {
+    let table = flag_table();
+    var e = errs;
+    let text_mode = bytes.equal(cli.text(args, parsed, table, "format"), "text");
+    var verb = 0 - 1;
+    if cli.operand_count(parsed) == 0 {
+        e = flag_problem(heap, e, "args.missing-operand", "dialect takes a verb, sniff or normalize, and a file", "dialect sniff FILE", "VERB");
+    } else if bytes.equal(cli.operand(args, parsed, 0), "sniff") {
+        verb = 0;
+    } else if bytes.equal(cli.operand(args, parsed, 0), "normalize") {
+        verb = 1;
+    } else {
+        e = flag_problem(heap, e, "args.bad-value", "the verb is sniff or normalize", "dialect sniff FILE, then dialect normalize FILE", "VERB");
+    }
+    if verb >= 0 && cli.operand_count(parsed) < 2 {
+        e = flag_problem(heap, e, "args.missing-operand", "the verb takes a file", "dialect sniff FILE", "FILE");
+    } else if cli.operand_count(parsed) > 2 {
+        e = flag_problem(heap, e, "args.too-many-operands", "dialect takes one file", "one file per call", "FILE");
+    }
+    if delimiter_of(cli.text(args, parsed, table, "delimiter")) == 0 - 2 {
+        e = flag_problem(heap, e, "args.bad-value", "--delimiter is auto, comma, semicolon, tab, pipe or one byte", "--delimiter ';'", "--delimiter");
+    }
+    if cli.nat(args, parsed, table, "max-bytes") > 1073741824 {
+        e = flag_problem(heap, e, "args.bad-value", "--max-bytes is above the ceiling", "1073741824 is the most this tool reads", "--max-bytes");
+    }
+    if cli.nat(args, parsed, table, "max-columns") > 4096 {
+        e = flag_problem(heap, e, "args.bad-value", "--max-columns is above the ceiling", "4096 is the most this tool holds", "--max-columns");
+    }
+    if cli.nat(args, parsed, table, "sample-rows") > 1000000 || cli.nat(args, parsed, table, "sample-rows") < 1 {
+        e = flag_problem(heap, e, "args.bad-value", "--sample-rows is 1 to 1000000", "1000 is the default", "--sample-rows");
+    }
+    let (root, after_root) = path.root(heap, args, cli.text(args, parsed, table, "root"), cli.value_index(parsed, table, "root"), e);
+    e = after_root;
+    var refused = false;
+    borrow e as &er in {
+        refused = fail.count(er) > 0;
+    }
+    var data_json = buffer.empty(heap, 1);
+    var plain = buffer.empty(heap, 1);
+    if !refused {
+        borrow root as &rr in {
+            let (target, checked) = path.operand(heap, args, buffer.bytes(rr), cli.operand_index(parsed, 1), e);
+            e = checked;
+            borrow target as &tp in {
+                if path.ok(tp) {
+                    let (read, errno, big) = atomic.read_all(heap, place.open_operand(fs, buffer.bytes(rr), path.shown(tp), path.full(tp)), cli.nat(args, parsed, table, "max-bytes"), buffer.empty(heap, 4096));
+                    if errno != 0 {
+                        e = fail.io_error(heap, e, errno, false, path.shown(tp));
+                    } else if big {
+                        e = data_problem(heap, e, "limit.input-too-large", "the file is longer than --max-bytes", "raise --max-bytes, up to 1073741824", "limit", cli.nat(args, parsed, table, "max-bytes"), "file", path.shown(tp));
+                    } else {
+                        borrow read as &rb in {
+                            buffer.drop(heap, data_json);
+                            buffer.drop(heap, plain);
+                            let (dj, pl, e2) = work(heap, args, parsed, buffer.bytes(rb), path.shown(tp), verb, e);
+                            data_json = dj;
+                            plain = pl;
+                            e = e2;
+                        }
+                    }
+                    buffer.drop(heap, read);
+                }
+            }
+            path.drop(heap, target);
+        }
+    }
+    buffer.drop(heap, root);
+    var status = 0;
+    borrow e as &er in {
+        borrow data_json as &d in {
+            borrow plain as &t in {
+                status = out.respond(heap, io, "dialect", "dialect.v1", "0.1.0", buffer.bytes(d), "", er, text_mode, buffer.bytes(t), 0);
+            }
+        }
+    }
+    buffer.drop(heap, data_json);
+    buffer.drop(heap, plain);
+    fail.drop(heap, e);
+    return status;
+}
+
+fn run[&h, &g, &f, &i](heap: &!h Heap, args: &g Args, fs: &f Fs(""), io: &!i Io) -> [heap, args, fs_read(""), dir_read, file_read, io_write, err_write] int {
+    let which = cli.subcommand(args);
+    if which != 0 {
+        return describe.answer(heap, io, which, tool(), built());
+    }
+    let (parsed, e) = cli.parse(heap, args, flag_table(), fail.empty_in(heap, extra()));
+    var status = 0;
+    borrow parsed as &p in {
+        status = body(heap, args, p, fs, io, e);
+    }
+    cli.drop(heap, parsed);
+    return status;
+}
+
+fn main(world: World) -> [] int {
+    let Split { io, ffi, fs, heap, args, net, clock } = split(world);
+    // No foreign code, no network, no clock, and nothing written but standard output.
+    release(ffi);
+    release(net);
+    release(clock);
+    var status = 0;
+    borrow mut heap as &!h in {
+        borrow args as &g in {
+            borrow fs as &f in {
+                borrow mut io as &!i in {
+                    status = run(h, g, f, i);
+                }
+            }
+        }
+    }
+    release(heap);
+    release(args);
+    release(fs);
+    release(io);
+    return status;
+}

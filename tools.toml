@@ -57,3 +57,6 @@ exceptions = { clock = "the deadline: --timeout-ms kills the child at a time, an
 # it was handed and nothing else.
 [archive]
 allow = ["args", "dir_read", "dir_write", "err_write", "file_read", "file_write", "fs_read(\"\")", "heap", "io_write"]
+
+[dialect]
+allow = ["args", "dir_read", "err_write", "file_read", "fs_read(\"\")", "heap", "io_write"]

@@ -19,7 +19,7 @@ import jsonschema
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BIN = pathlib.Path(os.environ.get("TOOLBOX_BIN", ROOT / "build"))
-TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move"]
+TOOLS = ["seek", "write", "replace", "peek", "jsonq", "tally", "hash", "list", "move", "dialect"]
 # The tools added after the shared gates were written. They are held to the gates that are about authority
 # (test_authority.py) and have a conformance file of their own for the rest (test_archive.py, test_run.py):
 # several shared gates (M2 determinism of an answer, M7 mutation, M8 confinement of writes, M9 flat memory)

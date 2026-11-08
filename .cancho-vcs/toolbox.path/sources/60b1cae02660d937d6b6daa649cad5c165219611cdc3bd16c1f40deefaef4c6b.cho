@@ -267,7 +267,7 @@ pub fn operand[&h, &g, &r](heap: &!h Heap, args: &g Args, root: &r [byte], at: i
         }
         buffer.drop(heap, resolved);
         borrow suggestion as &s in {
-            e = path_error(heap, e, args, "path.dotdot", "the path has a `..` component", "name the file without `..`; the tool does not resolve it, because a symlink makes `a/link/../b` something other than `a/b`", at, buffer.bytes(s));
+            e = path_error(heap, e, args, "path.dotdot", "the path has a `..` component", "name the file without `..`: run the tool in the directory that holds it, or give --root DIR and name the file relative to DIR (the tool does not resolve `..`, because a symlink makes `a/link/../b` something other than `a/b`)", at, buffer.bytes(s));
         }
         buffer.drop(heap, suggestion);
         return (refused(heap), e);

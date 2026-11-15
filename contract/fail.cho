@@ -330,23 +330,97 @@ fn plain_byte(c: int) -> [] bool {
     return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '/' || c == ':' || c == '=' || c == '@' || c == '%' || c == '+' || c == ',' || c == '-';
 }
 
-// `word` as one shell word: as it is when every byte is plain, else in
-// single quotes (an agent can paste the line).
-fn put_word[&h, &w](heap: &!h Heap, t: buffer.Buffer, word: &w [byte]) -> [heap] buffer.Buffer {
-    var plain = len(word) > 0;
+// The value of the hex digit `c`, or -1.
+fn hex_value(c: int) -> [] int {
+    if c >= '0' && c <= '9' {
+        return c - '0';
+    }
+    if c >= 'a' && c <= 'f' {
+        return c - 'a' + 10;
+    }
+    if c >= 'A' && c <= 'F' {
+        return c - 'A' + 10;
+    }
+    return 0 - 1;
+}
+
+// The bytes a JSON string body stands for (`word` is the text between the quotes of a string `json.put_string` wrote):
+// `\"`, `\\`, `\n`, `\r`, `\t`, `\b`, `\f`, `\u00XX` and `\ufffd` resolved, any other byte kept as it is. A repair's
+// argument is read back from the finished error, so it is still escaped as the document holds it.
+fn json_unescape[&h, &w](heap: &!h Heap, word: &w [byte]) -> [heap] buffer.Buffer {
+    var o = buffer.empty(heap, len(word) + 1);
+    var run = 0;
     var k = 0;
     while k < len(word) {
-        if !plain_byte(int_of(word[k])) {
-            plain = false;
+        if int_of(word[k]) == '\\' && k + 1 < len(word) {
+            o = buffer.append(heap, o, word[run..k]);
+            let e = int_of(word[k + 1]);
+            var used = 2;
+            if e == 'n' {
+                o = buffer.push(heap, o, byte_of(10));
+            } else if e == 'r' {
+                o = buffer.push(heap, o, byte_of(13));
+            } else if e == 't' {
+                o = buffer.push(heap, o, byte_of(9));
+            } else if e == 'b' {
+                o = buffer.push(heap, o, byte_of(8));
+            } else if e == 'f' {
+                o = buffer.push(heap, o, byte_of(12));
+            } else if e == 'u' && k + 5 < len(word) && int_of(word[k + 2]) == '0' && int_of(word[k + 3]) == '0' && hex_value(int_of(word[k + 4])) >= 0 && hex_value(int_of(word[k + 5])) >= 0 {
+                o = buffer.push(heap, o, byte_of(hex_value(int_of(word[k + 4])) * 16 + hex_value(int_of(word[k + 5]))));
+                used = 6;
+            } else if e == 'u' && k + 5 < len(word) && int_of(word[k + 2]) == 'f' && int_of(word[k + 3]) == 'f' && int_of(word[k + 4]) == 'f' && int_of(word[k + 5]) == 'd' {
+                o = buffer.push(heap, o, byte_of(239));
+                o = buffer.push(heap, o, byte_of(191));
+                o = buffer.push(heap, o, byte_of(189));
+                used = 6;
+            } else {
+                o = buffer.push(heap, o, byte_of(e));
+            }
+            k = k + used;
+            run = k;
+        } else {
+            k = k + 1;
         }
-        k = k + 1;
     }
-    if plain {
-        return buffer.append(heap, t, word);
+    return buffer.append(heap, o, word[run..len(word)]);
+}
+
+// `word` (a JSON string body) as one shell word: as it is when every byte it stands for is plain, else in single quotes
+// with each embedded single quote written `'\''`, so that a shell reads back exactly the bytes (an agent can paste the line).
+fn put_word[&h, &w](heap: &!h Heap, t: buffer.Buffer, word: &w [byte]) -> [heap] buffer.Buffer {
+    let raw = json_unescape(heap, word);
+    var o = t;
+    borrow raw as &rb in {
+        let text = buffer.bytes(rb);
+        var plain = len(text) > 0;
+        var k = 0;
+        while k < len(text) {
+            if !plain_byte(int_of(text[k])) {
+                plain = false;
+            }
+            k = k + 1;
+        }
+        if plain {
+            o = buffer.append(heap, o, text);
+        } else {
+            o = buffer.push(heap, o, byte_of('\''));
+            var run = 0;
+            var j = 0;
+            while j < len(text) {
+                if int_of(text[j]) == '\'' {
+                    o = buffer.append(heap, o, text[run..j]);
+                    o = buffer.append(heap, o, "'\\''");
+                    run = j + 1;
+                }
+                j = j + 1;
+            }
+            o = buffer.append(heap, o, text[run..len(text)]);
+            o = buffer.push(heap, o, byte_of('\''));
+        }
     }
-    var o = buffer.push(heap, t, byte_of('\''));
-    o = buffer.append(heap, o, word);
-    return buffer.push(heap, o, byte_of('\''));
+    buffer.drop(heap, raw);
+    return o;
 }
 
 // The lines `--format text` adds under `rule: message`, read back from the
@@ -384,9 +458,11 @@ fn put_extra_lines[&h, &w](heap: &!h Heap, t: buffer.Buffer, doc: &w [byte]) -> 
             from = at;
         }
     }
-    let reason_at = bytes.find(doc, "\"reason\":\"");
+    // The reason of `"repair":{"kind":"none","reason":…}`, and of nothing else: a detail can hold a key `reason` too.
+    let reason_key = "\"repair\":{\"kind\":\"none\",\"reason\":\"";
+    let reason_at = bytes.find(doc, reason_key);
     if reason_at >= 0 {
-        let start = reason_at + 10;
+        let start = reason_at + len(reason_key);
         o = buffer.append(heap, o, "  no repair: ");
         o = buffer.append(heap, o, doc[start..string_end(doc, start)]);
         o = buffer.push(heap, o, byte_of(10));

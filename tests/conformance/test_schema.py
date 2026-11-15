@@ -33,6 +33,11 @@ def corpus(fx):
                  ["--delim", "ab"], ["--root", r, "latin1.txt"]]:
         out.append(("tally", args, b""))
     out.append(("tally", [], b"x\ny\nx\n"))
+    for args in [["--root", r, "sniff", "fields.csv"], ["--root", r, "normalize", "fields.csv"],
+                 ["--root", r, "sniff", "empty.txt"], ["--root", r, "sniff", "words.txt"],
+                 ["--root", r, "sniff", "missing"], ["--root", r, "frob", "fields.csv"], ["--root", r, "--delimiter", "ab", "sniff", "fields.csv"], ["--root", r, "--max-bytes", "5", "sniff", "fields.csv"],
+                 ["--root", r, "--map", "zz=a:1", "normalize", "fields.csv"], ["--root", r, "--decimal", ",", "normalize", "fields.csv"]]:
+        out.append(("dialect", args, b""))
     for args in [["--root", r, "plain.txt", "nul.bin", "empty.txt"], ["--root", r, "--algo", "sha512", "plain.txt"], ["--root", r, "--verify", "0" * 64, "plain.txt"],
                  ["--root", r, "--verify", "x", "plain.txt"], ["--root", r, "sub", "missing"], []]:
         out.append(("hash", args, b""))

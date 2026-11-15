@@ -65,6 +65,7 @@ NEAR = {
     "hash": (["--alg", "sha512", "plain.txt"], "--algo"),
     "list": (["--dept", "2", "sub"], "--depth"),
     "move": (["--formt", "json", "plain.txt", "moved.txt"], "--format"),
+    "dialect": (["--sample-row", "5", "sniff", "fields.csv"], "--sample-rows"),
 }
 
 # A valid invocation per tool whose PATH operand (or one of them) is `X`,
@@ -79,6 +80,7 @@ WITH_PATH = {
     "hash": ["X"],
     "list": ["X"],
     "move": ["X", "moved.txt"],
+    "dialect": ["sniff", "X"],
 }
 
 # A boolean flag per tool, for args.unexpected-value.
@@ -186,6 +188,21 @@ def fixtures(fx):
     add("write", "args.bad-value", ["--max-diff-lines", "100001", "--create", "--stdin", "fresh.txt"])
     add("replace", "args.bad-value", ["--max-diff-lines", "100001", "--old", "alpha", "--new", "b", "plain.txt"])
     add("tally", "limit.too-many-keys", ["--max-keys", "1", "words.txt"])
+
+    # dialect: every way the data can be wrong, each on a file written for it.
+    def put(name, content):
+        return lambda: (fx.root / name).write_bytes(content)
+
+    add("dialect", "args.missing-operand", [])
+    add("dialect", "args.too-many-operands", ["sniff", "fields.csv", "words.txt"])
+    add("dialect", "limit.input-too-large", ["--max-bytes", "3", "sniff", "fields.csv"])
+    add("dialect", "limit.too-many-columns", ["--max-columns", "1", "sniff", "fields.csv"])
+    add("dialect", "dialect.empty-file", ["sniff", "empty.txt"])
+    add("dialect", "dialect.bad-quote", ["normalize", "d.csv"], setup=put("d.csv", b'x,y\n1,"a\n'))
+    add("dialect", "dialect.ragged-row", ["normalize", "d.csv"], setup=put("d.csv", b"x,y\n1,2\n3\n"))
+    add("dialect", "dialect.mixed-decimal", ["normalize", "d.csv"], setup=put("d.csv", b"x;y\n1,5;2\n1.5;3\n"))
+    add("dialect", "dialect.unmapped-value", ["--map", "y=a:1", "normalize", "d.csv"], setup=put("d.csv", b"x,y\n1,a\n2,b\n"))
+    add("dialect", "dialect.map-column-not-found", ["--map", "zz=a:1", "normalize", "d.csv"], setup=put("d.csv", b"x,y\n1,a\n"))
 
     # Preconditions and conflicts.
     add("write", "precondition.required", ["--stdin", "plain.txt"])

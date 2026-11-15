@@ -99,6 +99,11 @@ sources = ["contract", "tests/diff_test.cho"]
 std = true
 
 [[test]]
+name = "fail"
+sources = ["contract", "tests/fail_test.cho"]
+std = true
+
+[[test]]
 name = "sort"
 sources = ["contract", "tests/sort_test.cho"]
 std = true

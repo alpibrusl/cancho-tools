@@ -1,0 +1,106 @@
+edition 5;
+
+import std.buffer;
+import std.bytes;
+import std.json;
+import std.test;
+import toolbox.fail;
+
+// `--format text` writes a repair as a command line an agent can paste, and the reason when there is no repair. These tests
+// build errors with the contract's own writers and read back `fail.sentences`, the text a tool prints.
+
+// An `args.unknown-flag` error whose repair is one option with the arguments `tool --where <where>`, and a detail that holds
+// the key `reason` too (the way a rule's detail may).
+fn with_repair[&h, &w](heap: &!h Heap, condition: &w [byte]) -> [heap] fail.Errors {
+    var o = fail.open(heap, "args.unknown-flag", "message", "a hint");
+    o = fail.choose_open(heap, o);
+    o = fail.choose_option_open(heap, o);
+    o = fail.choose_arg(heap, o, "tool");
+    o = fail.choose_arg(heap, o, "--where");
+    o = fail.choose_arg(heap, o, condition);
+    o = fail.choose_option_close(heap, o);
+    o = fail.choose_close(heap, o);
+    o = fail.detail_open(heap, o);
+    o = fail.detail_str(heap, o, "reason", "null");
+    return fail.add(heap, fail.empty(heap), o);
+}
+
+fn without_repair[&h](heap: &!h Heap) -> [heap] fail.Errors {
+    var o = fail.open(heap, "args.unknown-flag", "message", "a hint");
+    o = fail.repair_none(heap, o, "the cell was meant to be something unknown");
+    o = fail.detail_open(heap, o);
+    o = fail.detail_str(heap, o, "reason", "null");
+    return fail.add(heap, fail.empty(heap), o);
+}
+
+pub fn test_a_plain_word_is_not_quoted[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "status");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where status\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+pub fn test_a_word_with_a_space_is_one_single_quoted_word[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "status = 200");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where 'status = 200'\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+// The word that was printed as `'amount != '''`, which a shell reads as `amount != ` (the quotes cancel).
+pub fn test_a_single_quote_in_a_word_is_escaped_for_the_shell[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "amount != ''");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where 'amount != '\\'''\\'''\n") >= 0);
+    }
+    fail.drop(heap, e);
+    let f = with_repair(heap, "it's");
+    borrow f as &fr in {
+        test.assert(bytes.find(fail.sentences(fr), "  repair: tool --where 'it'\\''s'\n") >= 0);
+    }
+    fail.drop(heap, f);
+    return 0;
+}
+
+// The text is read back from the JSON document, where a double quote is `\"`; the shell word is the bytes, not the escape.
+pub fn test_json_escapes_are_resolved_in_a_word[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "a\"b\\c\nd");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where 'a\"b\\c\nd'\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+pub fn test_an_empty_word_is_two_quotes[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where ''\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+// A detail with a key `reason` is not the reason there is no repair.
+pub fn test_a_detail_reason_is_not_taken_for_the_repairs[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "status");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "no repair") < 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+pub fn test_the_reason_of_no_repair_is_shown_and_only_that[&h](heap: &!h Heap) -> [heap] int {
+    let e = without_repair(heap);
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  no repair: the cell was meant to be something unknown\n") >= 0);
+        test.assert(bytes.find(fail.sentences(er), "no repair: null") < 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}

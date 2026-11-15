@@ -145,6 +145,7 @@
     "hex4",
     "hex_digit",
     "hex_value",
+    "hex_value",
     "in_choice",
     "in_range",
     "index_of",
@@ -207,7 +208,7 @@
     "value_index",
     "width_of"
   ],
-  "folded_operators": 27,
+  "folded_operators": 28,
   "folded_calls": 0,
-  "functions": 218
+  "functions": 220
 }

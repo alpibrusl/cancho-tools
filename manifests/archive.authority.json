@@ -191,6 +191,7 @@
     "hex_digit",
     "hex_digit",
     "hex_value",
+    "hex_value",
     "high_bit",
     "in_choice",
     "in_range",
@@ -385,7 +386,7 @@
     "xround",
     "xxh64"
   ],
-  "folded_operators": 108,
+  "folded_operators": 109,
   "folded_calls": 16,
-  "functions": 584
+  "functions": 586
 }

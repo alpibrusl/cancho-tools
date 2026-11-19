@@ -182,12 +182,14 @@
     "has",
     "has$int",
     "has_body",
+    "has_control",
     "has_dotdot",
     "hash",
     "hash3",
     "have",
     "header_name",
     "hex4",
+    "hex_digit",
     "hex_digit",
     "hex_digit",
     "hex_value",
@@ -388,5 +390,5 @@
   ],
   "folded_operators": 109,
   "folded_calls": 16,
-  "functions": 586
+  "functions": 589
 }

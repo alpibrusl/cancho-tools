@@ -66,11 +66,69 @@ pub fn test_a_single_quote_in_a_word_is_escaped_for_the_shell[&h](heap: &!h Heap
     return 0;
 }
 
-// The text is read back from the JSON document, where a double quote is `\"`; the shell word is the bytes, not the escape.
+// The text is read back from the JSON document, where a double quote is `\"`; the shell word is the bytes, not the escape. A word that holds a line feed is
+// written `$'...'` (one line: see the tests below), so a double quote stays as it is, a backslash is doubled and the line feed is `\n`.
 pub fn test_json_escapes_are_resolved_in_a_word[&h](heap: &!h Heap) -> [heap] int {
     let e = with_repair(heap, "a\"b\\c\nd");
     borrow e as &er in {
-        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where 'a\"b\\c\nd'\n") >= 0);
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where $'a\"b\\\\c\\nd'\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+// A line feed in a word: the repair stays on its one line (the text of an error is written line by line, and a line that is not indented
+// two spaces starts with the tool's name, which would have ended up inside the quotes), and the next line is the detail.
+pub fn test_a_line_feed_in_a_word_keeps_the_repair_on_one_line[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "line\nbreak");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where $'line\\nbreak'\n  detail: ") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+pub fn test_a_quote_and_a_line_feed_in_one_word[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "it's\nx");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where $'it\\'s\\nx'\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+pub fn test_a_tab_and_a_carriage_return_are_escaped[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "a\tb\rc");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "  repair: tool --where $'a\\tb\\rc'\n") >= 0);
+    }
+    fail.drop(heap, e);
+    return 0;
+}
+
+// Any other control byte is `\xHH`: the byte 1 and the byte 127.
+pub fn test_another_control_byte_is_two_hex_digits[&h](heap: &!h Heap) -> [heap] int {
+    var b = buffer.empty(heap, 8);
+    b = buffer.push(heap, b, byte_of('a'));
+    b = buffer.push(heap, b, byte_of(1));
+    b = buffer.push(heap, b, byte_of('b'));
+    b = buffer.push(heap, b, byte_of(127));
+    borrow b as &br in {
+        let e = with_repair(heap, buffer.bytes(br));
+        borrow e as &er in {
+            test.assert(bytes.find(fail.sentences(er), "  repair: tool --where $'a\\x01b\\x7f'\n") >= 0);
+        }
+        fail.drop(heap, e);
+    }
+    buffer.drop(heap, b);
+    return 0;
+}
+
+// A word with no control byte is still single-quoted, not `$'...'`: the form is for the words that need it.
+pub fn test_a_word_without_a_control_byte_is_not_ansi_quoted[&h](heap: &!h Heap) -> [heap] int {
+    let e = with_repair(heap, "it's here");
+    borrow e as &er in {
+        test.assert(bytes.find(fail.sentences(er), "$'") < 0);
     }
     fail.drop(heap, e);
     return 0;

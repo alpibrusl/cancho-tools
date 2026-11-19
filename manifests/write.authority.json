@@ -129,8 +129,10 @@
     "guarantee_keys",
     "guarantees_has",
     "has",
+    "has_control",
     "has_dotdot",
     "hex4",
+    "hex_digit",
     "hex_digit",
     "hex_digit",
     "hex_value",
@@ -204,5 +206,5 @@
   ],
   "folded_operators": 30,
   "folded_calls": 0,
-  "functions": 254
+  "functions": 257
 }

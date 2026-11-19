@@ -386,8 +386,61 @@ fn json_unescape[&h, &w](heap: &!h Heap, word: &w [byte]) -> [heap] buffer.Buffe
     return buffer.append(heap, o, word[run..len(word)]);
 }
 
+// Whether `text` holds a byte that a line of text cannot carry as it is: a control byte (below 32, or 127). A line feed in a
+// word is the one that matters: the text of an error is written line by line, and a line that is not indented two spaces
+// starts with the tool's name, which would end up inside the quotes of the word.
+fn has_control[&w](text: &w [byte]) -> [] bool {
+    var k = 0;
+    while k < len(text) {
+        if int_of(text[k]) < 32 || int_of(text[k]) == 127 {
+            return true;
+        }
+        k = k + 1;
+    }
+    return false;
+}
+
+// The digit of `v`, 0 to 15, in lower case.
+fn hex_digit(v: int) -> [] int {
+    if v < 10 {
+        return '0' + v;
+    }
+    return 'a' + v - 10;
+}
+
+// `text` as one shell word in the `$'...'` form, which holds any byte on one line: a single quote and a backslash with a
+// backslash before them, a line feed, a carriage return and a tab as `\n`, `\r` and `\t`, any other control byte as `\xHH`.
+// Bash, zsh and ksh read it back exactly (it is in POSIX 2024; an older `sh` takes the `$` as part of the word).
+fn put_ansi_word[&h, &w](heap: &!h Heap, t: buffer.Buffer, text: &w [byte]) -> [heap] buffer.Buffer {
+    var o = buffer.append(heap, t, "$'");
+    var k = 0;
+    while k < len(text) {
+        let c = int_of(text[k]);
+        if c == '\'' {
+            o = buffer.append(heap, o, "\\'");
+        } else if c == '\\' {
+            o = buffer.append(heap, o, "\\\\");
+        } else if c == 10 {
+            o = buffer.append(heap, o, "\\n");
+        } else if c == 13 {
+            o = buffer.append(heap, o, "\\r");
+        } else if c == 9 {
+            o = buffer.append(heap, o, "\\t");
+        } else if c < 32 || c == 127 {
+            o = buffer.append(heap, o, "\\x");
+            o = buffer.push(heap, o, byte_of(hex_digit(c / 16)));
+            o = buffer.push(heap, o, byte_of(hex_digit(c % 16)));
+        } else {
+            o = buffer.push(heap, o, byte_of(c));
+        }
+        k = k + 1;
+    }
+    return buffer.push(heap, o, byte_of('\''));
+}
+
 // `word` (a JSON string body) as one shell word: as it is when every byte it stands for is plain, else in single quotes
-// with each embedded single quote written `'\''`, so that a shell reads back exactly the bytes (an agent can paste the line).
+// with each embedded single quote written `'\''`, so that a shell reads back exactly the bytes (an agent can paste the line);
+// a word that holds a control byte is written `$'...'` (put_ansi_word), so that it stays on one line.
 fn put_word[&h, &w](heap: &!h Heap, t: buffer.Buffer, word: &w [byte]) -> [heap] buffer.Buffer {
     let raw = json_unescape(heap, word);
     var o = t;
@@ -401,7 +454,9 @@ fn put_word[&h, &w](heap: &!h Heap, t: buffer.Buffer, word: &w [byte]) -> [heap]
             }
             k = k + 1;
         }
-        if plain {
+        if has_control(text) {
+            o = put_ansi_word(heap, o, text);
+        } else if plain {
             o = buffer.append(heap, o, text);
         } else {
             o = buffer.push(heap, o, byte_of('\''));

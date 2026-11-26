@@ -44,7 +44,8 @@
     {
       "name": "fs_read",
       "argument": "",
-      "bounded": true
+      "bounded": true,
+      "confinement": "lexical"
     },
     {
       "name": "heap",
@@ -210,7 +211,5 @@
     "value_index",
     "width_of"
   ],
-  "folded_operators": 28,
-  "folded_calls": 0,
   "functions": 223
 }

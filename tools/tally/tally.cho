@@ -36,7 +36,6 @@ import toolbox.lines;
 import toolbox.out;
 import toolbox.path;
 import toolbox.place;
-import toolbox.sort;
 import toolbox.text;
 
 fn flag_table() -> [] &static [byte] {
@@ -247,6 +246,53 @@ fn before[&m](m: &m map.Map[int], a: int, b: int) -> [] bool {
     return bytes.compare(map.key_at(m, a), map.key_at(m, b)) < 0;
 }
 
+// `order[0..n]` sorted by `before`, stably, through `spare`: `toolbox.sort`'s merge sort (the same loops, the same clamps) with the comparison
+// called by name. `sort.by_map` takes the comparison as a function value, and since compiler 0.1.1 `cancho authority` gives no report of a
+// program that calls through one (it does not follow the call, and says so by refusing: "the compiler in cancho has no code for what is here").
+// A tool with no authority report is not a tool of this repository, so the one tool that sorted through a function value sorts here instead.
+fn order_entries[&m, &o, &s](m: &m map.Map[int], order: &!o [int], spare: &!s [int], n: int) -> [] int {
+    var total = n;
+    if total > len(order) {
+        total = len(order);
+    }
+    if total > len(spare) {
+        total = len(spare);
+    }
+    var width = 1;
+    while width < total {
+        var lo = 0;
+        while lo < total {
+            // `mid` may pass `total`: then `j >= hi` holds from the start and `order[j]` is never read.
+            let mid = lo + width;
+            var hi = lo + 2 * width;
+            if hi > total {
+                hi = total;
+            }
+            var i = lo;
+            var j = mid;
+            var k = lo;
+            while k < hi {
+                if i < mid && (j >= hi || !before(m, order[j], order[i])) {
+                    spare[k] = order[i];
+                    i = i + 1;
+                } else {
+                    spare[k] = order[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            lo = hi;
+        }
+        var c = 0;
+        while c < total {
+            order[c] = spare[c];
+            c = c + 1;
+        }
+        width = width * 2;
+    }
+    return 0;
+}
+
 // The answer: `{"total", "distinct", "skipped", "top": [...], "truncated"}`
 // and its text form.
 fn report[&h, &m](heap: &!h Heap, m: &m map.Map[int], c: Count, top: int) -> [heap] (buffer.Buffer, buffer.Buffer) {
@@ -265,7 +311,7 @@ fn report[&h, &m](heap: &!h Heap, m: &m map.Map[int], c: Count, top: int) -> [he
                 }
                 e = e + 1;
             }
-            sort.by_map(m, o, contents(sw), n, before);
+            order_entries(m, o, contents(sw), n);
         }
     }
     unbox_slice(heap, spare);

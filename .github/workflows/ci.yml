@@ -13,32 +13,16 @@ jobs:
         with:
           path: tools
 
-      # The compiler is whichever commit cancho.toml says these sources were
-      # written for: one place, which the compiler itself checks.
+      # The compiler is whichever release cancho.toml says these sources were
+      # written for: one place, which the compiler itself checks. Installed prebuilt.
       - name: Read the compiler pin from cancho.toml
         id: pin
-        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' tools/cancho.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f.]*\)".*/\1/p' tools/cancho.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
-        with:
-          repository: alpibrusl/cancho
-          ref: ${{ steps.pin.outputs.rev }}
-          path: cancho
-
-      - name: Cache the compiler
-        id: compiler
-        uses: actions/cache@v4
-        with:
-          path: cancho/target/release/cancho
-          key: cancho-${{ steps.pin.outputs.rev }}
-
-      - name: Build cancho
-        if: steps.compiler.outputs.cache-hit != 'true'
-        working-directory: cancho
-        run: cargo build --release -p cancho
-
-      - name: Put the compiler on PATH
-        run: echo "$GITHUB_WORKSPACE/cancho/target/release" >> "$GITHUB_PATH"
+      - name: Install the pinned compiler
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "${{ steps.pin.outputs.rev }}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: What the gates compare against (jq, strace, ripgrep), count instructions with (valgrind) and validate with (jsonschema)
         run: |
@@ -98,28 +82,12 @@ jobs:
 
       - name: Read the compiler pin from cancho.toml
         id: pin
-        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f]*\)".*/\1/p' tools/cancho.toml)" >> "$GITHUB_OUTPUT"
+        run: echo "rev=$(sed -n 's/^cancho *= *"\([0-9a-f.]*\)".*/\1/p' tools/cancho.toml)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
-        with:
-          repository: alpibrusl/cancho
-          ref: ${{ steps.pin.outputs.rev }}
-          path: cancho
-
-      - name: Cache the compiler
-        id: compiler
-        uses: actions/cache@v4
-        with:
-          path: cancho/target/release/cancho
-          key: cancho-${{ steps.pin.outputs.rev }}
-
-      - name: Build cancho
-        if: steps.compiler.outputs.cache-hit != 'true'
-        working-directory: cancho
-        run: cargo build --release -p cancho
-
-      - name: Put the compiler on PATH
-        run: echo "$GITHUB_WORKSPACE/cancho/target/release" >> "$GITHUB_PATH"
+      - name: Install the pinned compiler
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/alpibrusl/cancho/main/scripts/install.sh | sh -s "${{ steps.pin.outputs.rev }}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: valgrind (the cost gate counts instructions) and jsonschema (the conformance harness imports it)
         run: |

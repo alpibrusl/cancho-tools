@@ -46,7 +46,8 @@
     {
       "name": "fs_read",
       "argument": "",
-      "bounded": true
+      "bounded": true,
+      "confinement": "lexical"
     },
     {
       "name": "heap",
@@ -388,7 +389,5 @@
     "xround",
     "xxh64"
   ],
-  "folded_operators": 109,
-  "folded_calls": 16,
   "functions": 589
 }

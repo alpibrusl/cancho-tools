@@ -167,7 +167,9 @@ fn apply[&h, &g, &p, &f, &s](heap: &!h Heap, args: &g Args, parsed: &p cli.Parse
                     buffer.drop(heap, listed);
                     listed = lines;
                     o = Outcome { changed: false, planned: false, replacements: found, bytes: len(content), diff_truncated: cut };
-                    if cli.has(parsed, table, "dry-run") {
+                    if bytes.equal(have, content) {
+                        // The replacement leaves the file as it is: nothing is written and nothing changed (see the header).
+                    } else if cli.has(parsed, table, "dry-run") {
                         o = Outcome { changed: false, planned: true, replacements: found, bytes: len(content), diff_truncated: cut };
                     } else {
                         var failed_errno = 0;

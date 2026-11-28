@@ -183,7 +183,7 @@
     "upper",
     "valid",
     "value_index",
-    "value_is_whole",
+    "value_offset",
     "width_of"
   ],
   "functions": 237

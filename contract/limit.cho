@@ -47,10 +47,20 @@ pub fn too_long[&h, &g, &p, &s, &m](heap: &!h Heap, e: fail.Errors, args: &g Arg
     let at = cli.value_index(parsed, table, "max-line-bytes");
     var n = buffer.empty(heap, 20);
     n = buffer.push_nat(heap, n, l.longest);
-    if l.longest <= ceiling && at >= 0 && cli.value_is_whole(parsed, table, "max-line-bytes") {
+    if l.longest <= ceiling && at >= 0 {
+        // The argument keeps its own spelling up to the value: `--max-line-bytes N` is the number alone, and
+        // `--max-line-bytes=N` keeps `--max-line-bytes=` and replaces only the number.
+        let off = cli.value_offset(parsed, table, "max-line-bytes");
+        let given = arg(args, at);
+        var replacement = buffer.empty(heap, 32);
+        replacement = buffer.append(heap, replacement, given[0..off]);
         borrow n as &r in {
-            w = fail.retry_replacing(heap, w, args, at, buffer.bytes(r));
+            replacement = buffer.append(heap, replacement, buffer.bytes(r));
         }
+        borrow replacement as &p in {
+            w = fail.retry_replacing(heap, w, args, at, buffer.bytes(p));
+        }
+        buffer.drop(heap, replacement);
     } else if l.longest <= ceiling && at < 0 {
         var o = fail.retry_open(heap, w);
         var i = 0;

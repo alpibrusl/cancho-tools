@@ -633,3 +633,15 @@ pub fn subcommand[&g](args: &g Args) -> [args] int {
     }
     return 0;
 }
+
+pub fn value_offset[&p, &n](p: &p Parsed, table: &static [byte], name: &n [byte]) -> [] int {
+    let i = index_of(table, name);
+    if i < 0 {
+        return 0 - 1;
+    }
+    let s = contents(p.slots);
+    if s[3 * i] == 0 {
+        return 0 - 1;
+    }
+    return s[3 * i + 2];
+}

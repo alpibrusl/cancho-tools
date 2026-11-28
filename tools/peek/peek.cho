@@ -143,7 +143,7 @@ fn read_lines[&h, &f](heap: &!h Heap, file: &!f File, from: int, to: int, budget
         if status == lines.need() {
             r = lines.fill_file(r, file);
         } else if status == lines.done() {
-            s = Seen { size: s.size, first: s.first, last: s.last, eof: true, truncated: s.truncated, next: s.next, total: s.total, long_count: s.long_count, long_first: s.long_first, long_most: s.long_most, binary: s.binary };
+            s = Seen { size: s.size, first: s.first, last: s.last, eof: !s.truncated && s.next < 0, truncated: s.truncated, next: s.next, total: s.total, long_count: s.long_count, long_first: s.long_first, long_most: s.long_most, binary: s.binary };
             going = false;
         } else {
             var n = 0;
@@ -194,9 +194,10 @@ fn read_lines[&h, &f](heap: &!h Heap, file: &!f File, from: int, to: int, budget
                 }
                 items = json.end_object(heap, items);
             }
-            if to >= 0 && n >= to && !count_all {
-                going = false;
-                // Whether this was the last line is known only by looking.
+            if to >= 0 && n == to {
+                // The range ends here. Whether anything follows is known only
+                // by looking, once. `--count-lines` keeps reading to count the
+                // rest, but the answer about the cursor is settled here.
                 let (after, status2) = lines.next(heap, r);
                 r = after;
                 var more = status2;
@@ -207,9 +208,12 @@ fn read_lines[&h, &f](heap: &!h Heap, file: &!f File, from: int, to: int, budget
                     more = status3;
                 }
                 if more == lines.done() {
-                    s = Seen { size: s.size, first: s.first, last: s.last, eof: true, truncated: s.truncated, next: s.next, total: s.total, long_count: s.long_count, long_first: s.long_first, long_most: s.long_most, binary: s.binary };
+                    s = Seen { size: s.size, first: s.first, last: s.last, eof: !s.truncated, truncated: s.truncated, next: s.next, total: s.total, long_count: s.long_count, long_first: s.long_first, long_most: s.long_most, binary: s.binary };
                 } else if !s.truncated {
                     s = Seen { size: s.size, first: s.first, last: s.last, eof: false, truncated: s.truncated, next: n + 1, total: s.total, long_count: s.long_count, long_first: s.long_first, long_most: s.long_most, binary: s.binary };
+                }
+                if !count_all {
+                    going = false;
                 }
             } else if past && !count_all {
                 going = false;

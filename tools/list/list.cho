@@ -168,9 +168,9 @@ fn report[&h, &i, &p](heap: &!h Heap, io: &!i Io, plan: Plan, shown: &p [byte], 
 fn walk[&h, &i, &d, &p](heap: &!h Heap, io: &!i Io, plan: Plan, dir: &d Dir, prefix: &p [byte], depth: int, errs: fail.Errors, state: Walk) -> [heap, dir_read, io_write] (fail.Errors, Walk) {
     var e = errs;
     var w = state;
-    // Never more names than the run could still report, plus one to know it
-    // was cut.
-    let names = dirs.list(heap, dir, plan.skip + plan.most + 1);
+    // Every name of the directory, then the sort and the cut: a page of the sorted listing is the first names in sorted order,
+    // so the listing cannot be cut before it is sorted. The names of one directory are held up to the tool's ceiling.
+    let names = dirs.list(heap, dir, most_entries() + 1);
     borrow names as &n in {
         if dirs.failed(n) != 0 {
             e = fail.io_error(heap, e, dirs.failed(n), false, prefix);
